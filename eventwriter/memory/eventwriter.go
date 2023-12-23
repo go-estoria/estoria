@@ -12,9 +12,13 @@ func NewEventWriter(events continuum.EventMap) *EventWriter {
 	}
 }
 
-func (s *EventWriter) WriteEvents(events []continuum.Event) error {
+func (s *EventWriter) WriteEvents(events []*continuum.Event) error {
 	for _, event := range events {
-		s.events[event.AggregateID][event.Data.EventTypeName()] = append(
+		if _, ok := s.events[event.Data.EventTypeName()]; !ok {
+			s.events[event.Data.EventTypeName()] = make(map[string][]*continuum.Event)
+		}
+
+		s.events[event.Data.EventTypeName()][event.AggregateID] = append(
 			s.events[event.Data.EventTypeName()][event.AggregateID],
 			event,
 		)

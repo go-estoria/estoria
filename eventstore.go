@@ -3,11 +3,11 @@ package continuum
 import "fmt"
 
 type EventReader interface {
-	ReadEvents(aggregateType, aggregateID string, fromVersion, toVersion int64) ([]Event, error)
+	ReadEvents(aggregateType, aggregateID string, fromVersion, toVersion int64) ([]*Event, error)
 }
 
 type EventWriter interface {
-	WriteEvents(events []Event) error
+	WriteEvents(events []*Event) error
 }
 
 type LoadOptions struct {
@@ -20,7 +20,7 @@ type EventStore struct {
 	Writer EventWriter
 }
 
-func (s *EventStore) LoadEvents(aggregateType, aggregateID string, opts ...LoadOptions) ([]Event, error) {
+func (s *EventStore) LoadEvents(aggregateType, aggregateID string, opts ...LoadOptions) ([]*Event, error) {
 	if s.Reader == nil {
 		return nil, fmt.Errorf("no event reader configured")
 	}
@@ -49,7 +49,7 @@ func (s *EventStore) LoadEvents(aggregateType, aggregateID string, opts ...LoadO
 	return events, nil
 }
 
-func (s *EventStore) SaveEvents(events []Event) error {
+func (s *EventStore) SaveEvents(events []*Event) error {
 	if s.Writer == nil {
 		return fmt.Errorf("no event writer configured")
 	}
