@@ -7,19 +7,21 @@ import (
 )
 
 type MemoryAggregateStore[AD continuum.AggregateData] struct {
-	EventStore *continuum.EventStore
+	EventStore       *continuum.EventStore
+	AggregateFactory func() AD
 }
 
-func New[AD continuum.AggregateData](eventStore *continuum.EventStore) *MemoryAggregateStore[AD] {
+func New[AD continuum.AggregateData](eventStore *continuum.EventStore, factory func() AD) *MemoryAggregateStore[AD] {
 	return &MemoryAggregateStore[AD]{
-		EventStore: eventStore,
+		EventStore:       eventStore,
+		AggregateFactory: factory,
 	}
 }
 
 func (s *MemoryAggregateStore[AD]) Create(aggregateID string) (*continuum.Aggregate[AD], error) {
 	aggregate := &continuum.Aggregate[AD]{
 		ID:            aggregateID,
-		Data:          *new(AD),
+		Data:          s.AggregateFactory(),
 		Events:        make([]*continuum.Event, 0),
 		UnsavedEvents: make([]*continuum.Event, 0),
 		Version:       1,
@@ -53,7 +55,7 @@ func (s *MemoryAggregateStore[AD]) Load(aggregateID string) (*continuum.Aggregat
 	}
 
 	for _, event := range events {
-		if err := aggregate.Apply(event.Data); err != nil {
+		if err := aggregate.Apply(event); err != nil {
 			return nil, fmt.Errorf("applying event: %w", err)
 		}
 	}
@@ -65,6 +67,8 @@ func (s *MemoryAggregateStore[AD]) Save(a *continuum.Aggregate[AD]) error {
 	if err := s.EventStore.SaveEvents(a.UnsavedEvents); err != nil {
 		return fmt.Errorf("saving events: %w", err)
 	}
+
+	a.UnsavedEvents = make([]*continuum.Event, 0)
 
 	return nil
 }

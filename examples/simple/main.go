@@ -30,6 +30,10 @@ func (a *Account) ApplyEvent(event continuum.EventData) error {
 	}
 }
 
+func (a *Account) String() string {
+	return fmt.Sprintf("Account{Users: %v}", a.Users)
+}
+
 type UserCreatedEvent struct {
 	Username string
 }
@@ -40,22 +44,24 @@ func (e *UserCreatedEvent) EventTypeName() string {
 
 func main() {
 	eventStore := memoryeventstore.NewEventStore()
-	aggregateStore := aggregatestore.New[*Account](eventStore)
+	aggregateStore := aggregatestore.New[*Account](eventStore, func() *Account {
+		return &Account{}
+	})
 
 	aggregate, err := aggregateStore.Create("123")
 	if err != nil {
 		panic(err)
 	}
 
-	if err := aggregateStore.Save(aggregate); err != nil {
-		panic(err)
-	}
-
-	if err := aggregate.Apply(&UserCreatedEvent{Username: "jdoe"}); err != nil {
+	if err := aggregate.Append(&UserCreatedEvent{Username: "jdoe"}); err != nil {
 		panic(err)
 	}
 
 	if err := aggregateStore.Save(aggregate); err != nil {
 		panic(err)
 	}
+
+	fmt.Printf("%#v\n\n", aggregate)
+	account := aggregate.Data
+	fmt.Println(account)
 }

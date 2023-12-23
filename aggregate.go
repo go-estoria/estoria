@@ -15,17 +15,25 @@ type Aggregate[D AggregateData] struct {
 	Data          D
 }
 
-func (a *Aggregate[D]) Apply(event EventData) error {
-	if err := a.Data.ApplyEvent(event); err != nil {
-		return fmt.Errorf("applying event: %w", err)
-	}
-
+func (a *Aggregate[D]) Append(event EventData) error {
+	a.Version++
 	a.UnsavedEvents = append(a.Events, &Event{
 		AggregateID:   a.ID,
 		AggregateType: a.TypeName(),
 		Data:          event,
-		Version:       a.Version + 1,
+		Version:       a.Version,
 	})
+
+	return nil
+}
+
+func (a *Aggregate[D]) Apply(event *Event) error {
+	if err := a.Data.ApplyEvent(event.Data); err != nil {
+		return fmt.Errorf("applying event: %w", err)
+	}
+
+	a.Events = append(a.Events, event)
+	a.Version = event.Version
 
 	return nil
 }
