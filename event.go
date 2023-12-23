@@ -11,8 +11,7 @@ type Event struct {
 }
 
 type EventData interface {
-	Type() string
-	Version() int64
+	EventType() string
 }
 
 // EventMap maps aggregate types to aggregate IDs to slices of events.

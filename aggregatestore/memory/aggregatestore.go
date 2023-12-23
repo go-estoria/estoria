@@ -6,20 +6,26 @@ type MemoryAggregateStore struct {
 	Aggregates continuum.AggregateMap
 }
 
-func (s *MemoryAggregateStore) Load(aggregateType, id string) (continuum.Aggregate, error) {
+func NewAggregateStore(eventStore *continuum.EventStore) *MemoryAggregateStore {
+	return &MemoryAggregateStore{
+		Aggregates: make(continuum.AggregateMap),
+	}
+}
+
+func (s *MemoryAggregateStore) Load(aggregateType, aggregateID string) (continuum.Aggregate, error) {
 	aggregates, ok := s.Aggregates[aggregateType]
 	if !ok {
 		return continuum.Aggregate{}, continuum.AggregateNotFoundError{
 			Type: aggregateType,
-			ID:   id,
+			ID:   aggregateID,
 		}
 	}
 
-	aggregate, ok := aggregates[id]
+	aggregate, ok := aggregates[aggregateID]
 	if !ok {
 		return continuum.Aggregate{}, continuum.AggregateNotFoundError{
 			Type: aggregateType,
-			ID:   id,
+			ID:   aggregateID,
 		}
 	}
 
