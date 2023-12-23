@@ -8,10 +8,10 @@ import (
 
 type MemoryAggregateStore[AD continuum.AggregateData] struct {
 	EventStore       *continuum.EventStore
-	AggregateFactory func() AD
+	AggregateFactory func(id string) AD
 }
 
-func New[AD continuum.AggregateData](eventStore *continuum.EventStore, factory func() AD) *MemoryAggregateStore[AD] {
+func New[AD continuum.AggregateData](eventStore *continuum.EventStore, factory func(id string) AD) *MemoryAggregateStore[AD] {
 	return &MemoryAggregateStore[AD]{
 		EventStore:       eventStore,
 		AggregateFactory: factory,
@@ -21,7 +21,7 @@ func New[AD continuum.AggregateData](eventStore *continuum.EventStore, factory f
 func (s *MemoryAggregateStore[AD]) Create(aggregateID string) (*continuum.Aggregate[AD], error) {
 	aggregate := &continuum.Aggregate[AD]{
 		ID:            aggregateID,
-		Data:          s.AggregateFactory(),
+		Data:          s.AggregateFactory(aggregateID),
 		Events:        make([]*continuum.Event, 0),
 		UnsavedEvents: make([]*continuum.Event, 0),
 		Version:       0,
@@ -35,7 +35,7 @@ func (s *MemoryAggregateStore[AD]) Create(aggregateID string) (*continuum.Aggreg
 }
 
 func (s *MemoryAggregateStore[AD]) Load(aggregateID string) (*continuum.Aggregate[AD], error) {
-	aggregateData := s.AggregateFactory()
+	aggregateData := s.AggregateFactory(aggregateID)
 	aggregateType := aggregateData.AggregateTypeName()
 	events, err := s.EventStore.LoadEvents(aggregateType, aggregateID)
 	if err != nil {

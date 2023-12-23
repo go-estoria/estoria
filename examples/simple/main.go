@@ -9,7 +9,12 @@ import (
 )
 
 type Account struct {
+	ID    string
 	Users []string
+}
+
+func (a *Account) AggregateID() string {
+	return a.ID
 }
 
 func (a *Account) AggregateTypeName() string {
@@ -17,12 +22,12 @@ func (a *Account) AggregateTypeName() string {
 }
 
 func (a *Account) ApplyEvent(event continuum.EventData) error {
+	if a == nil {
+		a = &Account{}
+	}
+
 	switch e := event.(type) {
 	case *UserCreatedEvent:
-		if a == nil {
-			a = &Account{}
-		}
-
 		a.Users = append(a.Users, e.Username)
 		return nil
 	default:
@@ -31,7 +36,7 @@ func (a *Account) ApplyEvent(event continuum.EventData) error {
 }
 
 func (a *Account) String() string {
-	return fmt.Sprintf("Account{Users: %v}", a.Users)
+	return fmt.Sprintf("Account %s {Users: %v}", a.ID, a.Users)
 }
 
 type UserCreatedEvent struct {
@@ -44,8 +49,11 @@ func (e *UserCreatedEvent) EventTypeName() string {
 
 func main() {
 	eventStore := memoryeventstore.NewEventStore()
-	aggregateStore := aggregatestore.New[*Account](eventStore, func() *Account {
-		return &Account{}
+	aggregateStore := aggregatestore.New[*Account](eventStore, func(id string) *Account {
+		return &Account{
+			ID:    id,
+			Users: make([]string, 0),
+		}
 	})
 
 	aggregate, err := aggregateStore.Create("123")
@@ -66,7 +74,7 @@ func main() {
 		panic(err)
 	}
 
-	fmt.Printf("\n\n%#v\n\n", aggregate)
+	fmt.Printf("%#v\n\n", aggregate)
 	account := aggregate.Data
 	fmt.Println(account)
 }

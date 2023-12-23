@@ -3,6 +3,7 @@ package continuum
 import "fmt"
 
 type AggregateData interface {
+	AggregateID() string
 	AggregateTypeName() string
 	ApplyEvent(event EventData) error
 }
