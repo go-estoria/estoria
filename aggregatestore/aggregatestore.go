@@ -24,7 +24,7 @@ func (s *MemoryAggregateStore[AD]) Create(aggregateID string) (*continuum.Aggreg
 		Data:          s.AggregateFactory(),
 		Events:        make([]*continuum.Event, 0),
 		UnsavedEvents: make([]*continuum.Event, 0),
-		Version:       1,
+		Version:       0,
 	}
 
 	if err := s.Save(aggregate); err != nil {
@@ -35,8 +35,8 @@ func (s *MemoryAggregateStore[AD]) Create(aggregateID string) (*continuum.Aggreg
 }
 
 func (s *MemoryAggregateStore[AD]) Load(aggregateID string) (*continuum.Aggregate[AD], error) {
-	aggregateData := new(AD)
-	aggregateType := (*aggregateData).AggregateTypeName()
+	aggregateData := s.AggregateFactory()
+	aggregateType := aggregateData.AggregateTypeName()
 	events, err := s.EventStore.LoadEvents(aggregateType, aggregateID)
 	if err != nil {
 		return nil, fmt.Errorf("loading events: %w", err)
@@ -48,7 +48,7 @@ func (s *MemoryAggregateStore[AD]) Load(aggregateID string) (*continuum.Aggregat
 
 	aggregate := &continuum.Aggregate[AD]{
 		ID:            aggregateID,
-		Data:          *aggregateData,
+		Data:          aggregateData,
 		Events:        events,
 		UnsavedEvents: make([]*continuum.Event, 0),
 		Version:       events[len(events)-1].Version,

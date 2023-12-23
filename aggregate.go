@@ -32,7 +32,6 @@ func (a *Aggregate[D]) Apply(event *Event) error {
 		return fmt.Errorf("applying event: %w", err)
 	}
 
-	a.Events = append(a.Events, event)
 	a.Version = event.Version
 
 	return nil

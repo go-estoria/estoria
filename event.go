@@ -14,5 +14,8 @@ type Event struct {
 	Version       int64
 }
 
-// EventMap maps aggregate types to aggregate IDs to slices of events.
-type EventMap map[string]map[string][]*Event
+// EventsByID maps aggregate IDs to events.
+type EventsByID map[string][]*Event
+
+// EventsByAggregateType maps aggregate types to events by ID.
+type EventsByAggregateType map[string]EventsByID

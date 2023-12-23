@@ -61,7 +61,12 @@ func main() {
 		panic(err)
 	}
 
-	fmt.Printf("%#v\n\n", aggregate)
+	aggregate, err = aggregateStore.Load("123")
+	if err != nil {
+		panic(err)
+	}
+
+	fmt.Printf("\n\n%#v\n\n", aggregate)
 	account := aggregate.Data
 	fmt.Println(account)
 }

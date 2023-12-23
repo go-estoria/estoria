@@ -7,7 +7,7 @@ import (
 )
 
 func NewEventStore() *continuum.EventStore {
-	events := make(continuum.EventMap)
+	events := make(continuum.EventsByAggregateType)
 	return &continuum.EventStore{
 		Reader: memoryeventreader.NewEventReader(events),
 		Writer: memoryeventwriter.NewEventWriter(events),

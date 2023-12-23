@@ -2,21 +2,27 @@ package memory
 
 import (
 	"fmt"
+	"log/slog"
 
 	"github.com/jefflinse/continuum"
 )
 
 type EventReader struct {
-	events continuum.EventMap
+	events continuum.EventsByAggregateType
 }
 
-func NewEventReader(events continuum.EventMap) *EventReader {
+func NewEventReader(events continuum.EventsByAggregateType) *EventReader {
 	return &EventReader{
 		events: events,
 	}
 }
 
 func (s *EventReader) ReadEvents(aggregateType, aggregateID string, fromVersion int64, toVersion int64) ([]*continuum.Event, error) {
+	if _, ok := s.events[aggregateType]; !ok {
+		slog.Info("events", "events", s.events)
+		return nil, fmt.Errorf("aggregate type not found: %s", aggregateType)
+	}
+
 	events, ok := s.events[aggregateType][aggregateID]
 	if !ok {
 		return nil, fmt.Errorf("aggregate not found: %s", aggregateID)

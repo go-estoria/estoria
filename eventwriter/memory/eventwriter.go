@@ -1,12 +1,16 @@
 package eventwriter
 
-import "github.com/jefflinse/continuum"
+import (
+	"log/slog"
+
+	"github.com/jefflinse/continuum"
+)
 
 type EventWriter struct {
-	events continuum.EventMap
+	events continuum.EventsByAggregateType
 }
 
-func NewEventWriter(events continuum.EventMap) *EventWriter {
+func NewEventWriter(events continuum.EventsByAggregateType) *EventWriter {
 	return &EventWriter{
 		events: events,
 	}
@@ -14,12 +18,14 @@ func NewEventWriter(events continuum.EventMap) *EventWriter {
 
 func (s *EventWriter) WriteEvents(events []*continuum.Event) error {
 	for _, event := range events {
-		if _, ok := s.events[event.Data.EventTypeName()]; !ok {
-			s.events[event.Data.EventTypeName()] = make(map[string][]*continuum.Event)
+		if _, ok := s.events[event.AggregateType]; !ok {
+			slog.Info("creating event type map", "event_type", event.Data.EventTypeName())
+			s.events[event.AggregateType] = make(continuum.EventsByID)
 		}
 
-		s.events[event.Data.EventTypeName()][event.AggregateID] = append(
-			s.events[event.Data.EventTypeName()][event.AggregateID],
+		slog.Info("appending event to event type map", "event_type", event.Data.EventTypeName(), "aggregate_id", event.AggregateID)
+		s.events[event.AggregateType][event.AggregateID] = append(
+			s.events[event.AggregateType][event.AggregateID],
 			event,
 		)
 	}
