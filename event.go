@@ -2,16 +2,16 @@ package continuum
 
 import "time"
 
-type Event struct {
-	AggregateID string
-	Time        time.Time
-	Version     int64
-	Metadata    map[string]any
-	Data        EventData
+type EventData interface {
+	EventTypeName() string
 }
 
-type EventData interface {
-	EventType() string
+type Event struct {
+	AggregateType string
+	AggregateID   string
+	Time          time.Time
+	Data          EventData
+	Version       int64
 }
 
 // EventMap maps aggregate types to aggregate IDs to slices of events.

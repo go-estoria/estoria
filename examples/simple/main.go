@@ -1,36 +1,48 @@
 package main
 
 import (
-	"github.com/jefflinse/continuum"
 	memoryaggregatestore "github.com/jefflinse/continuum/aggregatestore/memory"
 	memoryeventstore "github.com/jefflinse/continuum/eventstore/memory"
 )
 
-type UserCreatedEvent struct {
+type Account struct {
+	Users []string
+}
+
+func (a *Account) AggregateTypeName() string {
+	return "account"
+}
+
+type UserCreatedEvent[A Account] struct {
 	Username string
 }
 
-func (e UserCreatedEvent) EventType() string {
+func (e *UserCreatedEvent[A]) EventTypeName() string {
 	return "user:created"
 }
 
-var _ continuum.EventData = &UserCreatedEvent{}
+func (e *UserCreatedEvent[A]) Apply(aggregate A) error {
+	account := (Account)(aggregate)
+	account.Users = append(account.Users, e.Username)
+	return nil
+}
 
 func main() {
 	eventStore := memoryeventstore.NewEventStore()
-	aggregateStore := memoryaggregatestore.NewAggregateStore(eventStore)
-	aggregateStore.Save(continuum.Aggregate{
-		Type: "user",
-		ID:   "123",
-	})
+	aggregateStore := memoryaggregatestore.NewAggregateStore[*Account](eventStore)
 
-	aggregate, err := aggregateStore.Load("user", "123")
+	aggregate, err := aggregateStore.Create("123")
 	if err != nil {
 		panic(err)
 	}
 
-	aggregate.Apply(&continuum.Event{
-		AggregateID: "123",
-		Data:        UserCreatedEvent{Username: "jdoe"},
-	})
+	if err := aggregateStore.Save(aggregate); err != nil {
+		panic(err)
+	}
+
+	aggregate.Apply(&UserCreatedEvent[Account]{Username: "jdoe"})
+
+	if err := aggregateStore.Save(aggregate); err != nil {
+		panic(err)
+	}
 }

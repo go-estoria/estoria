@@ -1,43 +1,49 @@
 package aggregatestore
 
-import "github.com/jefflinse/continuum"
+import (
+	"fmt"
 
-type MemoryAggregateStore struct {
-	Aggregates continuum.AggregateMap
+	"github.com/jefflinse/continuum"
+)
+
+type MemoryAggregateStore[AD continuum.AggregateData] struct {
+	Aggregates continuum.AggregatesByID[AD]
 }
 
-func NewAggregateStore(eventStore *continuum.EventStore) *MemoryAggregateStore {
-	return &MemoryAggregateStore{
-		Aggregates: make(continuum.AggregateMap),
+func NewAggregateStore[AD continuum.AggregateData](eventStore *continuum.EventStore) *MemoryAggregateStore[AD] {
+	return &MemoryAggregateStore[AD]{
+		Aggregates: make(continuum.AggregatesByID[AD]),
 	}
 }
 
-func (s *MemoryAggregateStore) Load(aggregateType, aggregateID string) (continuum.Aggregate, error) {
-	aggregates, ok := s.Aggregates[aggregateType]
-	if !ok {
-		return continuum.Aggregate{}, continuum.AggregateNotFoundError{
-			Type: aggregateType,
-			ID:   aggregateID,
-		}
+func (s *MemoryAggregateStore[AD]) Create(aggregateID string) (*continuum.Aggregate[AD], error) {
+	aggregate := &continuum.Aggregate[AD]{
+		ID:            aggregateID,
+		Data:          *new(AD),
+		Events:        make([]*continuum.Event, 0),
+		UnsavedEvents: make([]*continuum.Event, 0),
+		Version:       1,
 	}
 
-	aggregate, ok := aggregates[aggregateID]
+	if err := s.Save(aggregate); err != nil {
+		return nil, fmt.Errorf("saving aggregate: %w", err)
+	}
+
+	return aggregate, nil
+}
+
+func (s *MemoryAggregateStore[AD]) Load(aggregateID string) (*continuum.Aggregate[AD], error) {
+	aggregate, ok := s.Aggregates[aggregateID]
 	if !ok {
-		return continuum.Aggregate{}, continuum.AggregateNotFoundError{
-			Type: aggregateType,
-			ID:   aggregateID,
+		return nil, continuum.AggregateNotFoundError[AD]{
+			ID: aggregateID,
 		}
 	}
 
 	return aggregate, nil
 }
 
-func (s *MemoryAggregateStore) Save(a continuum.Aggregate) error {
-	if _, ok := s.Aggregates[a.Type]; !ok {
-		s.Aggregates[a.Type] = make(map[string]continuum.Aggregate)
-	}
-
-	s.Aggregates[a.Type][a.ID] = a
-
+func (s *MemoryAggregateStore[AD]) Save(a *continuum.Aggregate[AD]) error {
+	s.Aggregates[a.ID] = a
 	return nil
 }
