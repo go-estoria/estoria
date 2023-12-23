@@ -10,3 +10,6 @@ type Aggregate struct {
 func (a *Aggregate) Apply(e Event) {
 	a.Events = append(a.Events, e)
 }
+
+// AggregateMap maps aggregate types to aggregate IDs to aggregates.
+type AggregateMap map[string]map[string]Aggregate

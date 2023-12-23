@@ -14,3 +14,6 @@ type EventData interface {
 	Type() string
 	Version() int64
 }
+
+// EventMap maps aggregate types to aggregate IDs to slices of events.
+type EventMap map[string]map[string][]Event

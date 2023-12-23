@@ -3,7 +3,7 @@ package continuum
 import "fmt"
 
 type EventReader interface {
-	ReadEvents(aggregateID string, eventTypes []string, fromVersion, toVersion int64) ([]Event, error)
+	ReadEvents(aggregateType, aggregateID string, fromVersion, toVersion int64) ([]Event, error)
 }
 
 type EventWriter interface {
@@ -13,7 +13,6 @@ type EventWriter interface {
 type LoadOptions struct {
 	FromVersion int64
 	ToVersion   int64
-	EventTypes  []string
 }
 
 type EventStore struct {
@@ -21,7 +20,7 @@ type EventStore struct {
 	Writer EventWriter
 }
 
-func (s *EventStore) LoadEvents(aggregateID string, opts ...LoadOptions) ([]Event, error) {
+func (s *EventStore) LoadEvents(aggregateType, aggregateID string, opts ...LoadOptions) ([]Event, error) {
 	if s.Reader == nil {
 		return nil, fmt.Errorf("no event reader configured")
 	}
@@ -36,16 +35,13 @@ func (s *EventStore) LoadEvents(aggregateID string, opts ...LoadOptions) ([]Even
 			mergedOpts.ToVersion = opt.ToVersion
 		}
 
-		if len(opt.EventTypes) > 0 {
-			mergedOpts.EventTypes = append(mergedOpts.EventTypes, opt.EventTypes...)
-		}
 	}
 
 	if mergedOpts.FromVersion > 0 && mergedOpts.ToVersion > 0 && mergedOpts.FromVersion > mergedOpts.ToVersion {
 		return nil, fmt.Errorf("invalid version range: from %d to %d", mergedOpts.FromVersion, mergedOpts.ToVersion)
 	}
 
-	events, err := s.Reader.ReadEvents(aggregateID, mergedOpts.EventTypes, mergedOpts.FromVersion, mergedOpts.ToVersion)
+	events, err := s.Reader.ReadEvents(aggregateType, aggregateID, mergedOpts.FromVersion, mergedOpts.ToVersion)
 	if err != nil {
 		return nil, fmt.Errorf("reading events: %w", err)
 	}
