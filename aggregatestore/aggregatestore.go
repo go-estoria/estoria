@@ -44,13 +44,11 @@ func (s *AggregateStore[E]) Load(aggregateID string) (*continuum.Aggregate[E], e
 
 	aggregate.Events = events
 
-	slog.Info("loaded aggregate", "aggregate_id", aggregate.ID, "aggregate_type", aggregate.TypeName(), "events", len(aggregate.Events))
-
-	for _, event := range aggregate.Events {
-		if err := aggregate.Apply(event); err != nil {
-			return nil, fmt.Errorf("applying event: %w", err)
-		}
+	if err := aggregate.Apply(aggregate.Events...); err != nil {
+		return nil, fmt.Errorf("applying event: %w", err)
 	}
+
+	slog.Info("loaded aggregate", "aggregate_id", aggregate.ID, "aggregate_type", aggregate.TypeName(), "events", len(aggregate.Events))
 
 	return aggregate, nil
 }

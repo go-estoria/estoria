@@ -77,15 +77,11 @@ func main() {
 		panic(err)
 	}
 
-	if err := aggregate.Append(&UserCreatedEvent{Username: "bschmoe"}); err != nil {
-		panic(err)
-	}
-
-	if err := aggregate.Append(&BalanceChangedEvent{Amount: 100}); err != nil {
-		panic(err)
-	}
-
-	if err := aggregate.Append(&BalanceChangedEvent{Amount: -14}); err != nil {
+	if err := aggregate.Append(
+		&BalanceChangedEvent{Amount: 100},
+		&UserCreatedEvent{Username: "bschmoe"},
+		&BalanceChangedEvent{Amount: -14},
+	); err != nil {
 		panic(err)
 	}
 
