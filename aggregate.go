@@ -12,7 +12,6 @@ type Entity interface {
 }
 
 type Aggregate[E Entity] struct {
-	ID            string
 	Version       int64
 	Events        []*Event
 	UnsavedEvents []*Event
@@ -20,10 +19,10 @@ type Aggregate[E Entity] struct {
 }
 
 func (a *Aggregate[E]) Append(event EventData) error {
-	slog.Info("appending event to aggregate", "event", event.EventTypeName(), "aggregate_id", a.ID)
+	slog.Info("appending event to aggregate", "event", event.EventTypeName(), "aggregate_id", a.ID())
 	a.Version++
 	a.UnsavedEvents = append(a.UnsavedEvents, &Event{
-		AggregateID:   a.ID,
+		AggregateID:   a.ID(),
 		AggregateType: a.TypeName(),
 		Data:          event,
 		Version:       a.Version,
@@ -33,7 +32,7 @@ func (a *Aggregate[E]) Append(event EventData) error {
 }
 
 func (a *Aggregate[E]) Apply(event *Event) error {
-	slog.Info("applying event to aggregate", "event", event.Data.EventTypeName(), "aggregate_id", a.ID)
+	slog.Info("applying event to aggregate", "event", event.Data.EventTypeName(), "aggregate_id", a.ID())
 	if err := a.Data.ApplyEvent(event.Data); err != nil {
 		return fmt.Errorf("applying event: %w", err)
 	}
@@ -41,6 +40,10 @@ func (a *Aggregate[E]) Apply(event *Event) error {
 	a.Version = event.Version
 
 	return nil
+}
+
+func (a *Aggregate[E]) ID() string {
+	return a.Data.AggregateID()
 }
 
 func (a *Aggregate[E]) TypeName() string {

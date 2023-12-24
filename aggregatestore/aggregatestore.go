@@ -22,7 +22,6 @@ func New[E continuum.Entity](eventStore *eventstore.EventStore, entityFactory fu
 
 func (s *AggregateStore[E]) Create(aggregateID string) (*continuum.Aggregate[E], error) {
 	aggregate := &continuum.Aggregate[E]{
-		ID:            aggregateID,
 		Data:          s.NewEntity(aggregateID),
 		Events:        make([]*continuum.Event, 0),
 		UnsavedEvents: make([]*continuum.Event, 0),
@@ -34,7 +33,7 @@ func (s *AggregateStore[E]) Create(aggregateID string) (*continuum.Aggregate[E],
 
 func (s *AggregateStore[E]) Load(aggregateID string) (*continuum.Aggregate[E], error) {
 	aggregate, err := s.Create(aggregateID)
-	events, err := s.EventStore.LoadEvents(aggregate.TypeName(), aggregate.ID)
+	events, err := s.EventStore.LoadEvents(aggregate.TypeName(), aggregate.ID())
 	if err != nil {
 		return nil, fmt.Errorf("loading events: %w", err)
 	}
