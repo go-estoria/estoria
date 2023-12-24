@@ -22,10 +22,6 @@ func (a *Account) AggregateTypeName() string {
 }
 
 func (a *Account) ApplyEvent(event continuum.EventData) error {
-	if a == nil {
-		a = &Account{}
-	}
-
 	switch e := event.(type) {
 	case *UserCreatedEvent:
 		a.Users = append(a.Users, e.Username)
