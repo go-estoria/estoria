@@ -18,15 +18,18 @@ type Aggregate[E Entity] struct {
 	Data          E
 }
 
-func (a *Aggregate[E]) Append(event EventData) error {
-	slog.Info("appending event to aggregate", "event", event.EventTypeName(), "aggregate_id", a.ID())
-	a.Version++
-	a.UnsavedEvents = append(a.UnsavedEvents, &Event{
-		AggregateID:   a.ID(),
-		AggregateType: a.TypeName(),
-		Data:          event,
-		Version:       a.Version,
-	})
+func (a *Aggregate[E]) Append(events ...EventData) error {
+	slog.Info("appending events to aggregate", "events", len(events), "aggregate_id", a.ID())
+
+	for _, event := range events {
+		a.Version++
+		a.UnsavedEvents = append(a.UnsavedEvents, &Event{
+			AggregateID:   a.ID(),
+			AggregateType: a.TypeName(),
+			Data:          event,
+			Version:       a.Version,
+		})
+	}
 
 	return nil
 }
