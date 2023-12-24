@@ -60,15 +60,15 @@ func (e *BalanceChangedEvent) EventType() string {
 
 func main() {
 	eventStore := eventstore.NewMemoryEventStore()
-	aggregateStore := aggregatestore.New[*Account](eventStore, func(id string) *Account {
+	aggregateStore := aggregatestore.New[*Account](eventStore, func(id continuum.Identifier) *Account {
 		return &Account{
-			ID:      id,
+			ID:      id.String(),
 			Users:   make([]string, 0),
 			Balance: 0,
 		}
 	})
 
-	aggregate, err := aggregateStore.Create("123")
+	aggregate, err := aggregateStore.Create(continuum.StringID("123"))
 	if err != nil {
 		panic(err)
 	}
@@ -89,7 +89,7 @@ func main() {
 		panic(err)
 	}
 
-	aggregate, err = aggregateStore.Load("123")
+	aggregate, err = aggregateStore.Load(continuum.StringID("123"))
 	if err != nil {
 		panic(err)
 	}

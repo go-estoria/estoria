@@ -4,7 +4,7 @@ import "fmt"
 
 type AggregateNotFoundError[E Entity] struct {
 	Entity E
-	ID     string
+	ID     Identifier
 }
 
 func (e AggregateNotFoundError[E]) Error() string {

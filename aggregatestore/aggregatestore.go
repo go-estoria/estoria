@@ -10,17 +10,17 @@ import (
 
 type AggregateStore[E continuum.Entity] struct {
 	EventStore *eventstore.EventStore
-	NewEntity  func(id string) E
+	NewEntity  func(id continuum.Identifier) E
 }
 
-func New[E continuum.Entity](eventStore *eventstore.EventStore, entityFactory func(id string) E) *AggregateStore[E] {
+func New[E continuum.Entity](eventStore *eventstore.EventStore, entityFactory func(id continuum.Identifier) E) *AggregateStore[E] {
 	return &AggregateStore[E]{
 		EventStore: eventStore,
 		NewEntity:  entityFactory,
 	}
 }
 
-func (s *AggregateStore[E]) Create(aggregateID string) (*continuum.Aggregate[E], error) {
+func (s *AggregateStore[E]) Create(aggregateID continuum.Identifier) (*continuum.Aggregate[E], error) {
 	aggregate := &continuum.Aggregate[E]{
 		Data:          s.NewEntity(aggregateID),
 		Events:        make([]*continuum.Event, 0),
@@ -31,7 +31,7 @@ func (s *AggregateStore[E]) Create(aggregateID string) (*continuum.Aggregate[E],
 	return aggregate, nil
 }
 
-func (s *AggregateStore[E]) Load(aggregateID string) (*continuum.Aggregate[E], error) {
+func (s *AggregateStore[E]) Load(aggregateID continuum.Identifier) (*continuum.Aggregate[E], error) {
 	aggregate, err := s.Create(aggregateID)
 	events, err := s.EventStore.LoadEvents(aggregate.TypeName(), aggregate.ID())
 	if err != nil {
