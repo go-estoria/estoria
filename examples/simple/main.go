@@ -9,8 +9,9 @@ import (
 )
 
 type Account struct {
-	ID    string
-	Users []string
+	ID      string
+	Users   []string
+	Balance int
 }
 
 func (a *Account) AggregateID() string {
@@ -23,16 +24,22 @@ func (a *Account) AggregateTypeName() string {
 
 func (a *Account) ApplyEvent(event continuum.EventData) error {
 	switch e := event.(type) {
+
 	case *UserCreatedEvent:
 		a.Users = append(a.Users, e.Username)
 		return nil
+
+	case *BalanceChangedEvent:
+		a.Balance += e.Amount
+		return nil
+
 	default:
 		return fmt.Errorf("invalid event type")
 	}
 }
 
 func (a *Account) String() string {
-	return fmt.Sprintf("Account %s {Users: %v}", a.ID, a.Users)
+	return fmt.Sprintf("Account %s {Users: %v} Balance: %d", a.ID, a.Users, a.Balance)
 }
 
 type UserCreatedEvent struct {
@@ -43,12 +50,21 @@ func (e *UserCreatedEvent) EventTypeName() string {
 	return "user:created"
 }
 
+type BalanceChangedEvent struct {
+	Amount int
+}
+
+func (e *BalanceChangedEvent) EventTypeName() string {
+	return "balance:changed"
+}
+
 func main() {
 	eventStore := eventstore.NewMemoryEventStore()
 	aggregateStore := aggregatestore.New[*Account](eventStore, func(id string) *Account {
 		return &Account{
-			ID:    id,
-			Users: make([]string, 0),
+			ID:      id,
+			Users:   make([]string, 0),
+			Balance: 0,
 		}
 	})
 
@@ -62,6 +78,14 @@ func main() {
 	}
 
 	if err := aggregate.Append(&UserCreatedEvent{Username: "bschmoe"}); err != nil {
+		panic(err)
+	}
+
+	if err := aggregate.Append(&BalanceChangedEvent{Amount: 100}); err != nil {
+		panic(err)
+	}
+
+	if err := aggregate.Append(&BalanceChangedEvent{Amount: -14}); err != nil {
 		panic(err)
 	}
 
