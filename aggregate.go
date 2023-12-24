@@ -7,7 +7,7 @@ import (
 
 type Entity interface {
 	AggregateID() string
-	AggregateTypeName() string
+	AggregateType() string
 	ApplyEvent(event EventData) error
 }
 
@@ -53,7 +53,7 @@ func (a *Aggregate[E]) ID() string {
 }
 
 func (a *Aggregate[E]) TypeName() string {
-	return a.Data.AggregateTypeName()
+	return a.Data.AggregateType()
 }
 
 type AggregatesByID[E Entity] map[string]*Aggregate[E]

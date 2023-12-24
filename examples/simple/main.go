@@ -18,7 +18,7 @@ func (a *Account) AggregateID() string {
 	return a.ID
 }
 
-func (a *Account) AggregateTypeName() string {
+func (a *Account) AggregateType() string {
 	return "account"
 }
 
@@ -46,7 +46,7 @@ type UserCreatedEvent struct {
 	Username string
 }
 
-func (e *UserCreatedEvent) EventTypeName() string {
+func (e *UserCreatedEvent) EventType() string {
 	return "user:created"
 }
 
@@ -54,7 +54,7 @@ type BalanceChangedEvent struct {
 	Amount int
 }
 
-func (e *BalanceChangedEvent) EventTypeName() string {
+func (e *BalanceChangedEvent) EventType() string {
 	return "balance:changed"
 }
 

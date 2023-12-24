@@ -3,13 +3,13 @@ package continuum
 import "time"
 
 type EventData interface {
-	EventTypeName() string
+	EventType() string
 }
 
 type Event struct {
-	AggregateType string
 	AggregateID   string
-	Time          time.Time
+	AggregateType string
+	Timestamp     time.Time
 	Data          EventData
 	Version       int64
 }
