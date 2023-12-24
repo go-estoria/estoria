@@ -1,24 +1,28 @@
 package continuum
 
-import "fmt"
+import (
+	"fmt"
+	"log/slog"
+)
 
-type AggregateData interface {
+type Entity interface {
 	AggregateID() string
 	AggregateTypeName() string
 	ApplyEvent(event EventData) error
 }
 
-type Aggregate[D AggregateData] struct {
+type Aggregate[E Entity] struct {
 	ID            string
 	Version       int64
 	Events        []*Event
 	UnsavedEvents []*Event
-	Data          D
+	Data          E
 }
 
-func (a *Aggregate[D]) Append(event EventData) error {
+func (a *Aggregate[E]) Append(event EventData) error {
+	slog.Info("appending event to aggregate", "event", event.EventTypeName(), "aggregate_id", a.ID)
 	a.Version++
-	a.UnsavedEvents = append(a.Events, &Event{
+	a.UnsavedEvents = append(a.UnsavedEvents, &Event{
 		AggregateID:   a.ID,
 		AggregateType: a.TypeName(),
 		Data:          event,
@@ -28,7 +32,8 @@ func (a *Aggregate[D]) Append(event EventData) error {
 	return nil
 }
 
-func (a *Aggregate[D]) Apply(event *Event) error {
+func (a *Aggregate[E]) Apply(event *Event) error {
+	slog.Info("applying event to aggregate", "event", event.Data.EventTypeName(), "aggregate_id", a.ID)
 	if err := a.Data.ApplyEvent(event.Data); err != nil {
 		return fmt.Errorf("applying event: %w", err)
 	}
@@ -38,8 +43,8 @@ func (a *Aggregate[D]) Apply(event *Event) error {
 	return nil
 }
 
-func (a *Aggregate[D]) TypeName() string {
+func (a *Aggregate[E]) TypeName() string {
 	return a.Data.AggregateTypeName()
 }
 
-type AggregatesByID[D AggregateData] map[string]*Aggregate[D]
+type AggregatesByID[E Entity] map[string]*Aggregate[E]

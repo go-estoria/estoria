@@ -1,13 +1,19 @@
-package continuum
+package eventstore
 
-import "fmt"
+import (
+	"fmt"
+
+	"github.com/jefflinse/continuum"
+	memoryeventreader "github.com/jefflinse/continuum/eventreader/memory"
+	memoryeventwriter "github.com/jefflinse/continuum/eventwriter/memory"
+)
 
 type EventReader interface {
-	ReadEvents(aggregateType, aggregateID string, fromVersion, toVersion int64) ([]*Event, error)
+	ReadEvents(aggregateType, aggregateID string, fromVersion, toVersion int64) ([]*continuum.Event, error)
 }
 
 type EventWriter interface {
-	WriteEvents(events []*Event) error
+	WriteEvents(events []*continuum.Event) error
 }
 
 type LoadOptions struct {
@@ -20,7 +26,15 @@ type EventStore struct {
 	Writer EventWriter
 }
 
-func (s *EventStore) LoadEvents(aggregateType, aggregateID string, opts ...LoadOptions) ([]*Event, error) {
+func NewMemoryEventStore() *EventStore {
+	events := make(continuum.EventsByAggregateType)
+	return &EventStore{
+		Reader: memoryeventreader.NewEventReader(events),
+		Writer: memoryeventwriter.NewEventWriter(events),
+	}
+}
+
+func (s *EventStore) LoadEvents(aggregateType, aggregateID string, opts ...LoadOptions) ([]*continuum.Event, error) {
 	if s.Reader == nil {
 		return nil, fmt.Errorf("no event reader configured")
 	}
@@ -49,7 +63,7 @@ func (s *EventStore) LoadEvents(aggregateType, aggregateID string, opts ...LoadO
 	return events, nil
 }
 
-func (s *EventStore) SaveEvents(events []*Event) error {
+func (s *EventStore) SaveEvents(events []*continuum.Event) error {
 	if s.Writer == nil {
 		return fmt.Errorf("no event writer configured")
 	}

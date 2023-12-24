@@ -2,59 +2,52 @@ package aggregatestore
 
 import (
 	"fmt"
+	"log/slog"
 
 	"github.com/jefflinse/continuum"
+	"github.com/jefflinse/continuum/eventstore"
 )
 
-type MemoryAggregateStore[AD continuum.AggregateData] struct {
-	EventStore       *continuum.EventStore
-	AggregateFactory func(id string) AD
+type AggregateStore[E continuum.Entity] struct {
+	EventStore *eventstore.EventStore
+	NewEntity  func(id string) E
 }
 
-func New[AD continuum.AggregateData](eventStore *continuum.EventStore, factory func(id string) AD) *MemoryAggregateStore[AD] {
-	return &MemoryAggregateStore[AD]{
-		EventStore:       eventStore,
-		AggregateFactory: factory,
+func New[E continuum.Entity](eventStore *eventstore.EventStore, entityFactory func(id string) E) *AggregateStore[E] {
+	return &AggregateStore[E]{
+		EventStore: eventStore,
+		NewEntity:  entityFactory,
 	}
 }
 
-func (s *MemoryAggregateStore[AD]) Create(aggregateID string) (*continuum.Aggregate[AD], error) {
-	aggregate := &continuum.Aggregate[AD]{
+func (s *AggregateStore[E]) Create(aggregateID string) (*continuum.Aggregate[E], error) {
+	aggregate := &continuum.Aggregate[E]{
 		ID:            aggregateID,
-		Data:          s.AggregateFactory(aggregateID),
+		Data:          s.NewEntity(aggregateID),
 		Events:        make([]*continuum.Event, 0),
 		UnsavedEvents: make([]*continuum.Event, 0),
 		Version:       0,
 	}
 
-	if err := s.Save(aggregate); err != nil {
-		return nil, fmt.Errorf("saving aggregate: %w", err)
-	}
-
 	return aggregate, nil
 }
 
-func (s *MemoryAggregateStore[AD]) Load(aggregateID string) (*continuum.Aggregate[AD], error) {
-	aggregateData := s.AggregateFactory(aggregateID)
-	aggregateType := aggregateData.AggregateTypeName()
-	events, err := s.EventStore.LoadEvents(aggregateType, aggregateID)
+func (s *AggregateStore[E]) Load(aggregateID string) (*continuum.Aggregate[E], error) {
+	aggregate, err := s.Create(aggregateID)
+	events, err := s.EventStore.LoadEvents(aggregate.TypeName(), aggregate.ID)
 	if err != nil {
 		return nil, fmt.Errorf("loading events: %w", err)
 	}
 
 	if len(events) == 0 {
-		return nil, continuum.AggregateNotFoundError[AD]{ID: aggregateID}
+		return nil, continuum.AggregateNotFoundError[E]{ID: aggregateID}
 	}
 
-	aggregate := &continuum.Aggregate[AD]{
-		ID:            aggregateID,
-		Data:          aggregateData,
-		Events:        events,
-		UnsavedEvents: make([]*continuum.Event, 0),
-		Version:       events[len(events)-1].Version,
-	}
+	aggregate.Events = events
 
-	for _, event := range events {
+	slog.Info("loaded aggregate", "aggregate_id", aggregate.ID, "aggregate_type", aggregate.TypeName(), "events", len(aggregate.Events))
+
+	for _, event := range aggregate.Events {
 		if err := aggregate.Apply(event); err != nil {
 			return nil, fmt.Errorf("applying event: %w", err)
 		}
@@ -63,11 +56,13 @@ func (s *MemoryAggregateStore[AD]) Load(aggregateID string) (*continuum.Aggregat
 	return aggregate, nil
 }
 
-func (s *MemoryAggregateStore[AD]) Save(a *continuum.Aggregate[AD]) error {
+func (s *AggregateStore[E]) Save(a *continuum.Aggregate[E]) error {
+	slog.Info("saving aggregate", "aggregate_id", a.ID, "aggregate_type", a.TypeName(), "events", len(a.UnsavedEvents))
 	if err := s.EventStore.SaveEvents(a.UnsavedEvents); err != nil {
 		return fmt.Errorf("saving events: %w", err)
 	}
 
+	a.Events = append(a.Events, a.UnsavedEvents...)
 	a.UnsavedEvents = make([]*continuum.Event, 0)
 
 	return nil

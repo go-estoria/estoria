@@ -2,7 +2,7 @@ package continuum
 
 import "fmt"
 
-type AggregateNotFoundError[AT AggregateData] struct {
+type AggregateNotFoundError[AT Entity] struct {
 	AggregateType AT
 	ID            string
 }

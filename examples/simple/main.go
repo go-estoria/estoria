@@ -5,7 +5,7 @@ import (
 
 	"github.com/jefflinse/continuum"
 	"github.com/jefflinse/continuum/aggregatestore"
-	memoryeventstore "github.com/jefflinse/continuum/eventstore/memory"
+	"github.com/jefflinse/continuum/eventstore"
 )
 
 type Account struct {
@@ -48,7 +48,7 @@ func (e *UserCreatedEvent) EventTypeName() string {
 }
 
 func main() {
-	eventStore := memoryeventstore.NewEventStore()
+	eventStore := eventstore.NewMemoryEventStore()
 	aggregateStore := aggregatestore.New[*Account](eventStore, func(id string) *Account {
 		return &Account{
 			ID:    id,
@@ -62,6 +62,10 @@ func main() {
 	}
 
 	if err := aggregate.Append(&UserCreatedEvent{Username: "jdoe"}); err != nil {
+		panic(err)
+	}
+
+	if err := aggregate.Append(&UserCreatedEvent{Username: "bschmoe"}); err != nil {
 		panic(err)
 	}
 
