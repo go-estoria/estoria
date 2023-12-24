@@ -34,13 +34,16 @@ func (a *Aggregate[E]) Append(events ...EventData) error {
 	return nil
 }
 
-func (a *Aggregate[E]) Apply(event *Event) error {
-	slog.Info("applying event to aggregate", "event", event.Data.EventTypeName(), "aggregate_id", a.ID())
-	if err := a.Data.ApplyEvent(event.Data); err != nil {
-		return fmt.Errorf("applying event: %w", err)
-	}
+func (a *Aggregate[E]) Apply(events ...*Event) error {
+	slog.Info("applying events to aggregate", "events", len(events), "aggregate_id", a.ID())
 
-	a.Version = event.Version
+	for _, event := range events {
+		if err := a.Data.ApplyEvent(event.Data); err != nil {
+			return fmt.Errorf("applying event: %w", err)
+		}
+
+		a.Version = event.Version
+	}
 
 	return nil
 }
