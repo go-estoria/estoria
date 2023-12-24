@@ -6,7 +6,7 @@ import (
 )
 
 type Entity interface {
-	AggregateID() string
+	AggregateID() Identifier
 	AggregateType() string
 	ApplyEvent(event EventData) error
 }
@@ -48,7 +48,7 @@ func (a *Aggregate[E]) Apply(events ...*Event) error {
 	return nil
 }
 
-func (a *Aggregate[E]) ID() string {
+func (a *Aggregate[E]) ID() Identifier {
 	return a.Data.AggregateID()
 }
 

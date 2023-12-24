@@ -16,7 +16,7 @@ func NewEventReader(events continuum.EventsByAggregateType) *EventReader {
 	}
 }
 
-func (s *EventReader) ReadEvents(aggregateType, aggregateID string, fromVersion int64, toVersion int64) ([]*continuum.Event, error) {
+func (s *EventReader) ReadEvents(aggregateType string, aggregateID continuum.Identifier, fromVersion int64, toVersion int64) ([]*continuum.Event, error) {
 	if _, ok := s.events[aggregateType]; !ok {
 		return nil, fmt.Errorf("aggregate type not found: %s", aggregateType)
 	}

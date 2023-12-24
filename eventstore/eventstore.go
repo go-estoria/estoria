@@ -9,7 +9,7 @@ import (
 )
 
 type EventReader interface {
-	ReadEvents(aggregateType, aggregateID string, fromVersion, toVersion int64) ([]*continuum.Event, error)
+	ReadEvents(aggregateType string, aggregateID continuum.Identifier, fromVersion, toVersion int64) ([]*continuum.Event, error)
 }
 
 type EventWriter interface {
@@ -34,7 +34,7 @@ func NewMemoryEventStore() *EventStore {
 	}
 }
 
-func (s *EventStore) LoadEvents(aggregateType, aggregateID string, opts ...LoadOptions) ([]*continuum.Event, error) {
+func (s *EventStore) LoadEvents(aggregateType string, aggregateID continuum.Identifier, opts ...LoadOptions) ([]*continuum.Event, error) {
 	if s.Reader == nil {
 		return nil, fmt.Errorf("no event reader configured")
 	}

@@ -14,8 +14,8 @@ type Account struct {
 	Balance int
 }
 
-func (a *Account) AggregateID() string {
-	return a.ID
+func (a *Account) AggregateID() continuum.Identifier {
+	return continuum.StringID(a.ID)
 }
 
 func (a *Account) AggregateType() string {

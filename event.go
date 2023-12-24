@@ -7,7 +7,7 @@ type EventData interface {
 }
 
 type Event struct {
-	AggregateID   string
+	AggregateID   Identifier
 	AggregateType string
 	Timestamp     time.Time
 	Data          EventData
@@ -15,7 +15,7 @@ type Event struct {
 }
 
 // EventsByID maps aggregate IDs to events.
-type EventsByID map[string][]*Event
+type EventsByID map[Identifier][]*Event
 
 // EventsByAggregateType maps aggregate types to events by ID.
 type EventsByAggregateType map[string]EventsByID
