@@ -11,6 +11,10 @@ type Entity interface {
 	ApplyEvent(event EventData) error
 }
 
+type Diffable interface {
+	Diff(newer Entity) ([]EventData, error)
+}
+
 type Aggregate[E Entity] struct {
 	Version       int64
 	Events        []*Event
