@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 
@@ -34,7 +35,7 @@ func (a *Account) AggregateType() string {
 }
 
 // ApplyEvent applies an event to the entity.
-func (a *Account) ApplyEvent(event continuum.EventData) error {
+func (a *Account) ApplyEvent(_ context.Context, event continuum.EventData) error {
 	switch e := event.(type) {
 
 	case *BalanceChangedEvent:

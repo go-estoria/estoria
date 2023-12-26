@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 
 	"github.com/jefflinse/continuum"
@@ -11,6 +12,8 @@ import (
 )
 
 func main() {
+	ctx := context.Background()
+
 	events := make(continuum.EventsByAggregateType)
 	eventStore := eventstore.New(
 		memoryeventreader.New(events),
@@ -34,11 +37,11 @@ func main() {
 		panic(err)
 	}
 
-	if err := aggregateStore.Save(aggregate); err != nil {
+	if err := aggregateStore.Save(ctx, aggregate); err != nil {
 		panic(err)
 	}
 
-	aggregate, err = aggregateStore.Load(continuum.StringID("123"))
+	aggregate, err = aggregateStore.Load(ctx, continuum.StringID("123"))
 	if err != nil {
 		panic(err)
 	}
@@ -56,11 +59,11 @@ func main() {
 		panic(err)
 	}
 
-	if err := aggregateStore.Save(aggregate); err != nil {
+	if err := aggregateStore.Save(ctx, aggregate); err != nil {
 		panic(err)
 	}
 
-	aggregate, err = aggregateStore.Load(continuum.StringID("123"))
+	aggregate, err = aggregateStore.Load(ctx, continuum.StringID("123"))
 	if err != nil {
 		panic(err)
 	}

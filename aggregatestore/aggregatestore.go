@@ -1,6 +1,7 @@
 package aggregatestore
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 
@@ -35,9 +36,9 @@ func (s *AggregateStore[E]) Create(aggregateID continuum.Identifier) (*continuum
 }
 
 // Load loads an aggregate with the given ID.
-func (s *AggregateStore[E]) Load(aggregateID continuum.Identifier) (*continuum.Aggregate[E], error) {
+func (s *AggregateStore[E]) Load(ctx context.Context, aggregateID continuum.Identifier) (*continuum.Aggregate[E], error) {
 	aggregate, err := s.Create(aggregateID)
-	events, err := s.EventStore.LoadEvents(aggregate.TypeName(), aggregate.ID())
+	events, err := s.EventStore.LoadEvents(ctx, aggregate.TypeName(), aggregate.ID())
 	if err != nil {
 		return nil, fmt.Errorf("loading events: %w", err)
 	}
@@ -48,7 +49,7 @@ func (s *AggregateStore[E]) Load(aggregateID continuum.Identifier) (*continuum.A
 
 	aggregate.Events = events
 
-	if err := aggregate.Apply(aggregate.Events...); err != nil {
+	if err := aggregate.Apply(ctx, aggregate.Events...); err != nil {
 		return nil, fmt.Errorf("applying event: %w", err)
 	}
 
@@ -58,9 +59,9 @@ func (s *AggregateStore[E]) Load(aggregateID continuum.Identifier) (*continuum.A
 }
 
 // Save saves the given aggregate.
-func (s *AggregateStore[E]) Save(a *continuum.Aggregate[E]) error {
+func (s *AggregateStore[E]) Save(ctx context.Context, a *continuum.Aggregate[E]) error {
 	slog.Info("saving aggregate", "aggregate_id", a.ID, "aggregate_type", a.TypeName(), "events", len(a.UnsavedEvents))
-	if err := s.EventStore.SaveEvents(a.UnsavedEvents); err != nil {
+	if err := s.EventStore.SaveEvents(ctx, a.UnsavedEvents); err != nil {
 		return fmt.Errorf("saving events: %w", err)
 	}
 

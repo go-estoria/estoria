@@ -1,6 +1,8 @@
 package eventwriter
 
 import (
+	"context"
+
 	"github.com/jefflinse/continuum"
 )
 
@@ -17,7 +19,7 @@ func New(events continuum.EventsByAggregateType) *EventWriter {
 }
 
 // WriteEvents writes the given events to memory.
-func (s *EventWriter) WriteEvents(events []*continuum.Event) error {
+func (s *EventWriter) WriteEvents(_ context.Context, events []*continuum.Event) error {
 	for _, event := range events {
 		if _, ok := s.events[event.AggregateType]; !ok {
 			s.events[event.AggregateType] = make(continuum.EventsByID)

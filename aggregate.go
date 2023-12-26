@@ -1,6 +1,7 @@
 package continuum
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 )
@@ -11,7 +12,7 @@ import (
 type Entity interface {
 	AggregateID() Identifier
 	AggregateType() string
-	ApplyEvent(event EventData) error
+	ApplyEvent(ctx context.Context, event EventData) error
 }
 
 // Diffable is an entity that can be diffed against another entity to produce a
@@ -46,11 +47,11 @@ func (a *Aggregate[E]) Append(events ...EventData) error {
 }
 
 // Apply applies the given events to the aggregate's state.
-func (a *Aggregate[E]) Apply(events ...*Event) error {
+func (a *Aggregate[E]) Apply(ctx context.Context, events ...*Event) error {
 	slog.Info("applying events to aggregate", "events", len(events), "aggregate_id", a.ID())
 
 	for _, event := range events {
-		if err := a.Entity.ApplyEvent(event.Data); err != nil {
+		if err := a.Entity.ApplyEvent(ctx, event.Data); err != nil {
 			return fmt.Errorf("applying event: %w", err)
 		}
 
