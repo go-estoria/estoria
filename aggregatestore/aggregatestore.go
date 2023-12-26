@@ -15,6 +15,8 @@ type AggregateStore[E continuum.Entity] struct {
 	NewEntity  func(id continuum.Identifier) E
 }
 
+var _ continuum.AggregateStore[continuum.Entity] = (*AggregateStore[continuum.Entity])(nil)
+
 // New creates a new AggregateStore.
 func New[E continuum.Entity](eventStore *eventstore.EventStore, entityFactory func(id continuum.Identifier) E) *AggregateStore[E] {
 	return &AggregateStore[E]{
