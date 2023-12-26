@@ -43,7 +43,7 @@ func main() {
 		panic(err)
 	}
 
-	newEvents, err := aggregate.Data.Diff(&Account{
+	newEvents, err := aggregate.Entity.Diff(&Account{
 		ID:      "123",
 		Users:   []string{"bschmoe", "rlowe"},
 		Balance: 80,
@@ -65,6 +65,6 @@ func main() {
 		panic(err)
 	}
 
-	account := aggregate.Data
+	account := aggregate.Entity
 	fmt.Println(account)
 }

@@ -25,7 +25,7 @@ func New[E continuum.Entity](eventStore *eventstore.EventStore, entityFactory fu
 // Create creates a new aggregate with the given ID.
 func (s *AggregateStore[E]) Create(aggregateID continuum.Identifier) (*continuum.Aggregate[E], error) {
 	aggregate := &continuum.Aggregate[E]{
-		Data:          s.NewEntity(aggregateID),
+		Entity:        s.NewEntity(aggregateID),
 		Events:        make([]*continuum.Event, 0),
 		UnsavedEvents: make([]*continuum.Event, 0),
 		Version:       0,
