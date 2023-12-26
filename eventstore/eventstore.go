@@ -4,8 +4,6 @@ import (
 	"fmt"
 
 	"github.com/jefflinse/continuum"
-	memoryeventreader "github.com/jefflinse/continuum/eventreader/memory"
-	memoryeventwriter "github.com/jefflinse/continuum/eventwriter/memory"
 )
 
 // An EventReader is anything that can read events.
@@ -32,15 +30,14 @@ type EventStore struct {
 
 // New creates a new EventStore.
 func New(reader EventReader, writer EventWriter) *EventStore {
-	events := make(continuum.EventsByAggregateType)
 	return &EventStore{
-		Reader: memoryeventreader.New(events),
-		Writer: memoryeventwriter.New(events),
+		Reader: reader,
+		Writer: writer,
 	}
 }
 
 // LoadEvents loads events for the given aggregate type and ID.
-func (s *EventStore) LoadEvents(aggregateType string, aggregateID continuum.Identifier, opts ...LoadOptions) ([]*continuum.Event, error) {
+func (s EventStore) LoadEvents(aggregateType string, aggregateID continuum.Identifier, opts ...LoadOptions) ([]*continuum.Event, error) {
 	if s.Reader == nil {
 		return nil, fmt.Errorf("no event reader configured")
 	}
@@ -69,7 +66,7 @@ func (s *EventStore) LoadEvents(aggregateType string, aggregateID continuum.Iden
 }
 
 // SaveEvents saves the given events.
-func (s *EventStore) SaveEvents(events []*continuum.Event) error {
+func (s EventStore) SaveEvents(events []*continuum.Event) error {
 	if s.Writer == nil {
 		return fmt.Errorf("no event writer configured")
 	}
