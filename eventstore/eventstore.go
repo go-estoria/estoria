@@ -31,10 +31,10 @@ type EventStore struct {
 }
 
 // New creates a new EventStore.
-func New() *EventStore {
+func New(reader EventReader, writer EventWriter) *EventStore {
 	events := make(continuum.EventsByAggregateType)
 	return &EventStore{
-		Reader: memoryeventreader.NewEventReader(events),
+		Reader: memoryeventreader.New(events),
 		Writer: memoryeventwriter.New(events),
 	}
 }

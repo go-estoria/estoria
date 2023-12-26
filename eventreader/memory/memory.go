@@ -11,8 +11,8 @@ type EventReader struct {
 	events continuum.EventsByAggregateType
 }
 
-// NewEventReader creates a new in-memory EventReader.
-func NewEventReader(events continuum.EventsByAggregateType) *EventReader {
+// New creates a new in-memory EventReader.
+func New(events continuum.EventsByAggregateType) *EventReader {
 	return &EventReader{
 		events: events,
 	}
