@@ -8,11 +8,13 @@ import (
 	"github.com/jefflinse/continuum/eventstore"
 )
 
+// An AggregateStore utilizes an EventStore to load and save aggregates.
 type AggregateStore[E continuum.Entity] struct {
 	EventStore *eventstore.EventStore
 	NewEntity  func(id continuum.Identifier) E
 }
 
+// New creates a new AggregateStore.
 func New[E continuum.Entity](eventStore *eventstore.EventStore, entityFactory func(id continuum.Identifier) E) *AggregateStore[E] {
 	return &AggregateStore[E]{
 		EventStore: eventStore,
@@ -20,6 +22,7 @@ func New[E continuum.Entity](eventStore *eventstore.EventStore, entityFactory fu
 	}
 }
 
+// Create creates a new aggregate with the given ID.
 func (s *AggregateStore[E]) Create(aggregateID continuum.Identifier) (*continuum.Aggregate[E], error) {
 	aggregate := &continuum.Aggregate[E]{
 		Data:          s.NewEntity(aggregateID),
@@ -31,6 +34,7 @@ func (s *AggregateStore[E]) Create(aggregateID continuum.Identifier) (*continuum
 	return aggregate, nil
 }
 
+// Load loads an aggregate with the given ID.
 func (s *AggregateStore[E]) Load(aggregateID continuum.Identifier) (*continuum.Aggregate[E], error) {
 	aggregate, err := s.Create(aggregateID)
 	events, err := s.EventStore.LoadEvents(aggregate.TypeName(), aggregate.ID())
@@ -53,6 +57,7 @@ func (s *AggregateStore[E]) Load(aggregateID continuum.Identifier) (*continuum.A
 	return aggregate, nil
 }
 
+// Save saves the given aggregate.
 func (s *AggregateStore[E]) Save(a *continuum.Aggregate[E]) error {
 	slog.Info("saving aggregate", "aggregate_id", a.ID, "aggregate_type", a.TypeName(), "events", len(a.UnsavedEvents))
 	if err := s.EventStore.SaveEvents(a.UnsavedEvents); err != nil {

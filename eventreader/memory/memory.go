@@ -6,16 +6,19 @@ import (
 	"github.com/jefflinse/continuum"
 )
 
+// An EventReader reads events from memory.
 type EventReader struct {
 	events continuum.EventsByAggregateType
 }
 
+// NewEventReader creates a new in-memory EventReader.
 func NewEventReader(events continuum.EventsByAggregateType) *EventReader {
 	return &EventReader{
 		events: events,
 	}
 }
 
+// ReadEvents reads events for the given aggregate type and ID.
 func (s *EventReader) ReadEvents(aggregateType string, aggregateID continuum.Identifier, fromVersion int64, toVersion int64) ([]*continuum.Event, error) {
 	if _, ok := s.events[aggregateType]; !ok {
 		return nil, fmt.Errorf("aggregate type not found: %s", aggregateType)

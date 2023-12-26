@@ -118,7 +118,7 @@ type BalanceChangedEvent struct {
 func (e *BalanceChangedEvent) EventType() string { return "balance:changed" }
 
 func main() {
-	eventStore := eventstore.NewMemoryEventStore()
+	eventStore := eventstore.New()
 	aggregateStore := aggregatestore.New[*Account](eventStore, func(id continuum.Identifier) *Account {
 		return &Account{
 			ID:      id.String(),

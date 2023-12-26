@@ -2,10 +2,12 @@ package continuum
 
 import "time"
 
+// EventData is the interface that all event data types must implement.
 type EventData interface {
 	EventType() string
 }
 
+// Event represents a state change to an entity.
 type Event struct {
 	AggregateID   Identifier
 	AggregateType string
