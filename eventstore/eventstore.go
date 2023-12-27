@@ -17,12 +17,6 @@ type EventWriter interface {
 	WriteEvents(ctx context.Context, events []*continuum.Event) error
 }
 
-// LoadOptions are options for loading events.
-type LoadOptions struct {
-	FromVersion int64
-	ToVersion   int64
-}
-
 // An EventStore is anything that can load and save events.
 type EventStore struct {
 	Reader EventReader
@@ -38,27 +32,20 @@ func New(reader EventReader, writer EventWriter) *EventStore {
 }
 
 // LoadEvents loads events for the given aggregate type and ID.
-func (s EventStore) LoadEvents(ctx context.Context, aggregateType string, aggregateID continuum.Identifier, opts ...LoadOptions) ([]*continuum.Event, error) {
+func (s EventStore) LoadEvents(ctx context.Context, aggregateType string, aggregateID continuum.Identifier, fromVersion, toVersion int64) ([]*continuum.Event, error) {
 	if s.Reader == nil {
 		return nil, fmt.Errorf("no event reader configured")
 	}
 
-	mergedOpts := LoadOptions{}
-	for _, opt := range opts {
-		if opt.FromVersion > 0 {
-			mergedOpts.FromVersion = opt.FromVersion
-		}
-
-		if opt.ToVersion > 0 {
-			mergedOpts.ToVersion = opt.ToVersion
-		}
+	if fromVersion < 0 {
+		return nil, fmt.Errorf("invalid version range: from %d", fromVersion)
+	} else if toVersion < 0 {
+		return nil, fmt.Errorf("invalid version range: to %d", toVersion)
+	} else if fromVersion > toVersion {
+		return nil, fmt.Errorf("invalid version range: from %d to %d", fromVersion, toVersion)
 	}
 
-	if mergedOpts.FromVersion > 0 && mergedOpts.ToVersion > 0 && mergedOpts.FromVersion > mergedOpts.ToVersion {
-		return nil, fmt.Errorf("invalid version range: from %d to %d", mergedOpts.FromVersion, mergedOpts.ToVersion)
-	}
-
-	events, err := s.Reader.ReadEvents(ctx, aggregateType, aggregateID, mergedOpts.FromVersion, mergedOpts.ToVersion)
+	events, err := s.Reader.ReadEvents(ctx, aggregateType, aggregateID, fromVersion, toVersion)
 	if err != nil {
 		return nil, fmt.Errorf("reading events: %w", err)
 	}

@@ -6,19 +6,21 @@ import (
 	"log/slog"
 
 	"github.com/jefflinse/continuum"
-	"github.com/jefflinse/continuum/eventstore"
 )
+
+// An EntityFactory creates new entities.
+type EntityFactory[E continuum.Entity] func(id continuum.Identifier) E
 
 // An AggregateStore utilizes an EventStore to load and save aggregates.
 type AggregateStore[E continuum.Entity] struct {
-	EventStore *eventstore.EventStore
-	NewEntity  func(id continuum.Identifier) E
+	EventStore continuum.EventStore
+	NewEntity  EntityFactory[E]
 }
 
 var _ continuum.AggregateStore[continuum.Entity] = (*AggregateStore[continuum.Entity])(nil)
 
 // New creates a new AggregateStore.
-func New[E continuum.Entity](eventStore *eventstore.EventStore, entityFactory func(id continuum.Identifier) E) *AggregateStore[E] {
+func New[E continuum.Entity](eventStore continuum.EventStore, entityFactory EntityFactory[E]) *AggregateStore[E] {
 	return &AggregateStore[E]{
 		EventStore: eventStore,
 		NewEntity:  entityFactory,
@@ -40,7 +42,7 @@ func (s *AggregateStore[E]) Create(aggregateID continuum.Identifier) (*continuum
 // Load loads an aggregate with the given ID.
 func (s *AggregateStore[E]) Load(ctx context.Context, aggregateID continuum.Identifier) (*continuum.Aggregate[E], error) {
 	aggregate, err := s.Create(aggregateID)
-	events, err := s.EventStore.LoadEvents(ctx, aggregate.TypeName(), aggregate.ID())
+	events, err := s.EventStore.LoadEvents(ctx, aggregate.TypeName(), aggregate.ID(), 0, 0)
 	if err != nil {
 		return nil, fmt.Errorf("loading events: %w", err)
 	}
