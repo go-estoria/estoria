@@ -31,8 +31,7 @@ func New[E continuum.Entity](eventStore continuum.EventStore, entityFactory Enti
 func (s *AggregateStore[E]) Create(aggregateID continuum.Identifier) (*continuum.Aggregate[E], error) {
 	aggregate := &continuum.Aggregate[E]{
 		Entity:        s.NewEntity(aggregateID),
-		Events:        make([]*continuum.Event, 0),
-		UnsavedEvents: make([]*continuum.Event, 0),
+		UnsavedEvents: make([]*continuum.BasicEvent, 0),
 		Version:       0,
 	}
 
@@ -51,13 +50,11 @@ func (s *AggregateStore[E]) Load(ctx context.Context, aggregateID continuum.Iden
 		return nil, continuum.AggregateNotFoundError[E]{ID: aggregateID}
 	}
 
-	aggregate.Events = events
-
-	if err := aggregate.Apply(ctx, aggregate.Events...); err != nil {
+	if err := aggregate.Apply(ctx, events...); err != nil {
 		return nil, fmt.Errorf("applying event: %w", err)
 	}
 
-	slog.Info("loaded aggregate", "aggregate_id", aggregate.ID, "aggregate_type", aggregate.TypeName(), "events", len(aggregate.Events))
+	slog.Info("loaded aggregate", "aggregate_id", aggregate.ID, "aggregate_type", aggregate.TypeName(), "events", len(events))
 
 	return aggregate, nil
 }
@@ -69,8 +66,7 @@ func (s *AggregateStore[E]) Save(ctx context.Context, a *continuum.Aggregate[E])
 		return fmt.Errorf("saving events: %w", err)
 	}
 
-	a.Events = append(a.Events, a.UnsavedEvents...)
-	a.UnsavedEvents = make([]*continuum.Event, 0)
+	a.UnsavedEvents = make([]*continuum.BasicEvent, 0)
 
 	return nil
 }

@@ -9,12 +9,12 @@ import (
 
 // An EventReader is anything that can read events.
 type EventReader interface {
-	ReadEvents(ctx context.Context, aggregateType string, aggregateID continuum.Identifier, fromVersion, toVersion int64) ([]*continuum.Event, error)
+	ReadEvents(ctx context.Context, aggregateType string, aggregateID continuum.Identifier, fromVersion, toVersion int64) ([]*continuum.BasicEvent, error)
 }
 
 // An EventWriter is anything that can write events.
 type EventWriter interface {
-	WriteEvents(ctx context.Context, events []*continuum.Event) error
+	WriteEvents(ctx context.Context, events []*continuum.BasicEvent) error
 }
 
 // An EventStore is anything that can load and save events.
@@ -32,7 +32,7 @@ func New(reader EventReader, writer EventWriter) *EventStore {
 }
 
 // LoadEvents loads events for the given aggregate type and ID.
-func (s EventStore) LoadEvents(ctx context.Context, aggregateType string, aggregateID continuum.Identifier, fromVersion, toVersion int64) ([]*continuum.Event, error) {
+func (s EventStore) LoadEvents(ctx context.Context, aggregateType string, aggregateID continuum.Identifier, fromVersion, toVersion int64) ([]*continuum.BasicEvent, error) {
 	if s.Reader == nil {
 		return nil, fmt.Errorf("no event reader configured")
 	}
@@ -54,7 +54,7 @@ func (s EventStore) LoadEvents(ctx context.Context, aggregateType string, aggreg
 }
 
 // SaveEvents saves the given events.
-func (s EventStore) SaveEvents(ctx context.Context, events []*continuum.Event) error {
+func (s EventStore) SaveEvents(ctx context.Context, events []*continuum.BasicEvent) error {
 	if s.Writer == nil {
 		return fmt.Errorf("no event writer configured")
 	}
