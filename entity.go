@@ -14,5 +14,6 @@ type Entity interface {
 // DiffableEntity is an entity that can be diffed against another entity to produce a
 // series of events that represent the state changes between the two.
 type DiffableEntity interface {
-	Diff(newer Entity) ([]EventData, error)
+	Entity
+	Diff(newer DiffableEntity) ([]EventData, error)
 }
