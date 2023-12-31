@@ -41,7 +41,7 @@ func (a *Aggregate[E]) Apply(ctx context.Context, events ...*BasicEvent) error {
 			return fmt.Errorf("applying event: %w", err)
 		}
 
-		a.Version = event.Version()
+		a.Version = event.AggregateVersion()
 	}
 
 	return nil
