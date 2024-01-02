@@ -9,7 +9,7 @@ import (
 
 // An EventReader is anything that can read events.
 type EventReader interface {
-	ReadEvents(ctx context.Context, aggregateType string, aggregateID continuum.Identifier, fromVersion, toVersion int64) ([]*continuum.BasicEvent, error)
+	ReadEvents(ctx context.Context, aggregateType string, aggregateID continuum.Identifier, versions continuum.VersionSpec) ([]*continuum.BasicEvent, error)
 }
 
 // An EventWriter is anything that can write events.
@@ -32,20 +32,16 @@ func New(reader EventReader, writer EventWriter) *EventStore {
 }
 
 // LoadEvents loads events for the given aggregate type and ID.
-func (s EventStore) LoadEvents(ctx context.Context, aggregateType string, aggregateID continuum.Identifier, fromVersion, toVersion int64) ([]*continuum.BasicEvent, error) {
+func (s EventStore) LoadEvents(ctx context.Context, aggregateType string, aggregateID continuum.Identifier, versions continuum.VersionSpec) ([]*continuum.BasicEvent, error) {
 	if s.Reader == nil {
 		return nil, fmt.Errorf("no event reader configured")
 	}
 
-	if fromVersion < 0 {
-		return nil, fmt.Errorf("invalid version range: from %d", fromVersion)
-	} else if toVersion < 0 {
-		return nil, fmt.Errorf("invalid version range: to %d", toVersion)
-	} else if fromVersion > toVersion {
-		return nil, fmt.Errorf("invalid version range: from %d to %d", fromVersion, toVersion)
+	if err := versions.Validate(); err != nil {
+		return nil, fmt.Errorf("invalid version spec: %w", err)
 	}
 
-	events, err := s.Reader.ReadEvents(ctx, aggregateType, aggregateID, fromVersion, toVersion)
+	events, err := s.Reader.ReadEvents(ctx, aggregateType, aggregateID, versions)
 	if err != nil {
 		return nil, fmt.Errorf("reading events: %w", err)
 	}

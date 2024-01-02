@@ -13,14 +13,14 @@ type EntityFactory[E continuum.Entity] func(id continuum.Identifier) E
 
 // An AggregateStore utilizes an EventStore to load and save aggregates.
 type AggregateStore[E continuum.Entity] struct {
-	EventStore continuum.EventStore
+	EventStore continuum.EventStore[E]
 	NewEntity  EntityFactory[E]
 }
 
 var _ continuum.AggregateStore[continuum.Entity] = (*AggregateStore[continuum.Entity])(nil)
 
 // New creates a new AggregateStore.
-func New[E continuum.Entity](eventStore continuum.EventStore, entityFactory EntityFactory[E]) *AggregateStore[E] {
+func New[E continuum.Entity](eventStore continuum.EventStore[E], entityFactory EntityFactory[E]) *AggregateStore[E] {
 	return &AggregateStore[E]{
 		EventStore: eventStore,
 		NewEntity:  entityFactory,
@@ -41,7 +41,7 @@ func (s *AggregateStore[E]) Create(aggregateID continuum.Identifier) (*continuum
 // Load loads an aggregate with the given ID.
 func (s *AggregateStore[E]) Load(ctx context.Context, aggregateID continuum.Identifier) (*continuum.Aggregate[E], error) {
 	aggregate, err := s.Create(aggregateID)
-	events, err := s.EventStore.LoadEvents(ctx, aggregate.TypeName(), aggregate.ID(), 0, 0)
+	events, err := s.EventStore.LoadEvents(ctx, aggregate.TypeName(), aggregate.ID(), continuum.VersionSpec{})
 	if err != nil {
 		return nil, fmt.Errorf("loading events: %w", err)
 	}
@@ -54,14 +54,14 @@ func (s *AggregateStore[E]) Load(ctx context.Context, aggregateID continuum.Iden
 		return nil, fmt.Errorf("applying event: %w", err)
 	}
 
-	slog.Info("loaded aggregate", "aggregate_id", aggregate.ID, "aggregate_type", aggregate.TypeName(), "events", len(events))
+	slog.Info("loaded aggregate", "aggregate_id", aggregate.ID(), "aggregate_type", aggregate.TypeName(), "events", len(events))
 
 	return aggregate, nil
 }
 
 // Save saves the given aggregate.
 func (s *AggregateStore[E]) Save(ctx context.Context, a *continuum.Aggregate[E]) error {
-	slog.Info("saving aggregate", "aggregate_id", a.ID, "aggregate_type", a.TypeName(), "events", len(a.UnsavedEvents))
+	slog.Info("saving aggregate", "aggregate_id", a.ID(), "aggregate_type", a.TypeName(), "events", len(a.UnsavedEvents))
 	if err := s.EventStore.SaveEvents(ctx, a.UnsavedEvents); err != nil {
 		return fmt.Errorf("saving events: %w", err)
 	}

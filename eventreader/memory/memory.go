@@ -20,7 +20,7 @@ func New(events continuum.EventsByAggregateType) *EventReader {
 }
 
 // ReadEvents reads events for the given aggregate type and ID.
-func (s *EventReader) ReadEvents(_ context.Context, aggregateType string, aggregateID continuum.Identifier, fromVersion int64, toVersion int64) ([]*continuum.BasicEvent, error) {
+func (s *EventReader) ReadEvents(_ context.Context, aggregateType string, aggregateID continuum.Identifier, versions continuum.VersionSpec) ([]*continuum.BasicEvent, error) {
 	if _, ok := s.events[aggregateType]; !ok {
 		return nil, fmt.Errorf("aggregate type not found: %s", aggregateType)
 	}
@@ -30,12 +30,12 @@ func (s *EventReader) ReadEvents(_ context.Context, aggregateType string, aggreg
 		return nil, fmt.Errorf("aggregate not found: %s", aggregateID)
 	}
 
-	if fromVersion > 0 {
-		events = events[fromVersion:]
+	if versions.FromVersion > 0 {
+		events = events[versions.FromVersion:]
 	}
 
-	if toVersion > 0 {
-		events = events[:toVersion-fromVersion]
+	if versions.ToVersion > 0 {
+		events = events[:versions.ToVersion-versions.FromVersion]
 	}
 
 	return events, nil
