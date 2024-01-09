@@ -3,49 +3,40 @@ package continuum
 import "time"
 
 // An Event is a state change to an entity.
-type Event[D EventData] interface {
-	AggregateID() Identifier
-	AggregateType() string
-	AggregateVersion() int64
+type Event interface {
+	EventID() Identifier
+	AggregateID() AggregateID
 	Timestamp() time.Time
-	Data() D
+	Data() EventData
 }
 
 // BasicEvent represents a state change to an entity.
 type BasicEvent struct {
-	aggregateID      Identifier
-	aggregateType    string
-	aggregateVersion int64
-	timestamp        time.Time
-	data             EventData
+	id          Identifier
+	aggregateID AggregateID
+	timestamp   time.Time
+	data        EventData
 }
 
-var _ Event[EventData] = (*BasicEvent)(nil)
+var _ Event = (*BasicEvent)(nil)
 
 // NewBasicEvent creates a new BasicEvent.
-func NewBasicEvent(aggregateID Identifier, aggregateType string, timestamp time.Time, data EventData, aggregateVersion int64) *BasicEvent {
+func NewBasicEvent(aggregateID Identifier, aggregateType string, timestamp time.Time, data EventData) *BasicEvent {
 	return &BasicEvent{
-		aggregateID:      aggregateID,
-		aggregateType:    aggregateType,
-		aggregateVersion: aggregateVersion,
-		timestamp:        timestamp,
-		data:             data,
+		aggregateID: AggregateID{ID: aggregateID, Type: aggregateType},
+		timestamp:   timestamp,
+		data:        data,
 	}
 }
 
+// EventID returns the ID of the event.
+func (e *BasicEvent) EventID() Identifier {
+	return e.id
+}
+
 // AggregateID returns the ID of the aggregate that the event applies to.
-func (e *BasicEvent) AggregateID() Identifier {
+func (e *BasicEvent) AggregateID() AggregateID {
 	return e.aggregateID
-}
-
-// AggregateType returns the type of the aggregate that the event applies to.
-func (e *BasicEvent) AggregateType() string {
-	return e.aggregateType
-}
-
-// AggregateVersion returns the version of the aggregate that the event represents.
-func (e *BasicEvent) AggregateVersion() int64 {
-	return e.aggregateVersion
 }
 
 // Timestamp returns the time that the event occurred.

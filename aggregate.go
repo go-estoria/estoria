@@ -7,25 +7,46 @@ import (
 	"time"
 )
 
-// An Aggregate is an entity that is persisted as a series of events.
-type Aggregate[E Entity] struct {
-	Version       int64
-	UnsavedEvents []*BasicEvent
-	Entity        E
+// An AggregateIDFactory is a function that returns a new aggregate ID.
+type AggregateIDFactory func() Identifier
+
+// An AggregateDataFactory is a function that returns a new aggregate data instance.
+type AggregateDataFactory[D AggregateData] func() D
+
+// An AggregateFactory is a function that returns a new aggregate instance.
+type AggregateFactory[D AggregateData] func() *Aggregate[D]
+
+type AggregateType[D AggregateData] struct {
+	Name string
+
+	// AggregateFactory is a function that returns a new aggregate instance.
+	AggregateFactory AggregateFactory[D]
+
+	// IDFactory is a function that returns a new aggregate ID.
+	IDFactory AggregateIDFactory
+
+	// DataFactory is a function that returns a new aggregate data instance.
+	DataFactory AggregateDataFactory[D]
+}
+
+// An Aggregate is a reconstructed representation of an event-sourced entity's state.
+type Aggregate[D AggregateData] struct {
+	Type          AggregateType[D]
+	ID            Identifier
+	Data          D
+	UnsavedEvents []Event
 }
 
 // Append appends the given events to the aggregate's unsaved events.
-func (a *Aggregate[E]) Append(events ...EventData) error {
-	slog.Info("appending events to aggregate", "events", len(events), "aggregate_id", a.ID())
+func (a *Aggregate[D]) Append(events ...EventData) error {
+	slog.Info("appending events to aggregate", "events", len(events), "aggregate_id", a.ID)
 
 	for _, event := range events {
-		a.Version++
 		a.UnsavedEvents = append(a.UnsavedEvents, NewBasicEvent(
-			a.ID(),
+			a.ID,
 			a.TypeName(),
 			time.Now(),
 			event,
-			a.Version,
 		))
 	}
 
@@ -33,29 +54,16 @@ func (a *Aggregate[E]) Append(events ...EventData) error {
 }
 
 // Apply applies the given events to the aggregate's state.
-func (a *Aggregate[E]) Apply(ctx context.Context, events ...*BasicEvent) error {
-	slog.Info("applying events to aggregate", "events", len(events), "aggregate_id", a.ID())
-
-	for _, event := range events {
-		if err := a.Entity.ApplyEvent(ctx, event.Data()); err != nil {
-			return fmt.Errorf("applying event: %w", err)
-		}
-
-		a.Version = event.AggregateVersion()
+func (a *Aggregate[D]) Apply(ctx context.Context, event Event) error {
+	slog.Info("applying event to aggregate", "event", event.EventID(), "aggregate_id", a.ID)
+	if err := a.Data.ApplyEvent(ctx, event.Data()); err != nil {
+		return fmt.Errorf("applying event: %w", err)
 	}
 
 	return nil
 }
 
-// ID returns the aggregate's ID.
-func (a *Aggregate[E]) ID() Identifier {
-	return a.Entity.AggregateID()
-}
-
 // TypeName returns the aggregate's type name.
-func (a *Aggregate[E]) TypeName() string {
-	return a.Entity.AggregateType()
+func (a *Aggregate[D]) TypeName() string {
+	return a.Type.Name
 }
-
-// AggregatesByID is a map of aggregates by ID.
-type AggregatesByID[E Entity] map[string]*Aggregate[E]

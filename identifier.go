@@ -65,5 +65,18 @@ func (id UUID) Equals(other Identifier) bool {
 
 // String returns the string representation of this identifier.
 func (id UUID) String() string {
-	return id.String()
+	return uuid.UUID(id).String()
+}
+
+type AggregateID struct {
+	Type string
+	ID   Identifier
+}
+
+func (id AggregateID) String() string {
+	return fmt.Sprintf("%s:%s", id.Type, id.ID)
+}
+
+func (id AggregateID) Equals(other AggregateID) bool {
+	return id.Type == other.Type && id.ID.Equals(other.ID)
 }

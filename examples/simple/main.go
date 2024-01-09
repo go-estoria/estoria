@@ -4,28 +4,47 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/google/uuid"
 	"github.com/jefflinse/continuum"
-	"github.com/jefflinse/continuum/aggregatestore"
-	memoryeventreader "github.com/jefflinse/continuum/eventreader/memory"
-	"github.com/jefflinse/continuum/eventstore"
-	memoryeventwriter "github.com/jefflinse/continuum/eventwriter/memory"
+	"github.com/jefflinse/continuum/aggregatereader"
+	"github.com/jefflinse/continuum/aggregatewriter"
+	"github.com/jefflinse/continuum/eventreader"
+	"github.com/jefflinse/continuum/eventwriter"
 )
 
 func main() {
 	ctx := context.Background()
 
-	events := make(continuum.EventsByAggregateType)
-	eventStore := eventstore.New(
-		memoryeventreader.New(events),
-		memoryeventwriter.New(events),
+	events := []continuum.Event{}
+	eventStore := continuum.EventStore{
+		Reader: eventreader.MemoryReader{Store: events},
+		Writer: eventwriter.MemoryWriter{Store: events},
+	}
+
+	aggregateType := continuum.AggregateType[*Account]{
+		Name: "account",
+		DataFactory: func() *Account {
+			return NewAccount(continuum.UUID(uuid.New()))
+		},
+	}
+
+	aggregateReader := aggregatereader.MemoryReader[*Account]{
+		AggreateFactory: aggregateType.AggregateFactory,
+		EventStore:      eventStore,
+	}
+
+	aggregateWritier := aggregatewriter.MemoryWriter[*Account]{EventStore: eventStore}
+
+	aggregateStore, err := continuum.NewAggregateCollection(
+		aggregateType,
+		aggregateReader,
+		aggregateWritier,
 	)
-
-	aggregateStore := aggregatestore.New[*Account](eventStore, NewAccount)
-
-	aggregate, err := aggregateStore.Create(continuum.StringID("123"))
 	if err != nil {
 		panic(err)
 	}
+
+	aggregate := aggregateStore.Create()
 
 	if err := aggregate.Append(
 		&UserCreatedEvent{Username: "jdoe"},
@@ -46,7 +65,7 @@ func main() {
 		panic(err)
 	}
 
-	newEvents, err := aggregate.Entity.Diff(&Account{
+	newEvents, err := aggregate.Data.Diff(&Account{
 		ID:      "123",
 		Users:   []string{"bschmoe", "rlowe"},
 		Balance: 80,
@@ -68,6 +87,6 @@ func main() {
 		panic(err)
 	}
 
-	account := aggregate.Entity
+	account := aggregate.Data
 	fmt.Println(account)
 }
