@@ -36,7 +36,9 @@ func main() {
 		EventStore:   eventStore,
 	}
 
-	aggregateWritier := aggregatewriter.MemoryWriter[*Account]{EventStore: eventStore}
+	aggregateWritier := aggregatewriter.MemoryWriter[*Account]{
+		EventStore: eventStore,
+	}
 
 	aggregateStore, err := continuum.NewAggregateCollection(
 		aggregateType,

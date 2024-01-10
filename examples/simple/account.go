@@ -24,16 +24,6 @@ func NewAccount(id continuum.Identifier) *Account {
 	}
 }
 
-// AggregateID returns the aggregate ID.
-func (a *Account) AggregateID() continuum.Identifier {
-	return continuum.StringID(a.ID)
-}
-
-// AggregateType returns the aggregate type.
-func (a *Account) AggregateType() string {
-	return "account"
-}
-
 // ApplyEvent applies an event to the entity.
 func (a *Account) ApplyEvent(_ context.Context, event continuum.EventData) error {
 	switch e := event.(type) {
