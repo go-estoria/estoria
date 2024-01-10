@@ -2,6 +2,8 @@ package aggregatereader
 
 import (
 	"context"
+	"fmt"
+	"log/slog"
 
 	"github.com/jefflinse/continuum"
 )
@@ -12,15 +14,18 @@ type MemoryReader[D continuum.AggregateData] struct {
 }
 
 func (r MemoryReader[D]) ReadAggregate(ctx context.Context, id continuum.AggregateID) (*continuum.Aggregate[D], error) {
+	slog.Default().WithGroup("aggregatereader").Debug("reading aggregate", "id", id)
 	events, err := r.EventStore.LoadEvents(ctx, id)
 	if err != nil {
 		return nil, err
 	}
 
-	aggregate := r.AggreateType.New()
+	aggregate := r.AggreateType.New(id.ID)
 
 	for _, event := range events {
-		aggregate.Data.ApplyEvent(ctx, event.Data())
+		if err := aggregate.Data.ApplyEvent(ctx, event.Data()); err != nil {
+			return nil, fmt.Errorf("applying event: %w", err)
+		}
 	}
 
 	return aggregate, nil

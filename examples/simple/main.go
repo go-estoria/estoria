@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"fmt"
+	"log/slog"
+	"os"
 
 	"github.com/google/uuid"
 	"github.com/jefflinse/continuum"
@@ -13,6 +15,9 @@ import (
 )
 
 func main() {
+	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
+		Level: slog.LevelDebug,
+	})))
 	ctx := context.Background()
 
 	events := []continuum.Event{}
@@ -40,7 +45,7 @@ func main() {
 		EventStore: eventStore,
 	}
 
-	aggregateStore, err := continuum.NewAggregateCollection(
+	aggregateCollection, err := continuum.NewAggregateCollection(
 		aggregateType,
 		aggregateReader,
 		aggregateWritier,
@@ -49,7 +54,7 @@ func main() {
 		panic(err)
 	}
 
-	aggregate := aggregateStore.Create()
+	aggregate := aggregateCollection.Create(nil)
 
 	if err := aggregate.Append(
 		&UserCreatedEvent{Username: "jdoe"},
@@ -61,36 +66,36 @@ func main() {
 		panic(err)
 	}
 
-	if err := aggregateStore.Save(ctx, aggregate); err != nil {
+	if err := aggregateCollection.Save(ctx, aggregate); err != nil {
 		panic(err)
 	}
 
-	aggregate, err = aggregateStore.Load(ctx, continuum.StringID("123"))
+	aggregate, err = aggregateCollection.Load(ctx, aggregate.ID.(continuum.UUID))
 	if err != nil {
 		panic(err)
 	}
 
-	newEvents, err := aggregate.Data.Diff(&Account{
-		ID:      "123",
-		Users:   []string{"bschmoe", "rlowe"},
-		Balance: 80,
-	})
-	if err != nil {
-		panic(err)
-	}
+	// newEvents, err := aggregate.Data.Diff(&Account{
+	// 	ID:      "123",
+	// 	Users:   []string{"bschmoe", "rlowe"},
+	// 	Balance: 80,
+	// })
+	// if err != nil {
+	// 	panic(err)
+	// }
 
-	if err := aggregate.Append(newEvents...); err != nil {
-		panic(err)
-	}
+	// if err := aggregate.Append(newEvents...); err != nil {
+	// 	panic(err)
+	// }
 
-	if err := aggregateStore.Save(ctx, aggregate); err != nil {
-		panic(err)
-	}
+	// if err := aggregateCollection.Save(ctx, aggregate); err != nil {
+	// 	panic(err)
+	// }
 
-	aggregate, err = aggregateStore.Load(ctx, continuum.StringID("123"))
-	if err != nil {
-		panic(err)
-	}
+	// aggregate, err = aggregateCollection.Load(ctx, continuum.StringID("123"))
+	// if err != nil {
+	// 	panic(err)
+	// }
 
 	account := aggregate.Data
 	fmt.Println(account)

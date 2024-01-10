@@ -27,12 +27,21 @@ type AggregateType[D AggregateData] struct {
 }
 
 // AggregateFactory is a function that returns a new aggregate instance.
-func (t AggregateType[D]) New() *Aggregate[D] {
-	return &Aggregate[D]{
+func (t AggregateType[D]) New(id Identifier) *Aggregate[D] {
+	isNew := id == nil
+	if isNew {
+		id = t.IDFactory()
+	}
+
+	aggregate := &Aggregate[D]{
 		Type: t,
-		ID:   t.IDFactory(),
+		ID:   id,
 		Data: t.DataFactory(),
 	}
+
+	slog.Info("instantiating aggregate", "new", isNew, "type", t.Name, "id", aggregate.ID)
+
+	return aggregate
 }
 
 // An Aggregate is a reconstructed representation of an event-sourced entity's state.
@@ -50,7 +59,7 @@ func (a *Aggregate[D]) Append(events ...EventData) error {
 	for _, event := range events {
 		a.UnsavedEvents = append(a.UnsavedEvents, NewBasicEvent(
 			a.ID,
-			a.TypeName(),
+			a.Type.Name,
 			time.Now(),
 			event,
 		))
@@ -67,9 +76,4 @@ func (a *Aggregate[D]) Apply(ctx context.Context, event Event) error {
 	}
 
 	return nil
-}
-
-// TypeName returns the aggregate's type name.
-func (a *Aggregate[D]) TypeName() string {
-	return a.Type.Name
 }

@@ -18,6 +18,8 @@ func (r MemoryWriter[D]) WriteAggregate(ctx context.Context, aggregate *continuu
 		return nil
 	}
 
+	slog.Default().WithGroup("aggregatewriter").Debug("writing aggregate", "id", aggregate.ID, "events", len(aggregate.UnsavedEvents))
+
 	saved := []continuum.Event{}
 	for _, event := range aggregate.UnsavedEvents {
 		if err := r.EventStore.SaveEvent(ctx, event); err != nil {
@@ -30,6 +32,8 @@ func (r MemoryWriter[D]) WriteAggregate(ctx context.Context, aggregate *continuu
 
 		saved = append(saved, event)
 	}
+
+	aggregate.UnsavedEvents = []continuum.Event{}
 
 	return nil
 }
