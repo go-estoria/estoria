@@ -1,6 +1,10 @@
 package continuum
 
-import "time"
+import (
+	"time"
+
+	"github.com/google/uuid"
+)
 
 // An Event is a state change to an entity.
 type Event interface {
@@ -23,6 +27,7 @@ var _ Event = (*BasicEvent)(nil)
 // NewBasicEvent creates a new BasicEvent.
 func NewBasicEvent(aggregateID Identifier, aggregateType string, timestamp time.Time, data EventData) *BasicEvent {
 	return &BasicEvent{
+		id:          UUID(uuid.New()),
 		aggregateID: AggregateID{ID: aggregateID, Type: aggregateType},
 		timestamp:   timestamp,
 		data:        data,

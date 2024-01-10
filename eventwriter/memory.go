@@ -3,6 +3,7 @@ package eventwriter
 import (
 	"context"
 	"fmt"
+	"log/slog"
 
 	"github.com/jefflinse/continuum"
 )
@@ -19,6 +20,8 @@ func (r MemoryWriter) WriteEvent(_ context.Context, event continuum.Event) error
 			}
 		}
 	}
+
+	slog.Default().WithGroup("eventwriter").Debug("writing event", "event_id", event.EventID())
 
 	r.Store = append(r.Store, event)
 	return nil

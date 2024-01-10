@@ -2,6 +2,7 @@ package eventreader
 
 import (
 	"context"
+	"log/slog"
 
 	"github.com/jefflinse/continuum"
 )
@@ -17,6 +18,8 @@ func (r MemoryReader) ReadEvents(_ context.Context, aggregateID continuum.Aggreg
 			events = append(events, event)
 		}
 	}
+
+	slog.Default().WithGroup("eventreader").Debug("reading events", "aggregate_id", aggregateID, "events", len(events))
 
 	return events, nil
 }
