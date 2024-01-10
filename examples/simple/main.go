@@ -32,7 +32,7 @@ func main() {
 			return continuum.UUID(uuid.New())
 		},
 		DataFactory: func() *Account {
-			return NewAccount(continuum.UUID(uuid.New()))
+			return NewAccount()
 		},
 	}
 

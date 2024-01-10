@@ -4,7 +4,9 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strings"
 
+	"github.com/google/uuid"
 	"github.com/jefflinse/continuum"
 )
 
@@ -16,9 +18,9 @@ type Account struct {
 }
 
 // NewAccount creates a new account.
-func NewAccount(id continuum.Identifier) *Account {
+func NewAccount() *Account {
 	return &Account{
-		ID:      id.String(),
+		ID:      strings.Split(uuid.New().String(), "-")[0],
 		Users:   make([]string, 0),
 		Balance: 0,
 	}
