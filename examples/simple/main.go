@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jefflinse/continuum"
@@ -17,6 +18,23 @@ import (
 func main() {
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
 		Level: slog.LevelDebug,
+		ReplaceAttr: func(groups []string, a slog.Attr) slog.Attr {
+			switch a.Key {
+			case "time":
+				t := a.Value.Time()
+				return slog.Attr{
+					Key:   "t",
+					Value: slog.StringValue(t.Format(time.TimeOnly)),
+				}
+			case "level":
+				return slog.Attr{
+					Key:   "l",
+					Value: a.Value,
+				}
+			}
+
+			return a
+		},
 	})))
 	ctx := context.Background()
 
