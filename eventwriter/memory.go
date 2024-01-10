@@ -9,11 +9,11 @@ import (
 )
 
 type MemoryWriter struct {
-	Store []continuum.Event
+	Store *[]continuum.Event
 }
 
-func (r MemoryWriter) WriteEvent(_ context.Context, event continuum.Event) error {
-	for _, e := range r.Store {
+func (r *MemoryWriter) WriteEvent(_ context.Context, event continuum.Event) error {
+	for _, e := range *r.Store {
 		if e.EventID() == event.EventID() {
 			return ErrEventExists{
 				EventID: event.EventID(),
@@ -23,7 +23,7 @@ func (r MemoryWriter) WriteEvent(_ context.Context, event continuum.Event) error
 
 	slog.Default().WithGroup("eventwriter").Debug("writing event", "event_id", event.EventID())
 
-	r.Store = append(r.Store, event)
+	*r.Store = append(*r.Store, event)
 	return nil
 }
 

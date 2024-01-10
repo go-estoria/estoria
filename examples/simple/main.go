@@ -20,10 +20,10 @@ func main() {
 	})))
 	ctx := context.Background()
 
-	events := []continuum.Event{}
+	events := &[]continuum.Event{}
 	eventStore := continuum.EventStore{
 		Reader: eventreader.MemoryReader{Store: events},
-		Writer: eventwriter.MemoryWriter{Store: events},
+		Writer: &eventwriter.MemoryWriter{Store: events},
 	}
 
 	aggregateType := continuum.AggregateType[*Account]{
