@@ -23,14 +23,17 @@ func main() {
 
 	aggregateType := continuum.AggregateType[*Account]{
 		Name: "account",
+		IDFactory: func() continuum.Identifier {
+			return continuum.UUID(uuid.New())
+		},
 		DataFactory: func() *Account {
 			return NewAccount(continuum.UUID(uuid.New()))
 		},
 	}
 
 	aggregateReader := aggregatereader.MemoryReader[*Account]{
-		AggreateFactory: aggregateType.AggregateFactory,
-		EventStore:      eventStore,
+		AggreateType: aggregateType,
+		EventStore:   eventStore,
 	}
 
 	aggregateWritier := aggregatewriter.MemoryWriter[*Account]{EventStore: eventStore}

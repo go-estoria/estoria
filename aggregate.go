@@ -19,14 +19,20 @@ type AggregateFactory[D AggregateData] func() *Aggregate[D]
 type AggregateType[D AggregateData] struct {
 	Name string
 
-	// AggregateFactory is a function that returns a new aggregate instance.
-	AggregateFactory AggregateFactory[D]
-
 	// IDFactory is a function that returns a new aggregate ID.
 	IDFactory AggregateIDFactory
 
 	// DataFactory is a function that returns a new aggregate data instance.
 	DataFactory AggregateDataFactory[D]
+}
+
+// AggregateFactory is a function that returns a new aggregate instance.
+func (t AggregateType[D]) New() *Aggregate[D] {
+	return &Aggregate[D]{
+		Type: t,
+		ID:   t.IDFactory(),
+		Data: t.DataFactory(),
+	}
 }
 
 // An Aggregate is a reconstructed representation of an event-sourced entity's state.

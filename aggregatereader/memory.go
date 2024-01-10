@@ -7,8 +7,8 @@ import (
 )
 
 type MemoryReader[D continuum.AggregateData] struct {
-	AggreateFactory func() *continuum.Aggregate[D]
-	EventStore      continuum.EventStore
+	AggreateType continuum.AggregateType[D]
+	EventStore   continuum.EventStore
 }
 
 func (r MemoryReader[D]) ReadAggregate(ctx context.Context, id continuum.AggregateID) (*continuum.Aggregate[D], error) {
@@ -17,8 +17,7 @@ func (r MemoryReader[D]) ReadAggregate(ctx context.Context, id continuum.Aggrega
 		return nil, err
 	}
 
-	aggregate := r.AggreateFactory()
-	aggregate.Data = aggregate.Type.DataFactory()
+	aggregate := r.AggreateType.New()
 
 	for _, event := range events {
 		aggregate.Data.ApplyEvent(ctx, event.Data())
