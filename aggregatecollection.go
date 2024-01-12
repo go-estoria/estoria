@@ -16,6 +16,7 @@ type AggregateWriter[D AggregateData] interface {
 	WriteAggregate(ctx context.Context, aggregate *Aggregate[D]) error
 }
 
+// An AggregateCollection is a collection of a specific type of aggregate.
 type AggregateCollection[D AggregateData] struct {
 	AggregateType AggregateType[D]
 	Reader        AggregateReader[D]
@@ -23,14 +24,14 @@ type AggregateCollection[D AggregateData] struct {
 }
 
 func NewAggregateCollection[D AggregateData](aggregateType AggregateType[D], reader AggregateReader[D], writer AggregateWriter[D]) (*AggregateCollection[D], error) {
-	if aggregateType.IDFactory == nil {
+	if aggregateType.newID == nil {
 		slog.Warn("aggregate type defaults to UUID ID factory", "type", aggregateType.Name)
-		aggregateType.IDFactory = func() Identifier {
+		aggregateType.newID = func() Identifier {
 			return UUID(uuid.New())
 		}
 	}
 
-	if aggregateType.DataFactory == nil {
+	if aggregateType.newData == nil {
 		return nil, fmt.Errorf("aggregate type %s is missing a data factory", aggregateType.Name)
 	}
 

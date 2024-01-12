@@ -62,11 +62,7 @@ func main() {
 		EventStore: eventStore,
 	}
 
-	aggregateCollection, err := continuum.NewAggregateCollection(
-		aggregateType,
-		aggregateReader,
-		aggregateWriter,
-	)
+	aggregateCollection, err := continuum.NewAggregateCollection(aggregateType, aggregateReader, aggregateWriter)
 	if err != nil {
 		panic(err)
 	}
