@@ -7,43 +7,6 @@ import (
 	"time"
 )
 
-// An AggregateIDFactory is a function that returns a new aggregate ID.
-type AggregateIDFactory func() Identifier
-
-// An AggregateDataFactory is a function that returns a new aggregate data instance.
-type AggregateDataFactory[D AggregateData] func() D
-
-// An AggregateFactory is a function that returns a new aggregate instance.
-type AggregateFactory[D AggregateData] func() *Aggregate[D]
-
-type AggregateType[D AggregateData] struct {
-	Name string
-
-	// IDFactory is a function that returns a new aggregate ID.
-	IDFactory AggregateIDFactory
-
-	// DataFactory is a function that returns a new aggregate data instance.
-	DataFactory AggregateDataFactory[D]
-}
-
-// AggregateFactory is a function that returns a new aggregate instance.
-func (t AggregateType[D]) New(id Identifier) *Aggregate[D] {
-	isNew := id == nil
-	if isNew {
-		id = t.IDFactory()
-	}
-
-	aggregate := &Aggregate[D]{
-		Type: t,
-		ID:   id,
-		Data: t.DataFactory(),
-	}
-
-	slog.Info("instantiating aggregate", "new", isNew, "type", t.Name, "id", aggregate.ID)
-
-	return aggregate
-}
-
 // An Aggregate is a reconstructed representation of an event-sourced entity's state.
 type Aggregate[D AggregateData] struct {
 	Type          AggregateType[D]
