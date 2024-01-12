@@ -22,8 +22,26 @@ type AggregateType[D AggregateData] struct {
 	DataFactory AggregateDataFactory[D]
 }
 
-// New is a function that returns a new aggregate instance.
-func (t AggregateType[D]) New(id Identifier) *Aggregate[D] {
+func NewAggregateType[D AggregateData](name string, dataFactory AggregateDataFactory[D], opts ...AggregateTypeOption[D]) AggregateType[D] {
+	if dataFactory == nil {
+		panic("aggregate type has no data factory")
+	}
+
+	aggregateType := AggregateType[D]{
+		Name:        name,
+		IDFactory:   DefaultAggregateIDFactory(),
+		DataFactory: dataFactory,
+	}
+
+	for _, opt := range opts {
+		opt(&aggregateType)
+	}
+
+	return aggregateType
+}
+
+// NewAggregate is a function that returns a new aggregate instance.
+func (t AggregateType[D]) NewAggregate(id Identifier) *Aggregate[D] {
 	isNew := id == nil
 	if isNew {
 		if t.IDFactory == nil {
@@ -49,8 +67,18 @@ func (t AggregateType[D]) New(id Identifier) *Aggregate[D] {
 	return aggregate
 }
 
+// DefaultAggregateIDFactory is a function that returns a new UUID.
 func DefaultAggregateIDFactory() AggregateIDFactory {
 	return func() Identifier {
 		return UUID(uuid.New())
+	}
+}
+
+type AggregateTypeOption[D AggregateData] func(*AggregateType[D])
+
+// WithAggregateIDFactory is an AggregateTypeOption that sets the aggregate ID factory.
+func WithAggregateIDFactory[D AggregateData](factory AggregateIDFactory) AggregateTypeOption[D] {
+	return func(t *AggregateType[D]) {
+		t.IDFactory = factory
 	}
 }

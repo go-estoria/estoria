@@ -42,7 +42,7 @@ func NewAggregateCollection[D AggregateData](aggregateType AggregateType[D], rea
 }
 
 func (c *AggregateCollection[D]) Create(id Identifier) *Aggregate[D] {
-	return c.AggregateType.New(id)
+	return c.AggregateType.NewAggregate(id)
 }
 
 func (c *AggregateCollection[D]) Load(ctx context.Context, id Identifier) (*Aggregate[D], error) {
