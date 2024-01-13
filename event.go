@@ -14,19 +14,19 @@ type Event interface {
 	Data() EventData
 }
 
-// BasicEvent represents a state change to an entity.
-type BasicEvent struct {
+// The internal representation of an event.
+type event struct {
 	id          Identifier
 	aggregateID AggregateID
 	timestamp   time.Time
 	data        EventData
 }
 
-var _ Event = (*BasicEvent)(nil)
+var _ Event = (*event)(nil)
 
-// NewBasicEvent creates a new BasicEvent.
-func NewBasicEvent(aggregateID Identifier, aggregateType string, timestamp time.Time, data EventData) *BasicEvent {
-	return &BasicEvent{
+// newEvent creates a new BasicEvent.
+func newEvent(aggregateID Identifier, aggregateType string, timestamp time.Time, data EventData) *event {
+	return &event{
 		id:          UUID(uuid.New()),
 		aggregateID: AggregateID{ID: aggregateID, Type: aggregateType},
 		timestamp:   timestamp,
@@ -35,22 +35,22 @@ func NewBasicEvent(aggregateID Identifier, aggregateType string, timestamp time.
 }
 
 // EventID returns the ID of the event.
-func (e *BasicEvent) EventID() Identifier {
+func (e *event) EventID() Identifier {
 	return e.id
 }
 
 // AggregateID returns the ID of the aggregate that the event applies to.
-func (e *BasicEvent) AggregateID() AggregateID {
+func (e *event) AggregateID() AggregateID {
 	return e.aggregateID
 }
 
 // Timestamp returns the time that the event occurred.
-func (e *BasicEvent) Timestamp() time.Time {
+func (e *event) Timestamp() time.Time {
 	return e.timestamp
 }
 
 // Data returns the event's data.
-func (e *BasicEvent) Data() EventData {
+func (e *event) Data() EventData {
 	return e.data
 }
 
@@ -60,7 +60,7 @@ type EventData interface {
 }
 
 // EventsByID maps aggregate IDs to events.
-type EventsByID map[Identifier][]*BasicEvent
+type EventsByID map[Identifier][]*event
 
 // EventsByAggregateType maps aggregate types to events by ID.
 type EventsByAggregateType map[string]EventsByID

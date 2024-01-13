@@ -20,7 +20,7 @@ func (a *Aggregate[D]) Append(events ...EventData) error {
 	slog.Info("appending events to aggregate", "events", len(events), "aggregate_id", a.ID)
 
 	for _, event := range events {
-		a.UnsavedEvents = append(a.UnsavedEvents, NewBasicEvent(
+		a.UnsavedEvents = append(a.UnsavedEvents, newEvent(
 			a.ID,
 			a.Type.Name,
 			time.Now(),
