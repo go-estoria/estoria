@@ -9,12 +9,12 @@ import (
 )
 
 // EventStoreWriter is an AggregateWriter that writes aggregates to an event store.
-type EventStoreWriter[D continuum.AggregateData] struct {
+type EventStoreWriter struct {
 	EventStore continuum.EventStore
 }
 
 // WriteAggregate writes an aggregate to the event store.
-func (r EventStoreWriter[D]) WriteAggregate(ctx context.Context, aggregate *continuum.Aggregate[D]) error {
+func (r EventStoreWriter) WriteAggregate(ctx context.Context, aggregate *continuum.Aggregate) error {
 	if len(aggregate.UnsavedEvents) == 0 {
 		slog.Warn("saving aggregate containing no unsaved events", "aggregate_id", aggregate.ID)
 		return nil

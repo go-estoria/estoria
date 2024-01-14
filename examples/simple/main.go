@@ -36,6 +36,7 @@ func main() {
 			return a
 		},
 	})))
+
 	ctx := context.Background()
 
 	events := &[]continuum.Event{}
@@ -44,21 +45,21 @@ func main() {
 		Writer: &eventwriter.MemoryWriter{Store: events},
 	}
 
-	aggregateType := continuum.NewAggregateType[*Account]("account",
-		func() *Account {
+	aggregateType := continuum.NewAggregateType("account",
+		func() continuum.AggregateData {
 			return NewAccount()
 		},
-		continuum.WithAggregateIDFactory[*Account](func() continuum.Identifier {
+		continuum.WithAggregateIDFactory(func() continuum.Identifier {
 			return continuum.UUID(uuid.New())
 		}),
 	)
 
-	aggregateReader := aggregatereader.EventStoreReader[*Account]{
+	aggregateReader := aggregatereader.EventStoreReader{
 		AggregateType: aggregateType,
 		EventStore:    eventStore,
 	}
 
-	aggregateWriter := aggregatewriter.EventStoreWriter[*Account]{
+	aggregateWriter := aggregatewriter.EventStoreWriter{
 		EventStore: eventStore,
 	}
 
