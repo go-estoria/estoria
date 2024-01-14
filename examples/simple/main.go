@@ -53,12 +53,12 @@ func main() {
 		}),
 	)
 
-	aggregateReader := aggregatereader.MemoryReader[*Account]{
+	aggregateReader := aggregatereader.EventStoreReader[*Account]{
 		AggregateType: aggregateType,
 		EventStore:    eventStore,
 	}
 
-	aggregateWriter := aggregatewriter.MemoryWriter[*Account]{
+	aggregateWriter := aggregatewriter.EventStoreWriter[*Account]{
 		EventStore: eventStore,
 	}
 
