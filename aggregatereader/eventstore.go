@@ -21,8 +21,7 @@ type EventLoader interface {
 
 // EventStoreReader is an AggregateReader that reads aggregates from an event store.
 type EventStoreReader struct {
-	AggregateType AggregateCreator
-	EventStore    EventLoader
+	EventStore EventLoader
 }
 
 // ReadAggregate reads an aggregate from the event store.
@@ -33,7 +32,7 @@ func (r EventStoreReader) ReadAggregate(ctx context.Context, id continuum.Aggreg
 		return nil, err
 	}
 
-	aggregate := r.AggregateType.NewAggregate(id.ID)
+	aggregate := id.Type().NewAggregate(id.ID)
 
 	for _, event := range events {
 		if err := aggregate.Apply(ctx, event); err != nil {

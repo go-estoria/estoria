@@ -45,6 +45,14 @@ func main() {
 		Writer: &eventwriter.MemoryWriter{Store: events},
 	}
 
+	aggregateReader := aggregatereader.EventStoreReader{
+		EventStore: eventStore,
+	}
+
+	aggregateWriter := aggregatewriter.EventStoreWriter{
+		EventStore: eventStore,
+	}
+
 	aggregateType, err := continuum.NewAggregateType("account",
 		func() continuum.AggregateData {
 			return NewAccount()
@@ -55,15 +63,6 @@ func main() {
 	)
 	if err != nil {
 		panic(err)
-	}
-
-	aggregateReader := aggregatereader.EventStoreReader{
-		AggregateType: aggregateType,
-		EventStore:    eventStore,
-	}
-
-	aggregateWriter := aggregatewriter.EventStoreWriter{
-		EventStore: eventStore,
 	}
 
 	aggregateCollection, err := continuum.NewAggregateCollection(aggregateType, aggregateReader, aggregateWriter)
