@@ -87,7 +87,7 @@ func main() {
 		panic(err)
 	}
 
-	aggregate, err = aggregateCollection.Load(ctx, aggregate.ID)
+	aggregate, err = aggregateCollection.Load(ctx, aggregate.ID())
 	if err != nil {
 		panic(err)
 	}
@@ -114,6 +114,6 @@ func main() {
 	// 	panic(err)
 	// }
 
-	account := aggregate.Data
+	account := aggregate.Data().(*Account)
 	fmt.Println(account)
 }

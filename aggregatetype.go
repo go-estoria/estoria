@@ -61,11 +61,11 @@ func (t *AggregateType) NewAggregate(id Identifier) *Aggregate {
 	}
 
 	aggregate := &Aggregate{
-		ID: AggregateID{
-			Type: t,
-			ID:   id,
+		id: AggregateID{
+			typ: t,
+			ID:  id,
 		},
-		Data: t.newData(),
+		data: t.newData(),
 	}
 
 	return aggregate

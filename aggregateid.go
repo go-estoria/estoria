@@ -3,14 +3,14 @@ package continuum
 import "fmt"
 
 type AggregateID struct {
-	Type *AggregateType
-	ID   Identifier
+	ID  Identifier
+	typ *AggregateType
 }
 
 func (id AggregateID) String() string {
-	return fmt.Sprintf("%s:%s", id.Type.name, id.ID)
+	return fmt.Sprintf("%s:%s", id.typ.name, id.ID)
 }
 
 func (id AggregateID) Equals(other AggregateID) bool {
-	return id.Type.name == other.Type.name && id.ID.Equals(other.ID)
+	return id.typ.name == other.typ.name && id.ID.Equals(other.ID)
 }

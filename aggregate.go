@@ -9,9 +9,17 @@ import (
 
 // An Aggregate is a reconstructed representation of an event-sourced entity's state.
 type Aggregate struct {
-	ID            AggregateID
-	Data          AggregateData
+	id            AggregateID
+	data          AggregateData
 	UnsavedEvents []Event
+}
+
+func (a *Aggregate) ID() AggregateID {
+	return a.id
+}
+
+func (a *Aggregate) Data() AggregateData {
+	return a.data
 }
 
 // Append appends the given events to the aggregate's unsaved events.
@@ -20,7 +28,7 @@ func (a *Aggregate) Append(events ...EventData) error {
 
 	for _, event := range events {
 		a.UnsavedEvents = append(a.UnsavedEvents, newEvent(
-			a.ID,
+			a.ID(),
 			time.Now(),
 			event,
 		))
@@ -32,7 +40,7 @@ func (a *Aggregate) Append(events ...EventData) error {
 // Apply applies the given events to the aggregate's state.
 func (a *Aggregate) Apply(ctx context.Context, event Event) error {
 	slog.Debug("applying event to aggregate", "aggregate_id", a.ID, "event", event.EventID())
-	if err := a.Data.ApplyEvent(ctx, event.Data()); err != nil {
+	if err := a.data.ApplyEvent(ctx, event.Data()); err != nil {
 		return fmt.Errorf("applying event: %w", err)
 	}
 
