@@ -26,7 +26,7 @@ type EventStoreReader struct {
 
 // ReadAggregate reads an aggregate from the event store.
 func (r EventStoreReader) ReadAggregate(ctx context.Context, id continuum.AggregateID) (*continuum.Aggregate, error) {
-	slog.Default().WithGroup("aggregatereader").Debug("reading aggregate", "id", id)
+	slog.Default().WithGroup("aggregatereader").Debug("reading aggregate", "aggregate_id", id)
 	events, err := r.EventStore.LoadEvents(ctx, id)
 	if err != nil {
 		return nil, err

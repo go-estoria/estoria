@@ -17,7 +17,7 @@ func (r MemoryReader) ReadEvents(_ context.Context, aggregateID continuum.Aggreg
 	events := []continuum.Event{}
 	for _, event := range *r.Store {
 		if event.AggregateID().Equals(aggregateID) {
-			slog.Default().WithGroup("eventreader").Debug("reading event", "aggregate_id", aggregateID, "event_id", event.EventID())
+			slog.Default().WithGroup("eventreader").Debug("reading event", "event_id", event.ID())
 			events = append(events, event)
 		}
 	}

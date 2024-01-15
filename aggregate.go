@@ -24,7 +24,7 @@ func (a *Aggregate) Data() AggregateData {
 
 // Append appends the given events to the aggregate's unsaved events.
 func (a *Aggregate) Append(events ...EventData) error {
-	slog.Debug("appending events to aggregate", "events", len(events), "aggregate_id", a.ID)
+	slog.Debug("appending events to aggregate", "aggregate_id", a.ID(), "events", len(events))
 
 	for _, event := range events {
 		a.UnsavedEvents = append(a.UnsavedEvents, newEvent(
@@ -39,7 +39,7 @@ func (a *Aggregate) Append(events ...EventData) error {
 
 // Apply applies the given events to the aggregate's state.
 func (a *Aggregate) Apply(ctx context.Context, event Event) error {
-	slog.Debug("applying event to aggregate", "aggregate_id", a.ID, "event", event.EventID())
+	slog.Debug("applying event to aggregate", "aggregate_id", a.ID(), "event_id", event.ID())
 	if err := a.data.ApplyEvent(ctx, event.Data()); err != nil {
 		return fmt.Errorf("applying event: %w", err)
 	}

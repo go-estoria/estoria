@@ -8,7 +8,7 @@ import (
 
 // An Event is a state change to an entity.
 type Event interface {
-	EventID() Identifier
+	ID() EventID
 	AggregateID() AggregateID
 	Timestamp() time.Time
 	Data() EventData
@@ -16,7 +16,7 @@ type Event interface {
 
 // The internal representation of an event.
 type event struct {
-	id          Identifier
+	id          EventID
 	aggregateID AggregateID
 	timestamp   time.Time
 	data        EventData
@@ -27,7 +27,11 @@ var _ Event = (*event)(nil)
 // newEvent creates a new BasicEvent.
 func newEvent(aggregateID AggregateID, timestamp time.Time, data EventData) *event {
 	return &event{
-		id:          UUID(uuid.New()),
+		id: EventID{
+			EventType:   data.EventType(),
+			ID:          UUID(uuid.New()),
+			AggregateID: aggregateID,
+		},
 		aggregateID: aggregateID,
 		timestamp:   timestamp,
 		data:        data,
@@ -35,7 +39,7 @@ func newEvent(aggregateID AggregateID, timestamp time.Time, data EventData) *eve
 }
 
 // EventID returns the ID of the event.
-func (e *event) EventID() Identifier {
+func (e *event) ID() EventID {
 	return e.id
 }
 
@@ -58,9 +62,3 @@ func (e *event) Data() EventData {
 type EventData interface {
 	EventType() string
 }
-
-// EventsByID maps aggregate IDs to events.
-type EventsByID map[Identifier][]*event
-
-// EventsByAggregateType maps aggregate types to events by ID.
-type EventsByAggregateType map[string]EventsByID

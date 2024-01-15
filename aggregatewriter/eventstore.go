@@ -20,7 +20,7 @@ type EventStoreWriter struct {
 
 // WriteAggregate writes an aggregate to the event store.
 func (r EventStoreWriter) WriteAggregate(ctx context.Context, aggregate *continuum.Aggregate) error {
-	slog.Default().WithGroup("aggregatewriter").Debug("writing aggregate", "id", aggregate.ID, "events", len(aggregate.UnsavedEvents))
+	slog.Default().WithGroup("aggregatewriter").Debug("writing aggregate", "aggregate_id", aggregate.ID(), "events", len(aggregate.UnsavedEvents))
 
 	if len(aggregate.UnsavedEvents) == 0 {
 		return nil
@@ -51,5 +51,5 @@ type ErrEventSaveFailed struct {
 }
 
 func (e ErrEventSaveFailed) Error() string {
-	return fmt.Sprintf("saving event %s: %s", e.FailedEvent.EventID(), e.Err)
+	return fmt.Sprintf("saving event %s: %s", e.FailedEvent.ID(), e.Err)
 }

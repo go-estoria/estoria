@@ -16,14 +16,14 @@ type MemoryWriter struct {
 // WriteEvent writes an event to the in-memory store.
 func (r *MemoryWriter) WriteEvent(_ context.Context, event continuum.Event) error {
 	for _, e := range *r.Store {
-		if e.EventID() == event.EventID() {
+		if eventID := event.ID(); e.ID().Equals(eventID) {
 			return ErrEventExists{
-				EventID: event.EventID(),
+				EventID: eventID,
 			}
 		}
 	}
 
-	slog.Default().WithGroup("eventwriter").Debug("writing event", "event_id", event.EventID())
+	slog.Default().WithGroup("eventwriter").Debug("writing event", "event_id", event.ID())
 
 	*r.Store = append(*r.Store, event)
 	return nil
@@ -31,7 +31,7 @@ func (r *MemoryWriter) WriteEvent(_ context.Context, event continuum.Event) erro
 
 // ErrEventExists is returned when attempting to write an event that already exists.
 type ErrEventExists struct {
-	EventID continuum.Identifier
+	EventID continuum.EventID
 }
 
 // Error returns the error message.
