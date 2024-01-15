@@ -31,8 +31,8 @@ func NewAggregateCollection(aggregateType *AggregateType, reader AggregateReader
 	}, nil
 }
 
-func (c *AggregateCollection) Create(id Identifier) *Aggregate {
-	return c.AggregateFactory.NewAggregate(id)
+func (c *AggregateCollection) Create() *Aggregate {
+	return c.AggregateFactory.NewAggregate(nil)
 }
 
 func (c *AggregateCollection) Load(ctx context.Context, id AggregateID) (*Aggregate, error) {

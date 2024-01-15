@@ -71,7 +71,7 @@ func main() {
 		panic(err)
 	}
 
-	aggregate := aggregateCollection.Create(nil)
+	aggregate := aggregateCollection.Create()
 
 	if err := aggregate.Append(
 		&UserCreatedEvent{Username: "jdoe"},
