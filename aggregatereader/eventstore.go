@@ -8,10 +8,13 @@ import (
 	"github.com/jefflinse/continuum"
 )
 
+// An AggregateCreator is used by the AggregateReader to create new aggregates
+// before populating them with events from the event store.
 type AggregateCreator interface {
 	NewAggregate(id continuum.Identifier) *continuum.Aggregate
 }
 
+// An EventLoader is used by the AggregateReader to load events from an event store.
 type EventLoader interface {
 	LoadEvents(ctx context.Context, id continuum.AggregateID) ([]continuum.Event, error)
 }

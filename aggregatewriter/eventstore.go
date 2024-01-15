@@ -8,6 +8,7 @@ import (
 	"github.com/jefflinse/continuum"
 )
 
+// An EventSaver is used by the AggregateWriter to save events to an event store.
 type EventSaver interface {
 	SaveEvent(ctx context.Context, event continuum.Event) error
 }
@@ -19,12 +20,11 @@ type EventStoreWriter struct {
 
 // WriteAggregate writes an aggregate to the event store.
 func (r EventStoreWriter) WriteAggregate(ctx context.Context, aggregate *continuum.Aggregate) error {
+	slog.Default().WithGroup("aggregatewriter").Debug("writing aggregate", "id", aggregate.ID, "events", len(aggregate.UnsavedEvents))
+
 	if len(aggregate.UnsavedEvents) == 0 {
-		slog.Warn("saving aggregate containing no unsaved events", "aggregate_id", aggregate.ID)
 		return nil
 	}
-
-	slog.Default().WithGroup("aggregatewriter").Debug("writing aggregate", "id", aggregate.ID, "events", len(aggregate.UnsavedEvents))
 
 	saved := []continuum.Event{}
 	for _, event := range aggregate.UnsavedEvents {
