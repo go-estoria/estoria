@@ -25,10 +25,10 @@ type event struct {
 var _ Event = (*event)(nil)
 
 // newEvent creates a new BasicEvent.
-func newEvent(aggregateID Identifier, aggregateType string, timestamp time.Time, data EventData) *event {
+func newEvent(aggregateID AggregateID, timestamp time.Time, data EventData) *event {
 	return &event{
 		id:          UUID(uuid.New()),
-		aggregateID: AggregateID{ID: aggregateID, Type: aggregateType},
+		aggregateID: aggregateID,
 		timestamp:   timestamp,
 		data:        data,
 	}

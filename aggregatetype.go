@@ -1,6 +1,7 @@
 package continuum
 
 import (
+	"fmt"
 	"log/slog"
 
 	"github.com/google/uuid"
@@ -13,7 +14,7 @@ type AggregateIDFactory func() Identifier
 type AggregateDataFactory func() AggregateData
 
 type AggregateType struct {
-	Name string
+	name string
 
 	// newID returns a new aggregate ID.
 	newID AggregateIDFactory
@@ -22,22 +23,32 @@ type AggregateType struct {
 	newData AggregateDataFactory
 }
 
-func NewAggregateType(name string, dataFactory AggregateDataFactory, opts ...AggregateTypeOption) AggregateType {
-	if dataFactory == nil {
-		panic("aggregate type has no data factory")
+func NewAggregateType(name string, dataFactory AggregateDataFactory, opts ...AggregateTypeOption) (*AggregateType, error) {
+	slog.Debug("creating aggregate type", "type", name)
+	if name == "" {
+		return nil, fmt.Errorf("aggregate type name is required")
 	}
 
-	aggregateType := AggregateType{
-		Name:    name,
+	if dataFactory == nil {
+		return nil, fmt.Errorf("aggregate type %s requires a data factory", name)
+	}
+
+	aggregateType := &AggregateType{
+		name:    name,
 		newID:   DefaultAggregateIDFactory(),
 		newData: dataFactory,
 	}
 
-	for _, opt := range opts {
-		opt(&aggregateType)
+	for i, opt := range opts {
+		slog.Debug(fmt.Sprintf("applying aggregate type option (%d of %d)", i+1, len(opts)))
+		opt(aggregateType)
 	}
 
-	return aggregateType
+	if aggregateType.newID == nil {
+		return nil, fmt.Errorf("aggregate type %s requires an ID factory", name)
+	}
+
+	return aggregateType, nil
 }
 
 // NewAggregate returns a new aggregate instance.
@@ -45,7 +56,7 @@ func (t AggregateType) NewAggregate(id Identifier) *Aggregate {
 	isNew := id == nil
 	if isNew {
 		if t.newID == nil {
-			slog.Warn("aggregate type has no ID factory, using default", "aggregate_type", t.Name)
+			slog.Warn("aggregate type has no ID factory, using default", "aggregate_type", t.name)
 			t.newID = DefaultAggregateIDFactory()
 		}
 
@@ -57,12 +68,14 @@ func (t AggregateType) NewAggregate(id Identifier) *Aggregate {
 	}
 
 	aggregate := &Aggregate{
-		Type: t,
-		ID:   id,
+		ID: AggregateID{
+			Type: t,
+			ID:   id,
+		},
 		Data: t.newData(),
 	}
 
-	slog.Info("instantiating aggregate", "new", isNew, "type", t.Name, "id", aggregate.ID)
+	slog.Debug("instantiating aggregate", "new", isNew, "type", t.name, "id", aggregate.ID)
 
 	return aggregate
 }
@@ -74,6 +87,7 @@ func DefaultAggregateIDFactory() AggregateIDFactory {
 	}
 }
 
+// An AggregateTypeOption is an option for configuring an AggregateType.
 type AggregateTypeOption func(*AggregateType)
 
 // WithAggregateIDFactory is an AggregateTypeOption that sets the aggregate ID factory.
