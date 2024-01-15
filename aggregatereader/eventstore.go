@@ -8,10 +8,18 @@ import (
 	"github.com/jefflinse/continuum"
 )
 
+type AggregateCreator interface {
+	NewAggregate(id continuum.Identifier) *continuum.Aggregate
+}
+
+type EventLoader interface {
+	LoadEvents(ctx context.Context, id continuum.AggregateID) ([]continuum.Event, error)
+}
+
 // EventStoreReader is an AggregateReader that reads aggregates from an event store.
 type EventStoreReader struct {
-	AggregateType continuum.AggregateType
-	EventStore    continuum.EventStore
+	AggregateType AggregateCreator
+	EventStore    EventLoader
 }
 
 // ReadAggregate reads an aggregate from the event store.

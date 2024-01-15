@@ -8,9 +8,13 @@ import (
 	"github.com/jefflinse/continuum"
 )
 
+type EventSaver interface {
+	SaveEvent(ctx context.Context, event continuum.Event) error
+}
+
 // EventStoreWriter is an AggregateWriter that writes aggregates to an event store.
 type EventStoreWriter struct {
-	EventStore continuum.EventStore
+	EventStore EventSaver
 }
 
 // WriteAggregate writes an aggregate to the event store.
