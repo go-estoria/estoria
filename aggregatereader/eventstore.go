@@ -36,7 +36,7 @@ func (r EventStoreReader) ReadAggregate(ctx context.Context, id continuum.Aggreg
 	aggregate := r.AggregateType.NewAggregate(id.ID)
 
 	for _, event := range events {
-		if err := aggregate.Data.ApplyEvent(ctx, event.Data()); err != nil {
+		if err := aggregate.Apply(ctx, event); err != nil {
 			return nil, fmt.Errorf("applying event: %w", err)
 		}
 	}

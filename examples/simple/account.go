@@ -31,17 +31,17 @@ func (a *Account) ApplyEvent(_ context.Context, event continuum.EventData) error
 	switch e := event.(type) {
 
 	case *BalanceChangedEvent:
-		slog.Info("applying balance changed event", "amount", e.Amount)
+		slog.Info("applying balance changed event data", "amount", e.Amount)
 		a.Balance += e.Amount
 		return nil
 
 	case *UserCreatedEvent:
-		slog.Info("applying user created event", "username", e.Username)
+		slog.Info("applying user created event data", "username", e.Username)
 		a.Users = append(a.Users, e.Username)
 		return nil
 
 	case *UserDeletedEvent:
-		slog.Info("applying user deleted event", "username", e.Username)
+		slog.Info("applying user deleted event data", "username", e.Username)
 		for i, user := range a.Users {
 			if user == e.Username {
 				a.Users = append(a.Users[:i], a.Users[i+1:]...)
