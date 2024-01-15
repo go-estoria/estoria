@@ -51,6 +51,11 @@ func NewAggregateType(name string, dataFactory AggregateDataFactory, opts ...Agg
 	return aggregateType, nil
 }
 
+// Name returns the aggregate type name.
+func (t *AggregateType) Name() string {
+	return t.name
+}
+
 // NewAggregate returns a new aggregate instance.
 func (t *AggregateType) NewAggregate(id Identifier) *Aggregate {
 	if id == nil {

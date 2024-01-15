@@ -53,7 +53,13 @@ func main() {
 		EventStore: eventStore,
 	}
 
-	aggregateType, err := continuum.NewAggregateType("account",
+	aggregateCollection, err := continuum.NewAggregateStore(aggregateReader, aggregateWriter)
+	if err != nil {
+		panic(err)
+	}
+
+	// define an aggregate type
+	accountAggregateType, err := continuum.NewAggregateType("account",
 		func() continuum.AggregateData {
 			return NewAccount()
 		},
@@ -65,12 +71,8 @@ func main() {
 		panic(err)
 	}
 
-	aggregateCollection, err := continuum.NewAggregateCollection(aggregateType, aggregateReader, aggregateWriter)
-	if err != nil {
-		panic(err)
-	}
-
-	aggregate := aggregateCollection.Create()
+	// create an aggregate instance
+	aggregate := accountAggregateType.NewAggregate(nil)
 
 	if err := aggregate.Append(
 		&UserCreatedEvent{Username: "jdoe"},
@@ -82,11 +84,13 @@ func main() {
 		panic(err)
 	}
 
+	// save the aggregate
 	if err := aggregateCollection.Save(ctx, aggregate); err != nil {
 		panic(err)
 	}
 
-	aggregate, err = aggregateCollection.Load(ctx, aggregate.ID())
+	// load the aggregate
+	loadedAggregate, err := aggregateCollection.Load(ctx, aggregate.ID())
 	if err != nil {
 		panic(err)
 	}
@@ -113,6 +117,6 @@ func main() {
 	// 	panic(err)
 	// }
 
-	account := aggregate.Data().(*Account)
+	account := loadedAggregate.Data().(*Account)
 	fmt.Println(account)
 }
