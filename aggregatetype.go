@@ -7,7 +7,7 @@ import (
 	"github.com/google/uuid"
 )
 
-// An AggregateIDFactory returns a new aggregate ID.
+// An AggregateIDFactory returns a new identifier for an aggregate.
 type AggregateIDFactory func() Identifier
 
 // An AggregateDataFactory returns a new aggregate data instance.
@@ -53,18 +53,11 @@ func NewAggregateType(name string, dataFactory AggregateDataFactory, opts ...Agg
 
 // NewAggregate returns a new aggregate instance.
 func (t AggregateType) NewAggregate(id Identifier) *Aggregate {
-	isNew := id == nil
-	if isNew {
-		if t.newID == nil {
-			slog.Warn("aggregate type has no ID factory, using default", "aggregate_type", t.name)
-			t.newID = DefaultAggregateIDFactory()
-		}
-
+	if id == nil {
 		id = t.newID()
-	}
-
-	if t.newData == nil {
-		panic("aggregate type has no data factory")
+		slog.Debug("creating new aggregate", "type", t.name, "id", id)
+	} else {
+		slog.Debug("creating aggregate from existing ID", "type", t.name, "id", id)
 	}
 
 	aggregate := &Aggregate{
@@ -74,8 +67,6 @@ func (t AggregateType) NewAggregate(id Identifier) *Aggregate {
 		},
 		Data: t.newData(),
 	}
-
-	slog.Debug("instantiating aggregate", "new", isNew, "type", t.name, "id", aggregate.ID)
 
 	return aggregate
 }
