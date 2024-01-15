@@ -3,7 +3,7 @@ package continuum
 import "fmt"
 
 type AggregateID struct {
-	Type AggregateType
+	Type *AggregateType
 	ID   Identifier
 }
 

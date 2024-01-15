@@ -52,7 +52,7 @@ func NewAggregateType(name string, dataFactory AggregateDataFactory, opts ...Agg
 }
 
 // NewAggregate returns a new aggregate instance.
-func (t AggregateType) NewAggregate(id Identifier) *Aggregate {
+func (t *AggregateType) NewAggregate(id Identifier) *Aggregate {
 	if id == nil {
 		id = t.newID()
 		slog.Debug("creating new aggregate", "type", t.name, "id", id)
