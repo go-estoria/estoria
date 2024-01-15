@@ -32,7 +32,7 @@ func (r EventStoreReader) ReadAggregate(ctx context.Context, id continuum.Aggreg
 		return nil, err
 	}
 
-	aggregate := id.Type().NewAggregate(id.ID)
+	aggregate := id.NewAggregate()
 
 	for _, event := range events {
 		if err := aggregate.Apply(ctx, event); err != nil {

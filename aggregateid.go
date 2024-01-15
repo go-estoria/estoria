@@ -18,3 +18,7 @@ func (id AggregateID) String() string {
 func (id AggregateID) Type() *AggregateType {
 	return id.typ
 }
+
+func (id AggregateID) NewAggregate() *Aggregate {
+	return id.Type().NewAggregate(id.ID)
+}
