@@ -31,7 +31,7 @@ func (a *Aggregate) Append(events ...EventData) error {
 
 // Apply applies the given events to the aggregate's state.
 func (a *Aggregate) Apply(ctx context.Context, event Event) error {
-	slog.Debug("applying event to aggregate", "event", event.EventID(), "aggregate_id", a.ID)
+	slog.Debug("applying event to aggregate", "aggregate_id", a.ID, "event", event.EventID())
 	if err := a.Data.ApplyEvent(ctx, event.Data()); err != nil {
 		return fmt.Errorf("applying event: %w", err)
 	}
