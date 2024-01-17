@@ -4,10 +4,6 @@ import (
 	"context"
 )
 
-type AggregateCreator interface {
-	NewAggregate(id Identifier) *Aggregate
-}
-
 type AggregateReader interface {
 	ReadAggregate(ctx context.Context, id AggregateID) (*Aggregate, error)
 }
