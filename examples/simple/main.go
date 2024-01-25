@@ -9,10 +9,8 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jefflinse/continuum"
-	"github.com/jefflinse/continuum/aggregatereader"
-	"github.com/jefflinse/continuum/aggregatewriter"
-	"github.com/jefflinse/continuum/eventreader"
-	"github.com/jefflinse/continuum/eventwriter"
+	"github.com/jefflinse/continuum/aggregatestore/memory"
+	memoryes "github.com/jefflinse/continuum/eventstore/memory"
 )
 
 func main() {
@@ -39,21 +37,9 @@ func main() {
 
 	ctx := context.Background()
 
-	events := &[]continuum.Event{}
-	eventStore := continuum.EventStore{
-		Reader: eventreader.MemoryReader{Store: events},
-		Writer: &eventwriter.MemoryWriter{Store: events},
-	}
+	eventStore := &memoryes.EventStore{}
 
-	aggregateReader := aggregatereader.EventStoreReader{
-		EventStore: eventStore,
-	}
-
-	aggregateWriter := aggregatewriter.EventStoreWriter{
-		EventStore: eventStore,
-	}
-
-	aggregateCollection, err := continuum.NewAggregateStore(aggregateReader, aggregateWriter)
+	aggregateCollection, err := memory.NewAggregateStore(eventStore)
 	if err != nil {
 		panic(err)
 	}
