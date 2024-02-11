@@ -7,7 +7,6 @@ import (
 	"os"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/jefflinse/continuum"
 	memoryes "github.com/jefflinse/continuum/eventstore/memory"
 )
@@ -20,25 +19,10 @@ func main() {
 	eventStore := &memoryes.EventStore{}
 
 	// 2. Create an AggregateStore store aggregates.
-	aggregateStore := &continuum.AggregateStore{
-		Events: eventStore,
-	}
-
-	// 3. Define an aggregate type.
-	accountAggregateType, err := continuum.NewAggregateType("account",
-		func() continuum.AggregateData {
-			return NewAccount()
-		},
-		continuum.WithAggregateIDFactory(func() continuum.Identifier {
-			return continuum.UUID(uuid.New())
-		}),
-	)
-	if err != nil {
-		panic(err)
-	}
+	aggregateStore := continuum.NewAggregateStore(eventStore, NewAccount)
 
 	// 4. Create an aggregate instance.
-	aggregate := accountAggregateType.NewAggregate(nil)
+	aggregate := aggregateStore.Create()
 
 	if err := aggregate.Append(
 		&UserCreatedEvent{Username: "jdoe"},
@@ -84,7 +68,7 @@ func main() {
 	// }
 
 	// get the aggregate data
-	account := loadedAggregate.Data().(*Account)
+	account := loadedAggregate.Entity()
 	fmt.Println(account)
 }
 

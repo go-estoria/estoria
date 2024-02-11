@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+
+	"github.com/google/uuid"
 )
 
 type EventStore interface {
@@ -13,14 +15,31 @@ type EventStore interface {
 }
 
 // An AggregateStore loads and saves aggregates using an EventStore.
-type AggregateStore struct {
+type AggregateStore[E Entity] struct {
 	Events EventStore
 
-	mu sync.RWMutex
+	mu        sync.RWMutex
+	newEntity EntityFactory[E]
+}
+
+func NewAggregateStore[E Entity](eventStore EventStore, entityFactory EntityFactory[E]) *AggregateStore[E] {
+	return &AggregateStore[E]{
+		Events:    eventStore,
+		newEntity: entityFactory,
+	}
+}
+
+func (c *AggregateStore[E]) Create() *Aggregate[E] {
+	data := c.newEntity()
+	typ := fmt.Sprintf("%T", data)
+	return &Aggregate[E]{
+		id:   AggregateID{typ: typ, id: UUID(uuid.New())},
+		data: data,
+	}
 }
 
 // Load loads an aggregate by its ID.
-func (c *AggregateStore) Load(ctx context.Context, id AggregateID) (*Aggregate, error) {
+func (c *AggregateStore[E]) Load(ctx context.Context, id AggregateID) (*Aggregate[E], error) {
 	slog.Default().WithGroup("aggregatestore").Debug("reading aggregate", "aggregate_id", id)
 	c.mu.RLock()
 	defer c.mu.RUnlock()
@@ -30,7 +49,10 @@ func (c *AggregateStore) Load(ctx context.Context, id AggregateID) (*Aggregate, 
 		return nil, err
 	}
 
-	aggregate := id.NewAggregate()
+	aggregate := &Aggregate[E]{
+		id:   id,
+		data: c.newEntity(),
+	}
 
 	for _, event := range events {
 		if err := aggregate.Apply(ctx, event); err != nil {
@@ -42,7 +64,7 @@ func (c *AggregateStore) Load(ctx context.Context, id AggregateID) (*Aggregate, 
 }
 
 // Save saves an aggregate.
-func (c *AggregateStore) Save(ctx context.Context, aggregate *Aggregate) error {
+func (c *AggregateStore[E]) Save(ctx context.Context, aggregate *Aggregate[E]) error {
 	slog.Default().WithGroup("aggregatewriter").Debug("writing aggregate", "aggregate_id", aggregate.ID(), "events", len(aggregate.UnsavedEvents))
 	c.mu.Lock()
 	defer c.mu.Unlock()

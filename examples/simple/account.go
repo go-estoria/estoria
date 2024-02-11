@@ -57,7 +57,7 @@ func (a *Account) ApplyEvent(_ context.Context, event continuum.EventData) error
 
 // Diff diffs the entity against another entity and returns a series
 // of events that represent the state changes between the two.
-func (a *Account) Diff(newer continuum.AggregateData) ([]continuum.EventData, error) {
+func (a *Account) Diff(newer continuum.Entity) ([]continuum.EventData, error) {
 	slog.Info("diffing account", "account", a, "newer", newer)
 	newerAccount, ok := newer.(*Account)
 	if !ok {
