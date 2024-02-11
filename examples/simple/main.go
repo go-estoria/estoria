@@ -9,7 +9,6 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jefflinse/continuum"
-	"github.com/jefflinse/continuum/aggregatestore/memory"
 	memoryes "github.com/jefflinse/continuum/eventstore/memory"
 )
 
@@ -39,9 +38,8 @@ func main() {
 
 	eventStore := &memoryes.EventStore{}
 
-	aggregateCollection, err := memory.NewAggregateStore(eventStore)
-	if err != nil {
-		panic(err)
+	aggregateCollection := &continuum.AggregateStore{
+		Events: eventStore,
 	}
 
 	// define an aggregate type
