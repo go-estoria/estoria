@@ -4,15 +4,21 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"sync"
 
 	"github.com/jefflinse/continuum"
 )
 
 type EventStore struct {
 	Events []continuum.Event
+
+	mu sync.RWMutex
 }
 
 func (s *EventStore) LoadEvents(ctx context.Context, aggregateID continuum.AggregateID) ([]continuum.Event, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
 	events := []continuum.Event{}
 	for _, event := range s.Events {
 		if event.AggregateID().Equals(aggregateID) {
@@ -25,6 +31,9 @@ func (s *EventStore) LoadEvents(ctx context.Context, aggregateID continuum.Aggre
 }
 
 func (s *EventStore) SaveEvent(ctx context.Context, event continuum.Event) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	for _, e := range s.Events {
 		if eventID := event.ID(); e.ID().Equals(eventID) {
 			return ErrEventExists{

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"sync"
 )
 
 type EventStore interface {
@@ -11,13 +12,19 @@ type EventStore interface {
 	SaveEvent(ctx context.Context, event Event) error
 }
 
-// An AggregateStore loads and saves aggregates.
+// An AggregateStore loads and saves aggregates using an EventStore.
 type AggregateStore struct {
 	Events EventStore
+
+	mu sync.RWMutex
 }
 
+// Load loads an aggregate by its ID.
 func (c *AggregateStore) Load(ctx context.Context, id AggregateID) (*Aggregate, error) {
 	slog.Default().WithGroup("aggregatestore").Debug("reading aggregate", "aggregate_id", id)
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
 	events, err := c.Events.LoadEvents(ctx, id)
 	if err != nil {
 		return nil, err
@@ -34,8 +41,11 @@ func (c *AggregateStore) Load(ctx context.Context, id AggregateID) (*Aggregate, 
 	return aggregate, nil
 }
 
+// Save saves an aggregate.
 func (c *AggregateStore) Save(ctx context.Context, aggregate *Aggregate) error {
 	slog.Default().WithGroup("aggregatewriter").Debug("writing aggregate", "aggregate_id", aggregate.ID(), "events", len(aggregate.UnsavedEvents))
+	c.mu.Lock()
+	defer c.mu.Unlock()
 
 	if len(aggregate.UnsavedEvents) == 0 {
 		return nil
