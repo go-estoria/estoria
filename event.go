@@ -1,6 +1,7 @@
 package continuum
 
 import (
+	"fmt"
 	"time"
 
 	"github.com/google/uuid"
@@ -11,7 +12,7 @@ type Event interface {
 	ID() EventID
 	AggregateID() AggregateID
 	Timestamp() time.Time
-	Data() EventData
+	Data() any
 }
 
 // The internal representation of an event.
@@ -19,16 +20,16 @@ type event struct {
 	id          EventID
 	aggregateID AggregateID
 	timestamp   time.Time
-	data        EventData
+	data        any
 }
 
 var _ Event = (*event)(nil)
 
 // newEvent creates a new BasicEvent.
-func newEvent(aggregateID AggregateID, timestamp time.Time, data EventData) *event {
+func newEvent(aggregateID AggregateID, timestamp time.Time, data any) *event {
 	return &event{
 		id: EventID{
-			EventType:   data.EventType(),
+			EventType:   fmt.Sprintf("%T", data),
 			ID:          UUID(uuid.New()),
 			AggregateID: aggregateID,
 		},
@@ -54,11 +55,6 @@ func (e *event) Timestamp() time.Time {
 }
 
 // Data returns the event's data.
-func (e *event) Data() EventData {
+func (e *event) Data() any {
 	return e.data
-}
-
-// EventData is data associated with an event.
-type EventData interface {
-	EventType() string
 }

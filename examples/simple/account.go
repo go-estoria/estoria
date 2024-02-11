@@ -27,7 +27,7 @@ func NewAccount() *Account {
 }
 
 // ApplyEvent applies an event to the entity.
-func (a *Account) ApplyEvent(_ context.Context, event continuum.EventData) error {
+func (a *Account) ApplyEvent(_ context.Context, event any) error {
 	switch e := event.(type) {
 
 	case *BalanceChangedEvent:
@@ -57,14 +57,14 @@ func (a *Account) ApplyEvent(_ context.Context, event continuum.EventData) error
 
 // Diff diffs the entity against another entity and returns a series
 // of events that represent the state changes between the two.
-func (a *Account) Diff(newer continuum.Entity) ([]continuum.EventData, error) {
+func (a *Account) Diff(newer continuum.Entity) ([]any, error) {
 	slog.Info("diffing account", "account", a, "newer", newer)
 	newerAccount, ok := newer.(*Account)
 	if !ok {
 		return nil, fmt.Errorf("invalid entity type")
 	}
 
-	events := make([]continuum.EventData, 0)
+	events := make([]any, 0)
 
 	// map of user: newly-added
 	userMap := make(map[string]bool)
