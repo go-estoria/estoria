@@ -4,7 +4,7 @@ import "context"
 
 // Entity is anything whose state can be constructed by applying a series of events.
 type Entity interface {
-	ApplyEvent(ctx context.Context, event any) error
+	ApplyEvent(ctx context.Context, eventData EventData) error
 }
 
 // DiffableEntity is aggregate data that can be diffed against another aggregate data

@@ -27,7 +27,7 @@ func NewAccount() *Account {
 }
 
 // ApplyEvent applies an event to the entity.
-func (a *Account) ApplyEvent(_ context.Context, event any) error {
+func (a *Account) ApplyEvent(_ context.Context, event continuum.EventData) error {
 	switch e := event.(type) {
 
 	case *BalanceChangedEvent:

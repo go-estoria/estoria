@@ -12,7 +12,7 @@ type Event interface {
 	ID() EventID
 	AggregateID() AggregateID
 	Timestamp() time.Time
-	Data() any
+	Data() EventData
 }
 
 // The internal representation of an event.
@@ -55,6 +55,9 @@ func (e *event) Timestamp() time.Time {
 }
 
 // Data returns the event's data.
-func (e *event) Data() any {
+func (e *event) Data() EventData {
 	return e.data
+}
+
+type EventData interface {
 }
