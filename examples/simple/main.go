@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"github.com/jefflinse/continuum"
-	memoryes "github.com/jefflinse/continuum/eventstore/memory"
+	mongoes "github.com/jefflinse/continuum-contrib/mongodb/eventstore"
 )
 
 func main() {
@@ -16,7 +16,7 @@ func main() {
 	configureLogging()
 
 	// 1. Create an Event Store to store events.
-	eventStore := &memoryes.EventStore{}
+	eventStore := &mongoes.EventStore{}
 
 	// 2. Create an AggregateStore store aggregates.
 	aggregateStore := continuum.NewAggregateStore(eventStore, NewAccount)
