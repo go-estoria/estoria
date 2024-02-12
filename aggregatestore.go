@@ -33,7 +33,7 @@ func (c *AggregateStore[E]) Create() *Aggregate[E] {
 	data := c.newEntity()
 	typ := fmt.Sprintf("%T", data)
 	return &Aggregate[E]{
-		id:   AggregateID{typ: typ, id: UUID(uuid.New())},
+		id:   AggregateID{Type: typ, ID: UUID(uuid.New())},
 		data: data,
 	}
 }
