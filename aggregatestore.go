@@ -46,7 +46,7 @@ func (c *AggregateStore[E]) Load(ctx context.Context, id AggregateID) (*Aggregat
 
 	events, err := c.Events.LoadEvents(ctx, id)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("loading events: %w", err)
 	}
 
 	aggregate := &Aggregate[E]{
@@ -54,9 +54,9 @@ func (c *AggregateStore[E]) Load(ctx context.Context, id AggregateID) (*Aggregat
 		data: c.newEntity(),
 	}
 
-	for _, event := range events {
+	for i, event := range events {
 		if err := aggregate.Apply(ctx, event); err != nil {
-			return nil, fmt.Errorf("applying event: %w", err)
+			return nil, fmt.Errorf("applying event %d of %d: %w", i+1, len(events), err)
 		}
 	}
 
@@ -70,6 +70,7 @@ func (c *AggregateStore[E]) Save(ctx context.Context, aggregate *Aggregate[E]) e
 	defer c.mu.Unlock()
 
 	if len(aggregate.UnsavedEvents) == 0 {
+		slog.Debug("no events to save")
 		return nil
 	}
 
