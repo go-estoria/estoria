@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"slices"
 	"sync"
 
 	"github.com/jefflinse/continuum"
@@ -30,21 +31,27 @@ func (s *EventStore) LoadEvents(ctx context.Context, aggregateID continuum.Aggre
 	return events, nil
 }
 
-func (s *EventStore) SaveEvent(ctx context.Context, event continuum.Event) error {
+// SaveEvents saves the given events to the event store.
+func (s *EventStore) SaveEvents(ctx context.Context, events ...continuum.Event) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	for _, e := range s.Events {
-		if eventID := event.ID(); e.ID().Equals(eventID) {
-			return ErrEventExists{
-				EventID: eventID,
-			}
+	// simulate a transaction by adding all or none of the events
+	tx := []continuum.Event{}
+
+	for _, event := range events {
+		if slices.ContainsFunc(s.Events, func(e continuum.Event) bool {
+			return event.ID().Equals(e.ID())
+		}) {
+			return ErrEventExists{EventID: event.ID()}
 		}
+
+		slog.Default().WithGroup("eventwriter").Debug("writing event", "event_id", event.ID())
+		tx = append(tx, event)
 	}
 
-	slog.Default().WithGroup("eventwriter").Debug("writing event", "event_id", event.ID())
+	s.Events = append(s.Events, tx...)
 
-	s.Events = append(s.Events, event)
 	return nil
 }
 

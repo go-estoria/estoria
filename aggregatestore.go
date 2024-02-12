@@ -11,7 +11,7 @@ import (
 
 type EventStore interface {
 	LoadEvents(ctx context.Context, aggregateID AggregateID) ([]Event, error)
-	SaveEvent(ctx context.Context, event Event) error
+	SaveEvents(ctx context.Context, events ...Event) error
 }
 
 // An AggregateStore loads and saves aggregates using an EventStore.
@@ -76,7 +76,7 @@ func (c *AggregateStore[E]) Save(ctx context.Context, aggregate *Aggregate[E]) e
 
 	saved := []Event{}
 	for _, event := range aggregate.UnsavedEvents {
-		if err := c.Events.SaveEvent(ctx, event); err != nil {
+		if err := c.Events.SaveEvents(ctx, event); err != nil {
 			return ErrEventSaveFailed{
 				Err:         err,
 				FailedEvent: event,
