@@ -1,3 +1,3 @@
-module github.com/jefflinse/continuum
+module github.com/go-estoria/estoria
 
-go 1.21.5
+go 1.21.6
