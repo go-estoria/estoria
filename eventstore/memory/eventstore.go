@@ -7,20 +7,20 @@ import (
 	"slices"
 	"sync"
 
-	"github.com/jefflinse/continuum"
+	"github.com/go-estoria/estoria"
 )
 
 type EventStore struct {
-	Events []continuum.Event
+	Events []estoria.Event
 
 	mu sync.RWMutex
 }
 
-func (s *EventStore) LoadEvents(ctx context.Context, aggregateID continuum.AggregateID) ([]continuum.Event, error) {
+func (s *EventStore) LoadEvents(ctx context.Context, aggregateID estoria.AggregateID) ([]estoria.Event, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	events := []continuum.Event{}
+	events := []estoria.Event{}
 	for _, event := range s.Events {
 		if event.AggregateID().Equals(aggregateID) {
 			slog.Default().WithGroup("eventreader").Debug("reading event", "event_id", event.ID())
@@ -32,15 +32,15 @@ func (s *EventStore) LoadEvents(ctx context.Context, aggregateID continuum.Aggre
 }
 
 // SaveEvents saves the given events to the event store.
-func (s *EventStore) SaveEvents(ctx context.Context, events ...continuum.Event) error {
+func (s *EventStore) SaveEvents(ctx context.Context, events ...estoria.Event) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	// simulate a transaction by adding all or none of the events
-	tx := []continuum.Event{}
+	tx := []estoria.Event{}
 
 	for _, event := range events {
-		if slices.ContainsFunc(s.Events, func(e continuum.Event) bool {
+		if slices.ContainsFunc(s.Events, func(e estoria.Event) bool {
 			return event.ID().Equals(e.ID())
 		}) {
 			return ErrEventExists{EventID: event.ID()}
@@ -57,7 +57,7 @@ func (s *EventStore) SaveEvents(ctx context.Context, events ...continuum.Event) 
 
 // ErrEventExists is returned when attempting to write an event that already exists.
 type ErrEventExists struct {
-	EventID continuum.EventID
+	EventID estoria.EventID
 }
 
 // Error returns the error message.

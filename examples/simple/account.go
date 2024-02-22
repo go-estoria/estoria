@@ -6,11 +6,11 @@ import (
 	"log/slog"
 	"strings"
 
+	"github.com/go-estoria/estoria"
 	"github.com/google/uuid"
-	"github.com/jefflinse/continuum"
 )
 
-// An Account is an example entity that satifies the requirements of the continuum.Entity interface.
+// An Account is an example entity that satifies the requirements of the estoria.Entity interface.
 type Account struct {
 	ID      string
 	Users   []string
@@ -27,7 +27,7 @@ func NewAccount() *Account {
 }
 
 // ApplyEvent applies an event to the entity.
-func (a *Account) ApplyEvent(_ context.Context, event continuum.EventData) error {
+func (a *Account) ApplyEvent(_ context.Context, event estoria.EventData) error {
 	switch e := event.(type) {
 
 	case *BalanceChangedEvent:
@@ -57,7 +57,7 @@ func (a *Account) ApplyEvent(_ context.Context, event continuum.EventData) error
 
 // Diff diffs the entity against another entity and returns a series
 // of events that represent the state changes between the two.
-func (a *Account) Diff(newer continuum.Entity) ([]any, error) {
+func (a *Account) Diff(newer estoria.Entity) ([]any, error) {
 	slog.Info("diffing account", "account", a, "newer", newer)
 	newerAccount, ok := newer.(*Account)
 	if !ok {

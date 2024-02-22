@@ -1,4 +1,4 @@
-package continuum
+package estoria
 
 import (
 	"context"
@@ -74,30 +74,12 @@ func (c *AggregateStore[E]) Save(ctx context.Context, aggregate *Aggregate[E]) e
 		return nil
 	}
 
-	saved := []Event{}
-	for _, event := range aggregate.UnsavedEvents {
-		if err := c.Events.SaveEvents(ctx, event); err != nil {
-			return ErrEventSaveFailed{
-				Err:         err,
-				FailedEvent: event,
-				SavedEvents: saved,
-			}
-		}
-
-		saved = append(saved, event)
+	// assume to be atomic, for now (it's not)
+	if err := c.Events.SaveEvents(ctx, aggregate.UnsavedEvents...); err != nil {
+		return fmt.Errorf("saving events: %w", err)
 	}
 
 	aggregate.UnsavedEvents = []Event{}
 
 	return nil
-}
-
-type ErrEventSaveFailed struct {
-	Err         error
-	FailedEvent Event
-	SavedEvents []Event
-}
-
-func (e ErrEventSaveFailed) Error() string {
-	return fmt.Sprintf("saving event %s: %s", e.FailedEvent.ID(), e.Err)
 }

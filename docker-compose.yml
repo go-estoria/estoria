@@ -1,0 +1,46 @@
+version: '3.1'
+
+services:
+  example-app:
+    build:
+      context: .
+      dockerfile: ./examples/simple/Dockerfile
+    container_name: example-app
+    environment:
+      - MONGO_URL=mongodb://mongo:27017
+    ports:
+      - "3000:3000"
+    networks:
+      - example-net
+  mongo:
+    image: bitnami/mongodb:4.4
+    container_name: mongo
+    environment:
+      MONGODB_REPLICA_SET_MODE: primary
+      ALLOW_EMPTY_PASSWORD: "yes"
+    ports:
+      - "27017:27017"
+    networks:
+      - example-net
+    volumes:
+      - mongo_data:/bitnami/mongodb
+
+  mongo-express:
+    image: mongo-express:latest
+    container_name: mongo-express
+    environment:
+      - ME_CONFIG_MONGODB_SERVER=mongo
+      - ME_CONFIG_MONGODB_PORT=27017
+      - ME_CONFIG_MONGODB_ENABLE_ADMIN=true
+    ports:
+      - "8888:8081"
+    networks:
+      - example-net
+
+networks:
+  example-net:
+    driver: bridge
+
+volumes:
+  mongo_data:
+    driver: local

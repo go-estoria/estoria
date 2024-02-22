@@ -7,20 +7,41 @@ import (
 	"os"
 	"time"
 
-	"github.com/jefflinse/continuum"
-	memoryes "github.com/jefflinse/continuum/eventstore/memory"
-	// mongoes "github.com/jefflinse/continuum-contrib/mongodb/eventstore"
+	"github.com/go-estoria/estoria"
+
+	memoryes "github.com/go-estoria/estoria/eventstore/memory"
+	// mongoes "github.com/go-estoria/estoria-contrib/mongodb/eventstore"
 )
 
 func main() {
 	ctx := context.Background()
 	configureLogging()
 
+	// // Prereq: Create a MongoDB client.
+	// mongoClient, err := mongoes.NewDefaultMongoDBClient(ctx, "example-app", os.Getenv("MONGODB_URI"))
+	// if err != nil {
+	// 	panic(err)
+	// }
+	// defer mongoClient.Disconnect(ctx)
+
+	// slog.Info("pinging MongoDB", "uri", os.Getenv("MONGODB_URI"))
+	// pingCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	// defer cancel()
+	// if err := mongoClient.Ping(pingCtx, nil); err != nil {
+	// 	log.Fatalf("failed to ping MongoDB: %v", err)
+	// }
+
 	// 1. Create an Event Store to store events.
-	eventStore := &memoryes.EventStore{}
+	// eventStore, err := mongoes.NewEventStore(mongoClient, "test", "events")
+	// if err != nil {
+	// 	panic(err)
+	// }
+	eventStore := &memoryes.EventStore{
+		Events: []estoria.Event{},
+	}
 
 	// 2. Create an AggregateStore store aggregates.
-	aggregateStore := continuum.NewAggregateStore(eventStore, NewAccount)
+	aggregateStore := estoria.NewAggregateStore(eventStore, NewAccount)
 
 	// 4. Create an aggregate instance.
 	aggregate := aggregateStore.Create()
@@ -63,7 +84,7 @@ func main() {
 	// 	panic(err)
 	// }
 
-	// aggregate, err = aggregateStore.Load(ctx, continuum.StringID("123"))
+	// aggregate, err = aggregateStore.Load(ctx, estoria.StringID("123"))
 	// if err != nil {
 	// 	panic(err)
 	// }

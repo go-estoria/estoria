@@ -1,4 +1,4 @@
-package continuum
+package estoria
 
 import (
 	"fmt"
