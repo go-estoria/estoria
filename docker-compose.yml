@@ -4,7 +4,7 @@ services:
   example-app:
     build:
       context: .
-      dockerfile: ./examples/simple/Dockerfile
+      dockerfile: ./example/Dockerfile
     container_name: example-app
     environment:
       - MONGO_URL=mongodb://mongo:27017
@@ -12,6 +12,9 @@ services:
       - "3000:3000"
     networks:
       - example-net
+    volumes:
+      - .:/repo
+
   mongo:
     image: bitnami/mongodb:4.4
     container_name: mongo
@@ -34,6 +37,8 @@ services:
       - ME_CONFIG_MONGODB_ENABLE_ADMIN=true
     ports:
       - "8888:8081"
+    depends_on:
+      - mongo
     networks:
       - example-net
 
