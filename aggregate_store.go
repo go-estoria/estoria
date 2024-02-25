@@ -2,6 +2,7 @@ package estoria
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"sync"
@@ -18,15 +19,27 @@ type EventStore interface {
 type AggregateStore[E Entity] struct {
 	Events EventStore
 
-	mu        sync.RWMutex
-	newEntity EntityFactory[E]
+	mu                 sync.RWMutex
+	newEntity          EntityFactory[E]
+	eventDataFactories map[string]func() EventData
+
+	deserializeEventData func([]byte, any) error
+	serializeEventData   func(any) ([]byte, error)
 }
 
 func NewAggregateStore[E Entity](eventStore EventStore, entityFactory EntityFactory[E]) *AggregateStore[E] {
 	return &AggregateStore[E]{
-		Events:    eventStore,
-		newEntity: entityFactory,
+		Events:               eventStore,
+		newEntity:            entityFactory,
+		eventDataFactories:   make(map[string]func() EventData),
+		deserializeEventData: json.Unmarshal,
+		serializeEventData:   json.Marshal,
 	}
+}
+
+// Allow allows an event type to be used with the aggregate store.
+func (c *AggregateStore[E]) Allow(eventType string, eventDataFactory func() EventData) {
+	c.eventDataFactories[eventType] = eventDataFactory
 }
 
 func (c *AggregateStore[E]) Create() *Aggregate[E] {
@@ -56,6 +69,13 @@ func (c *AggregateStore[E]) Load(ctx context.Context, id TypedID) (*Aggregate[E]
 	}
 
 	for i, event := range events {
+		eventData := c.eventDataFactories[event.ID().Type]()
+		if err := c.deserializeEventData(event.RawData(), eventData); err != nil {
+			return nil, fmt.Errorf("deserializing event data %d of %d: %w", i+1, len(events), err)
+		}
+
+		event.SetData(eventData)
+
 		if err := aggregate.Apply(ctx, event); err != nil {
 			return nil, fmt.Errorf("applying event %d of %d: %w", i+1, len(events), err)
 		}
@@ -73,6 +93,15 @@ func (c *AggregateStore[E]) Save(ctx context.Context, aggregate *Aggregate[E]) e
 	if len(aggregate.UnsavedEvents) == 0 {
 		slog.Debug("no events to save")
 		return nil
+	}
+
+	for i := range aggregate.UnsavedEvents {
+		data, err := c.serializeEventData(aggregate.UnsavedEvents[i].Data())
+		if err != nil {
+			return fmt.Errorf("serializing event data: %w", err)
+		}
+
+		aggregate.UnsavedEvents[i].SetRawData(data)
 	}
 
 	// assume to be atomic, for now (it's not)

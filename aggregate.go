@@ -25,11 +25,11 @@ func (a *Aggregate[E]) Entity() E {
 // Append appends the given events to the aggregate's unsaved events.
 func (a *Aggregate[E]) Append(events ...EventData) error {
 	slog.Debug("appending events to aggregate", "aggregate_id", a.ID(), "events", len(events))
-	for _, event := range events {
+	for _, eventData := range events {
 		a.UnsavedEvents = append(a.UnsavedEvents, newEvent(
 			a.ID(),
 			time.Now(),
-			event,
+			eventData,
 		))
 	}
 

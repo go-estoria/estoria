@@ -12,7 +12,9 @@ type Event interface {
 	AggregateID() TypedID
 	Timestamp() time.Time
 	Data() EventData
+	SetData(EventData)
 	RawData() []byte
+	SetRawData([]byte)
 }
 
 // The internal representation of an event.
@@ -59,9 +61,17 @@ func (e *event) Data() EventData {
 	return e.data
 }
 
+func (e *event) SetData(data EventData) {
+	e.data = data
+}
+
 // RawData returns the event's raw data.
 func (e *event) RawData() []byte {
 	return e.raw
+}
+
+func (e *event) SetRawData(raw []byte) {
+	e.raw = raw
 }
 
 // EventData is the data of an event.
