@@ -10,7 +10,7 @@ import (
 )
 
 type EventStore interface {
-	LoadEvents(ctx context.Context, aggregateID AggregateID) ([]Event, error)
+	LoadEvents(ctx context.Context, aggregateID TypedID) ([]Event, error)
 	SaveEvents(ctx context.Context, events ...Event) error
 }
 
@@ -33,17 +33,18 @@ func (c *AggregateStore[E]) Create() *Aggregate[E] {
 	data := c.newEntity()
 	typ := fmt.Sprintf("%T", data)
 	return &Aggregate[E]{
-		id:   AggregateID{Type: typ, ID: UUID(uuid.New())},
+		id:   TypedID{Type: typ, ID: UUID(uuid.New())},
 		data: data,
 	}
 }
 
 // Load loads an aggregate by its ID.
-func (c *AggregateStore[E]) Load(ctx context.Context, id AggregateID) (*Aggregate[E], error) {
+func (c *AggregateStore[E]) Load(ctx context.Context, id TypedID) (*Aggregate[E], error) {
 	slog.Default().WithGroup("aggregatestore").Debug("reading aggregate", "aggregate_id", id)
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
+	slog.Debug("REACHED HERE")
 	events, err := c.Events.LoadEvents(ctx, id)
 	if err != nil {
 		return nil, fmt.Errorf("loading events: %w", err)

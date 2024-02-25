@@ -16,7 +16,7 @@ type EventStore struct {
 	mu sync.RWMutex
 }
 
-func (s *EventStore) LoadEvents(ctx context.Context, aggregateID estoria.AggregateID) ([]estoria.Event, error) {
+func (s *EventStore) LoadEvents(ctx context.Context, aggregateID estoria.TypedID) ([]estoria.Event, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -57,7 +57,7 @@ func (s *EventStore) SaveEvents(ctx context.Context, events ...estoria.Event) er
 
 // ErrEventExists is returned when attempting to write an event that already exists.
 type ErrEventExists struct {
-	EventID estoria.EventID
+	EventID estoria.TypedID
 }
 
 // Error returns the error message.

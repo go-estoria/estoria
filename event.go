@@ -1,7 +1,6 @@
 package estoria
 
 import (
-	"fmt"
 	"time"
 
 	"github.com/google/uuid"
@@ -9,29 +8,28 @@ import (
 
 // An Event is a state change to an entity.
 type Event interface {
-	ID() EventID
-	AggregateID() AggregateID
+	ID() TypedID
+	AggregateID() TypedID
 	Timestamp() time.Time
 	Data() EventData
 }
 
 // The internal representation of an event.
 type event struct {
-	id          EventID
-	aggregateID AggregateID
+	id          TypedID
+	aggregateID TypedID
 	timestamp   time.Time
-	data        any
+	data        EventData
 }
 
 var _ Event = (*event)(nil)
 
 // newEvent creates a new BasicEvent.
-func newEvent(aggregateID AggregateID, timestamp time.Time, data any) *event {
+func newEvent(aggregateID TypedID, timestamp time.Time, data EventData) *event {
 	return &event{
-		id: EventID{
-			EventType:   fmt.Sprintf("%T", data),
-			ID:          UUID(uuid.New()),
-			AggregateID: aggregateID,
+		id: TypedID{
+			Type: data.EventType(),
+			ID:   UUID(uuid.New()),
 		},
 		aggregateID: aggregateID,
 		timestamp:   timestamp,
@@ -40,12 +38,12 @@ func newEvent(aggregateID AggregateID, timestamp time.Time, data any) *event {
 }
 
 // EventID returns the ID of the event.
-func (e *event) ID() EventID {
+func (e *event) ID() TypedID {
 	return e.id
 }
 
 // AggregateID returns the ID of the aggregate that the event applies to.
-func (e *event) AggregateID() AggregateID {
+func (e *event) AggregateID() TypedID {
 	return e.aggregateID
 }
 
@@ -60,4 +58,5 @@ func (e *event) Data() EventData {
 }
 
 type EventData interface {
+	EventType() string
 }

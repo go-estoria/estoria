@@ -7,9 +7,7 @@ services:
       dockerfile: ./example/Dockerfile
     container_name: example-app
     environment:
-      - MONGO_URL=mongodb://mongo:27017
-    ports:
-      - "3000:3000"
+      - MONGODB_URI=mongodb://mongo:27017
     networks:
       - example-net
     volumes:
