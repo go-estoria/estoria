@@ -68,7 +68,7 @@ func (c *AggregateStore[E]) Load(ctx context.Context, id TypedID) (*Aggregate[E]
 	}
 
 	for i, evt := range events {
-		rawEventData := evt.RawData()
+		rawEventData := evt.Data()
 		if len(rawEventData) == 0 {
 			slog.Warn("event has no data", "event_id", evt.ID())
 			continue
@@ -80,11 +80,11 @@ func (c *AggregateStore[E]) Load(ctx context.Context, id TypedID) (*Aggregate[E]
 		}
 
 		eventData := newEventData()
-		if err := c.deserializeEventData(evt.RawData(), &eventData); err != nil {
+		if err := c.deserializeEventData(rawEventData, &eventData); err != nil {
 			return nil, fmt.Errorf("deserializing event data %d of %d: %w", i+1, len(events), err)
 		}
 
-		if err := aggregate.Apply(ctx, &event{
+		if err := aggregate.apply(ctx, &event{
 			id:          evt.ID(),
 			aggregateID: evt.AggregateID(),
 			timestamp:   evt.Timestamp(),
@@ -100,30 +100,32 @@ func (c *AggregateStore[E]) Load(ctx context.Context, id TypedID) (*Aggregate[E]
 
 // Save saves an aggregate.
 func (c *AggregateStore[E]) Save(ctx context.Context, aggregate *Aggregate[E]) error {
-	slog.Default().WithGroup("aggregatewriter").Debug("writing aggregate", "aggregate_id", aggregate.ID(), "events", len(aggregate.UnsavedEvents))
+	slog.Default().WithGroup("aggregatewriter").Debug("writing aggregate", "aggregate_id", aggregate.ID(), "events", len(aggregate.unsavedEvents))
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	if len(aggregate.UnsavedEvents) == 0 {
+	if len(aggregate.unsavedEvents) == 0 {
 		slog.Debug("no events to save")
 		return nil
 	}
 
-	for i := range aggregate.UnsavedEvents {
-		data, err := c.serializeEventData(aggregate.UnsavedEvents[i].Data())
+	toSave := make([]Event, len(aggregate.unsavedEvents))
+	for i := range aggregate.unsavedEvents {
+		data, err := c.serializeEventData(aggregate.unsavedEvents[i].Data())
 		if err != nil {
 			return fmt.Errorf("serializing event data: %w", err)
 		}
 
-		aggregate.UnsavedEvents[i].SetRawData(data)
+		aggregate.unsavedEvents[i].raw = data
+		toSave[i] = aggregate.unsavedEvents[i]
 	}
 
 	// assume to be atomic, for now (it's not)
-	if err := c.Events.SaveEvents(ctx, aggregate.UnsavedEvents...); err != nil {
+	if err := c.Events.SaveEvents(ctx, toSave...); err != nil {
 		return fmt.Errorf("saving events: %w", err)
 	}
 
-	aggregate.UnsavedEvents = []Event{}
+	aggregate.unsavedEvents = []*event{}
 
 	return nil
 }

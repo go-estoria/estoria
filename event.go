@@ -2,8 +2,6 @@ package estoria
 
 import (
 	"time"
-
-	"github.com/google/uuid"
 )
 
 // An Event is a state change to an entity.
@@ -11,10 +9,7 @@ type Event interface {
 	ID() TypedID
 	AggregateID() TypedID
 	Timestamp() time.Time
-	Data() EventData
-	SetData(EventData)
-	RawData() []byte
-	SetRawData([]byte)
+	Data() []byte
 }
 
 // The internal representation of an event.
@@ -27,19 +22,6 @@ type event struct {
 }
 
 var _ Event = (*event)(nil)
-
-// newEvent creates a new BasicEvent.
-func newEvent(aggregateID TypedID, timestamp time.Time, data EventData) *event {
-	return &event{
-		id: TypedID{
-			Type: data.EventType(),
-			ID:   UUID(uuid.New()),
-		},
-		aggregateID: aggregateID,
-		timestamp:   timestamp,
-		data:        data,
-	}
-}
 
 // EventID returns the ID of the event.
 func (e *event) ID() TypedID {
@@ -57,21 +39,8 @@ func (e *event) Timestamp() time.Time {
 }
 
 // Data returns the event's data.
-func (e *event) Data() EventData {
-	return e.data
-}
-
-func (e *event) SetData(data EventData) {
-	e.data = data
-}
-
-// RawData returns the event's raw data.
-func (e *event) RawData() []byte {
+func (e *event) Data() []byte {
 	return e.raw
-}
-
-func (e *event) SetRawData(raw []byte) {
-	e.raw = raw
 }
 
 // EventData is the data of an event.
