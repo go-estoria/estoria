@@ -4,6 +4,7 @@ import "context"
 
 // An Entity is anything whose state can be constructed by applying a series of events.
 type Entity interface {
+	EntityID() TypedID
 	ApplyEvent(ctx context.Context, eventData EventData) error
 }
 

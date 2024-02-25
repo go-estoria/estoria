@@ -45,9 +45,8 @@ func (c *AggregateStore[E]) Allow(eventDataFactory func() EventData) {
 
 func (c *AggregateStore[E]) Create() *Aggregate[E] {
 	data := c.newEntity()
-	typ := fmt.Sprintf("%T", data)
 	return &Aggregate[E]{
-		id:   TypedID{Type: typ, ID: UUID(uuid.New())},
+		id:   TypedID{Type: data.EntityID().Type, ID: UUID(uuid.New())},
 		data: data,
 	}
 }

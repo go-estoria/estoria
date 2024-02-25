@@ -26,6 +26,14 @@ func NewAccount() *Account {
 	}
 }
 
+// EntityID returns the ID of the entity.
+func (a *Account) EntityID() estoria.TypedID {
+	return estoria.TypedID{
+		Type: "account",
+		ID:   estoria.StringID(a.ID),
+	}
+}
+
 // ApplyEvent applies an event to the entity.
 func (a *Account) ApplyEvent(_ context.Context, event estoria.EventData) error {
 	switch e := event.(type) {
