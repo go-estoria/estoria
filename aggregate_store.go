@@ -38,8 +38,9 @@ func NewAggregateStore[E Entity](eventStore EventStore, entityFactory EntityFact
 }
 
 // Allow allows an event type to be used with the aggregate store.
-func (c *AggregateStore[E]) Allow(eventType string, eventDataFactory func() EventData) {
-	c.eventDataFactories[eventType] = eventDataFactory
+func (c *AggregateStore[E]) Allow(eventDataFactory func() EventData) {
+	data := eventDataFactory()
+	c.eventDataFactories[data.EventType()] = eventDataFactory
 }
 
 func (c *AggregateStore[E]) Create() *Aggregate[E] {
@@ -57,7 +58,6 @@ func (c *AggregateStore[E]) Load(ctx context.Context, id TypedID) (*Aggregate[E]
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
-	slog.Debug("REACHED HERE")
 	events, err := c.Events.LoadEvents(ctx, id)
 	if err != nil {
 		return nil, fmt.Errorf("loading events: %w", err)
@@ -68,15 +68,30 @@ func (c *AggregateStore[E]) Load(ctx context.Context, id TypedID) (*Aggregate[E]
 		data: c.newEntity(),
 	}
 
-	for i, event := range events {
-		eventData := c.eventDataFactories[event.ID().Type]()
-		if err := c.deserializeEventData(event.RawData(), eventData); err != nil {
+	for i, evt := range events {
+		rawEventData := evt.RawData()
+		if len(rawEventData) == 0 {
+			slog.Warn("event has no data", "event_id", evt.ID())
+			continue
+		}
+
+		newEventData, ok := c.eventDataFactories[evt.ID().Type]
+		if !ok {
+			return nil, fmt.Errorf("no event data factory for event type %s", evt.ID().Type)
+		}
+
+		eventData := newEventData()
+		if err := c.deserializeEventData(evt.RawData(), &eventData); err != nil {
 			return nil, fmt.Errorf("deserializing event data %d of %d: %w", i+1, len(events), err)
 		}
 
-		event.SetData(eventData)
-
-		if err := aggregate.Apply(ctx, event); err != nil {
+		if err := aggregate.Apply(ctx, &event{
+			id:          evt.ID(),
+			aggregateID: evt.AggregateID(),
+			timestamp:   evt.Timestamp(),
+			data:        eventData,
+			raw:         rawEventData,
+		}); err != nil {
 			return nil, fmt.Errorf("applying event %d of %d: %w", i+1, len(events), err)
 		}
 	}

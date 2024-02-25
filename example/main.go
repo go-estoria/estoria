@@ -43,6 +43,9 @@ func main() {
 
 	// 2. Create an AggregateStore store aggregates.
 	aggregateStore := estoria.NewAggregateStore(eventStore, NewAccount)
+	aggregateStore.Allow(func() estoria.EventData { return &UserCreatedEvent{} })
+	aggregateStore.Allow(func() estoria.EventData { return &UserDeletedEvent{} })
+	aggregateStore.Allow(func() estoria.EventData { return &BalanceChangedEvent{} })
 
 	// 4. Create an aggregate instance.
 	aggregate := aggregateStore.Create()

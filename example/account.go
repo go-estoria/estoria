@@ -51,7 +51,7 @@ func (a *Account) ApplyEvent(_ context.Context, event estoria.EventData) error {
 		return fmt.Errorf("user %s not found", e.Username)
 
 	default:
-		return fmt.Errorf("invalid event type")
+		return fmt.Errorf("invalid event type: %T", event)
 	}
 }
 
