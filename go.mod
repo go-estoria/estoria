@@ -3,7 +3,7 @@ module github.com/go-estoria/estoria
 go 1.21.6
 
 require (
-	github.com/go-estoria/estoria-contrib v0.0.0-20240225052016-3c876e5692a3
+	github.com/go-estoria/estoria-contrib v0.0.0-20240225052434-8b91fa9815d1
 	github.com/google/uuid v1.5.0
 )
 
