@@ -1,7 +1,7 @@
 github.com/davecgh/go-spew v1.1.1 h1:vj9j/u1bqnvCEfJOwUhtlOARqs3+rkHYY13jYWTU97c=
 github.com/davecgh/go-spew v1.1.1/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
-github.com/go-estoria/estoria-contrib v0.0.0-20240225022538-ce5f6627a604 h1:O6V0ux4N+b4ClHocVmvitK+TfpFcrYtf5NhVTBmIMO4=
-github.com/go-estoria/estoria-contrib v0.0.0-20240225022538-ce5f6627a604/go.mod h1:fFi2y5IRKT2E7RhQT3BBaOviWb7V3S3KvvjXfJtwsmQ=
+github.com/go-estoria/estoria-contrib v0.0.0-20240225052016-3c876e5692a3 h1:Nb6PUM/zvafH+2CD0A2Hcrj5XRCGnj7/QwDkI2boq6M=
+github.com/go-estoria/estoria-contrib v0.0.0-20240225052016-3c876e5692a3/go.mod h1:1OBOcdgJmGrQxGKdV6XBAV0P+lnSpdwwt3gxDxTYk20=
 github.com/golang/snappy v0.0.1 h1:Qgr9rKW7uDUkrbSmQeiDsGa8SjGyCOGtuasMWwvp2P4=
 github.com/golang/snappy v0.0.1/go.mod h1:/XxbfmMg8lxefKM7IXC3fBNl/7bRcc72aCRzEWrmP2Q=
 github.com/google/go-cmp v0.5.2 h1:X2ev0eStA3AbceY54o37/0PQ/UWqKEiiO2dKL5OPaFM=
