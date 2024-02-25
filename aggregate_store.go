@@ -53,7 +53,8 @@ func (c *AggregateStore[E]) Create() *Aggregate[E] {
 
 // Load loads an aggregate by its ID.
 func (c *AggregateStore[E]) Load(ctx context.Context, id TypedID) (*Aggregate[E], error) {
-	slog.Default().WithGroup("aggregatestore").Debug("reading aggregate", "aggregate_id", id)
+	log := slog.Default().WithGroup("aggregatestore")
+	log.Debug("reading aggregate", "aggregate_id", id)
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
@@ -83,6 +84,8 @@ func (c *AggregateStore[E]) Load(ctx context.Context, id TypedID) (*Aggregate[E]
 		if err := c.deserializeEventData(rawEventData, &eventData); err != nil {
 			return nil, fmt.Errorf("deserializing event data %d of %d: %w", i+1, len(events), err)
 		}
+
+		log.Debug("event data", "event_id", evt.ID(), "data", eventData)
 
 		if err := aggregate.apply(ctx, &event{
 			id:          evt.ID(),
