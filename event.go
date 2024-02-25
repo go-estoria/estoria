@@ -12,6 +12,7 @@ type Event interface {
 	AggregateID() TypedID
 	Timestamp() time.Time
 	Data() EventData
+	RawData() []byte
 }
 
 // The internal representation of an event.
@@ -20,6 +21,7 @@ type event struct {
 	aggregateID TypedID
 	timestamp   time.Time
 	data        EventData
+	raw         []byte
 }
 
 var _ Event = (*event)(nil)
@@ -57,6 +59,23 @@ func (e *event) Data() EventData {
 	return e.data
 }
 
+// RawData returns the event's raw data.
+func (e *event) RawData() []byte {
+	return e.raw
+}
+
+// EventData is the data of an event.
 type EventData interface {
 	EventType() string
+	New() EventData
+}
+
+// An EventDataSerializer serializes event data into raw event data.
+type EventDataSerializer interface {
+	Serialize(eventData EventData) ([]byte, error)
+}
+
+// An EventDataDeserializer deserializes raw event data into event data.
+type EventDataDeserializer interface {
+	Deserialize(data []byte, dest EventData) error
 }
