@@ -111,7 +111,7 @@ func (c *AggregateStore[E]) Save(ctx context.Context, aggregate *Aggregate[E]) e
 
 	toSave := make([]Event, len(aggregate.unsavedEvents))
 	for i := range aggregate.unsavedEvents {
-		data, err := c.serializeEventData(aggregate.unsavedEvents[i].Data())
+		data, err := c.serializeEventData(aggregate.unsavedEvents[i].data)
 		if err != nil {
 			return fmt.Errorf("serializing event data: %w", err)
 		}
