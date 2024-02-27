@@ -3,6 +3,7 @@ package estoria
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -12,6 +13,7 @@ import (
 )
 
 type EventStore interface {
+	CreateStream(ctx context.Context, aggregateID TypedID) (EventStream, error)
 	FindStream(ctx context.Context, aggregateID TypedID) (EventStream, error)
 }
 
@@ -122,12 +124,18 @@ func (c *AggregateStore[E]) Save(ctx context.Context, aggregate *Aggregate[E]) e
 	}
 
 	stream, err := c.Events.FindStream(ctx, aggregate.ID())
-	if err != nil {
+	if errors.Is(err, ErrStreamNotFound) {
+		// for now, just create a new stream
+		stream, err = c.Events.CreateStream(ctx, aggregate.ID())
+		if err != nil {
+			return fmt.Errorf("creating event stream: %w", err)
+		}
+	} else if err != nil {
 		return fmt.Errorf("finding event stream: %w", err)
 	}
 
 	toSave := make([]Event, len(aggregate.unsavedEvents))
-	for i := range aggregate.unsavedEvents {
+	for i := range toSave {
 		data, err := c.serializeEventData(aggregate.unsavedEvents[i].data)
 		if err != nil {
 			return fmt.Errorf("serializing event data: %w", err)
@@ -146,3 +154,7 @@ func (c *AggregateStore[E]) Save(ctx context.Context, aggregate *Aggregate[E]) e
 
 	return nil
 }
+
+var ErrStreamNotFound = errors.New("stream not found")
+
+var ErrAggregateNotFound = errors.New("aggregate not found")
