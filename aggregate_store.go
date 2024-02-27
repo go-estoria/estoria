@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"sync"
 
@@ -11,8 +12,7 @@ import (
 )
 
 type EventStore interface {
-	LoadEvents(ctx context.Context, aggregateID TypedID) ([]Event, error)
-	SaveEvents(ctx context.Context, events ...Event) error
+	FindStream(ctx context.Context, aggregateID TypedID) (EventStream, error)
 }
 
 // An AggregateStore loads and saves aggregates using an EventStore.
@@ -58,9 +58,9 @@ func (c *AggregateStore[E]) Load(ctx context.Context, id TypedID) (*Aggregate[E]
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
-	events, err := c.Events.LoadEvents(ctx, id)
+	stream, err := c.Events.FindStream(ctx, id)
 	if err != nil {
-		return nil, fmt.Errorf("loading events: %w", err)
+		return nil, fmt.Errorf("finding event stream: %w", err)
 	}
 
 	aggregate := &Aggregate[E]{
@@ -68,7 +68,16 @@ func (c *AggregateStore[E]) Load(ctx context.Context, id TypedID) (*Aggregate[E]
 		data: c.newEntity(),
 	}
 
-	for i, evt := range events {
+	for {
+		evt, err := stream.Next(ctx)
+		if err != nil {
+			if err == io.EOF {
+				break
+			}
+
+			return nil, fmt.Errorf("reading event: %w", err)
+		}
+
 		rawEventData := evt.Data()
 		if len(rawEventData) == 0 {
 			slog.Warn("event has no data", "event_id", evt.ID())
@@ -82,7 +91,7 @@ func (c *AggregateStore[E]) Load(ctx context.Context, id TypedID) (*Aggregate[E]
 
 		eventData := newEventData()
 		if err := c.deserializeEventData(rawEventData, &eventData); err != nil {
-			return nil, fmt.Errorf("deserializing event data %d of %d: %w", i+1, len(events), err)
+			return nil, fmt.Errorf("deserializing event data: %w", err)
 		}
 
 		log.Debug("event data", "event_id", evt.ID(), "data", eventData)
@@ -94,7 +103,7 @@ func (c *AggregateStore[E]) Load(ctx context.Context, id TypedID) (*Aggregate[E]
 			data:        eventData,
 			raw:         rawEventData,
 		}); err != nil {
-			return nil, fmt.Errorf("applying event %d of %d: %w", i+1, len(events), err)
+			return nil, fmt.Errorf("applying event: %w", err)
 		}
 	}
 
@@ -112,6 +121,11 @@ func (c *AggregateStore[E]) Save(ctx context.Context, aggregate *Aggregate[E]) e
 		return nil
 	}
 
+	stream, err := c.Events.FindStream(ctx, aggregate.ID())
+	if err != nil {
+		return fmt.Errorf("finding event stream: %w", err)
+	}
+
 	toSave := make([]Event, len(aggregate.unsavedEvents))
 	for i := range aggregate.unsavedEvents {
 		data, err := c.serializeEventData(aggregate.unsavedEvents[i].data)
@@ -124,7 +138,7 @@ func (c *AggregateStore[E]) Save(ctx context.Context, aggregate *Aggregate[E]) e
 	}
 
 	// assume to be atomic, for now (it's not)
-	if err := c.Events.SaveEvents(ctx, toSave...); err != nil {
+	if err := stream.Append(ctx, toSave...); err != nil {
 		return fmt.Errorf("saving events: %w", err)
 	}
 
