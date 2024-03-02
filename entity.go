@@ -1,10 +1,14 @@
 package estoria
 
-import "context"
+import (
+	"context"
+
+	"go.jetpack.io/typeid"
+)
 
 // An Entity is anything whose state can be constructed by applying a series of events.
 type Entity interface {
-	EntityID() TypedID
+	EntityID() typeid.AnyID
 	ApplyEvent(ctx context.Context, eventData EventData) error
 }
 

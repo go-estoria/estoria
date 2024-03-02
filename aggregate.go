@@ -6,17 +6,17 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/google/uuid"
+	"go.jetpack.io/typeid"
 )
 
 // An Aggregate is a reconstructed representation of an event-sourced entity's state.
 type Aggregate[E Entity] struct {
-	id            TypedID
+	id            typeid.AnyID
 	data          E
 	unsavedEvents []*event
 }
 
-func (a *Aggregate[E]) ID() TypedID {
+func (a *Aggregate[E]) ID() typeid.AnyID {
 	return a.id
 }
 
@@ -28,14 +28,16 @@ func (a *Aggregate[E]) Entity() E {
 func (a *Aggregate[E]) Append(events ...EventData) error {
 	slog.Debug("appending events to aggregate", "aggregate_id", a.ID(), "events", len(events))
 	for _, eventData := range events {
+		eventID, err := typeid.From(eventData.EventType(), "")
+		if err != nil {
+			return fmt.Errorf("generating event ID: %w", err)
+		}
+
 		a.unsavedEvents = append(a.unsavedEvents, &event{
-			id: TypedID{
-				Type: eventData.EventType(),
-				ID:   UUID(uuid.New()),
-			},
-			aggregateID: a.ID(),
-			timestamp:   time.Now(),
-			data:        eventData,
+			id:        eventID,
+			streamID:  a.ID(),
+			timestamp: time.Now(),
+			data:      eventData,
 		})
 	}
 

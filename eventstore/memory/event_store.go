@@ -3,9 +3,12 @@ package memory
 import (
 	"context"
 	"fmt"
+	"log/slog"
+	"slices"
 	"sync"
 
 	"github.com/go-estoria/estoria"
+	"go.jetpack.io/typeid"
 )
 
 type EventStore struct {
@@ -14,46 +17,43 @@ type EventStore struct {
 	mu sync.RWMutex
 }
 
-func (s *EventStore) AppendStream(ctx context.Context, id estoria.Identifier, events ...estoria.Event) error {
+func (s *EventStore) AppendStream(ctx context.Context, streamID typeid.AnyID, opts estoria.AppendStreamOptions, events ...estoria.Event) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	stream, ok := s.Events[id.String()]
-	if !ok {
-		stream = make([]estoria.Event, 0)
-	}
-
+	stream := s.Events[streamID.String()]
+	tx := []estoria.Event{}
 	for _, event := range events {
-		for _, e := range stream {
-			if e.ID() == event.ID() {
-				return ErrEventExists{EventID: event.ID()}
-			}
+		if slices.ContainsFunc(stream, func(e estoria.Event) bool {
+			return event.ID().String() == e.ID().String()
+		}) {
+			return ErrEventExists{EventID: event.ID()}
 		}
 
-		stream = append(stream, event)
+		slog.Default().WithGroup("eventwriter").Debug("appending event", "event_id", event.ID())
+		tx = append(tx, event)
 	}
 
-	s.Events[id.String()] = stream
-
+	s.Events[streamID.String()] = append(stream, events...)
 	return nil
 }
 
-func (s *EventStore) ReadStream(ctx context.Context, aggregateID estoria.TypedID) (estoria.EventStreamIterator, error) {
-	events, ok := s.Events[aggregateID.String()]
+func (s *EventStore) ReadStream(ctx context.Context, streamID typeid.AnyID, opts estoria.ReadStreamOptions) (estoria.EventStreamIterator, error) {
+	stream, ok := s.Events[streamID.String()]
 	if !ok {
 		return nil, estoria.ErrStreamNotFound
 	}
 
-	return &EventStream{
-		id:     aggregateID.ID,
-		cursor: 0,
-		events: events,
+	return &StreamIterator{
+		streamID: streamID,
+		events:   stream,
+		cursor:   0,
 	}, nil
 }
 
 // ErrEventExists is returned when attempting to write an event that already exists.
 type ErrEventExists struct {
-	EventID estoria.TypedID
+	EventID typeid.AnyID
 }
 
 // Error returns the error message.

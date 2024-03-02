@@ -8,7 +8,7 @@ import (
 	"io"
 	"log/slog"
 
-	"github.com/google/uuid"
+	"go.jetpack.io/typeid"
 )
 
 type EventStreamIterator interface {
@@ -16,11 +16,11 @@ type EventStreamIterator interface {
 }
 
 type EventStreamReader interface {
-	ReadStream(ctx context.Context, id Identifier, opts ReadStreamOptions) (EventStreamIterator, error)
+	ReadStream(ctx context.Context, id typeid.AnyID, opts ReadStreamOptions) (EventStreamIterator, error)
 }
 
 type EventStreamWriter interface {
-	AppendStream(ctx context.Context, id Identifier, opts AppendStreamOptions, events ...Event) error
+	AppendStream(ctx context.Context, id typeid.AnyID, opts AppendStreamOptions, events ...Event) error
 }
 
 type AppendStreamOptions struct{}
@@ -63,17 +63,17 @@ func (c *AggregateStore[E]) Allow(eventDataFactory func() EventData) {
 func (c *AggregateStore[E]) Create() *Aggregate[E] {
 	data := c.newEntity()
 	return &Aggregate[E]{
-		id:   TypedID{Type: data.EntityID().Type, ID: UUID(uuid.New())},
+		id:   data.EntityID(),
 		data: data,
 	}
 }
 
 // Load loads an aggregate by its ID.
-func (c *AggregateStore[E]) Load(ctx context.Context, id TypedID) (*Aggregate[E], error) {
+func (c *AggregateStore[E]) Load(ctx context.Context, id typeid.AnyID) (*Aggregate[E], error) {
 	log := slog.Default().WithGroup("aggregatestore")
 	log.Debug("reading aggregate", "aggregate_id", id)
 
-	stream, err := c.EventReader.ReadStream(ctx, id.ID, ReadStreamOptions{})
+	stream, err := c.EventReader.ReadStream(ctx, id, ReadStreamOptions{})
 	if err != nil {
 		return nil, fmt.Errorf("finding event stream: %w", err)
 	}
@@ -99,9 +99,9 @@ func (c *AggregateStore[E]) Load(ctx context.Context, id TypedID) (*Aggregate[E]
 			continue
 		}
 
-		newEventData, ok := c.eventDataFactories[evt.ID().Type]
+		newEventData, ok := c.eventDataFactories[evt.ID().Prefix()]
 		if !ok {
-			return nil, fmt.Errorf("no event data factory for event type %s", evt.ID().Type)
+			return nil, fmt.Errorf("no event data factory for event type %s", evt.ID().Prefix())
 		}
 
 		eventData := newEventData()
@@ -112,11 +112,11 @@ func (c *AggregateStore[E]) Load(ctx context.Context, id TypedID) (*Aggregate[E]
 		log.Debug("event data", "event_id", evt.ID(), "data", eventData)
 
 		if err := aggregate.apply(ctx, &event{
-			id:          evt.ID(),
-			aggregateID: evt.AggregateID(),
-			timestamp:   evt.Timestamp(),
-			data:        eventData,
-			raw:         rawEventData,
+			id:        evt.ID(),
+			streamID:  evt.StreamID(),
+			timestamp: evt.Timestamp(),
+			data:      eventData,
+			raw:       rawEventData,
 		}); err != nil {
 			return nil, fmt.Errorf("applying event: %w", err)
 		}
@@ -146,7 +146,7 @@ func (c *AggregateStore[E]) Save(ctx context.Context, aggregate *Aggregate[E]) e
 	}
 
 	// assume to be atomic, for now (it's not)
-	if err := c.EventWriter.AppendStream(ctx, aggregate.ID().ID, AppendStreamOptions{}, toSave...); err != nil {
+	if err := c.EventWriter.AppendStream(ctx, aggregate.ID(), AppendStreamOptions{}, toSave...); err != nil {
 		return fmt.Errorf("saving events: %w", err)
 	}
 

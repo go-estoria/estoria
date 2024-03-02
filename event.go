@@ -2,35 +2,37 @@ package estoria
 
 import (
 	"time"
+
+	"go.jetpack.io/typeid"
 )
 
 // An Event is a state change to an entity.
 type Event interface {
-	ID() TypedID
-	AggregateID() TypedID
+	ID() typeid.AnyID
+	StreamID() typeid.AnyID
 	Timestamp() time.Time
 	Data() []byte
 }
 
 // The internal representation of an event.
 type event struct {
-	id          TypedID
-	aggregateID TypedID
-	timestamp   time.Time
-	data        EventData
-	raw         []byte
+	id        typeid.AnyID
+	streamID  typeid.AnyID
+	timestamp time.Time
+	data      EventData
+	raw       []byte
 }
 
 var _ Event = (*event)(nil)
 
 // EventID returns the ID of the event.
-func (e *event) ID() TypedID {
+func (e *event) ID() typeid.AnyID {
 	return e.id
 }
 
-// AggregateID returns the ID of the aggregate that the event applies to.
-func (e *event) AggregateID() TypedID {
-	return e.aggregateID
+// StreamID returns the ID of the aggregate that the event applies to.
+func (e *event) StreamID() typeid.AnyID {
+	return e.streamID
 }
 
 // Timestamp returns the time that the event occurred.
