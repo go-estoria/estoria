@@ -7,21 +7,31 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"sync"
 
 	"github.com/google/uuid"
 )
 
-type EventStore interface {
-	CreateStream(ctx context.Context, aggregateID TypedID) (EventStream, error)
-	FindStream(ctx context.Context, aggregateID TypedID) (EventStream, error)
+type EventStreamIterator interface {
+	Next(ctx context.Context) (Event, error)
 }
+
+type EventStreamReader interface {
+	ReadStream(ctx context.Context, id Identifier, opts ReadStreamOptions) (EventStreamIterator, error)
+}
+
+type EventStreamWriter interface {
+	AppendStream(ctx context.Context, id Identifier, opts AppendStreamOptions, events ...Event) error
+}
+
+type AppendStreamOptions struct{}
+
+type ReadStreamOptions struct{}
 
 // An AggregateStore loads and saves aggregates using an EventStore.
 type AggregateStore[E Entity] struct {
-	Events EventStore
+	EventReader EventStreamReader
+	EventWriter EventStreamWriter
 
-	mu                 sync.RWMutex
 	newEntity          EntityFactory[E]
 	eventDataFactories map[string]func() EventData
 
@@ -29,9 +39,14 @@ type AggregateStore[E Entity] struct {
 	serializeEventData   func(any) ([]byte, error)
 }
 
-func NewAggregateStore[E Entity](eventStore EventStore, entityFactory EntityFactory[E]) *AggregateStore[E] {
+func NewAggregateStore[E Entity](
+	eventReader EventStreamReader,
+	eventWriter EventStreamWriter,
+	entityFactory EntityFactory[E],
+) *AggregateStore[E] {
 	return &AggregateStore[E]{
-		Events:               eventStore,
+		EventReader:          eventReader,
+		EventWriter:          eventWriter,
 		newEntity:            entityFactory,
 		eventDataFactories:   make(map[string]func() EventData),
 		deserializeEventData: json.Unmarshal,
@@ -57,10 +72,8 @@ func (c *AggregateStore[E]) Create() *Aggregate[E] {
 func (c *AggregateStore[E]) Load(ctx context.Context, id TypedID) (*Aggregate[E], error) {
 	log := slog.Default().WithGroup("aggregatestore")
 	log.Debug("reading aggregate", "aggregate_id", id)
-	c.mu.RLock()
-	defer c.mu.RUnlock()
 
-	stream, err := c.Events.FindStream(ctx, id)
+	stream, err := c.EventReader.ReadStream(ctx, id.ID, ReadStreamOptions{})
 	if err != nil {
 		return nil, fmt.Errorf("finding event stream: %w", err)
 	}
@@ -115,23 +128,10 @@ func (c *AggregateStore[E]) Load(ctx context.Context, id TypedID) (*Aggregate[E]
 // Save saves an aggregate.
 func (c *AggregateStore[E]) Save(ctx context.Context, aggregate *Aggregate[E]) error {
 	slog.Default().WithGroup("aggregatewriter").Debug("writing aggregate", "aggregate_id", aggregate.ID(), "events", len(aggregate.unsavedEvents))
-	c.mu.Lock()
-	defer c.mu.Unlock()
 
 	if len(aggregate.unsavedEvents) == 0 {
 		slog.Debug("no events to save")
 		return nil
-	}
-
-	stream, err := c.Events.FindStream(ctx, aggregate.ID())
-	if errors.Is(err, ErrStreamNotFound) {
-		// for now, just create a new stream
-		stream, err = c.Events.CreateStream(ctx, aggregate.ID())
-		if err != nil {
-			return fmt.Errorf("creating event stream: %w", err)
-		}
-	} else if err != nil {
-		return fmt.Errorf("finding event stream: %w", err)
 	}
 
 	toSave := make([]Event, len(aggregate.unsavedEvents))
@@ -146,7 +146,7 @@ func (c *AggregateStore[E]) Save(ctx context.Context, aggregate *Aggregate[E]) e
 	}
 
 	// assume to be atomic, for now (it's not)
-	if err := stream.Append(ctx, toSave...); err != nil {
+	if err := c.EventWriter.AppendStream(ctx, aggregate.ID().ID, AppendStreamOptions{}, toSave...); err != nil {
 		return fmt.Errorf("saving events: %w", err)
 	}
 

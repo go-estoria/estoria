@@ -14,23 +14,31 @@ type EventStore struct {
 	mu sync.RWMutex
 }
 
-func (c *EventStore) CreateStream(ctx context.Context, aggregateID estoria.TypedID) (estoria.EventStream, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+func (s *EventStore) AppendStream(ctx context.Context, id estoria.Identifier, events ...estoria.Event) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
-	if _, ok := c.Events[aggregateID.String()]; ok {
-		return nil, fmt.Errorf("stream already exists: %s", aggregateID)
+	stream, ok := s.Events[id.String()]
+	if !ok {
+		stream = make([]estoria.Event, 0)
 	}
 
-	c.Events[aggregateID.String()] = []estoria.Event{}
-	return &EventStream{
-		id:     aggregateID.ID,
-		cursor: 0,
-		events: c.Events[aggregateID.String()],
-	}, nil
+	for _, event := range events {
+		for _, e := range stream {
+			if e.ID() == event.ID() {
+				return ErrEventExists{EventID: event.ID()}
+			}
+		}
+
+		stream = append(stream, event)
+	}
+
+	s.Events[id.String()] = stream
+
+	return nil
 }
 
-func (s *EventStore) FindStream(ctx context.Context, aggregateID estoria.TypedID) (estoria.EventStream, error) {
+func (s *EventStore) ReadStream(ctx context.Context, aggregateID estoria.TypedID) (estoria.EventStreamIterator, error) {
 	events, ok := s.Events[aggregateID.String()]
 	if !ok {
 		return nil, estoria.ErrStreamNotFound
