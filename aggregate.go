@@ -28,7 +28,7 @@ func (a *Aggregate[E]) Entity() E {
 func (a *Aggregate[E]) Append(events ...EventData) error {
 	slog.Debug("appending events to aggregate", "aggregate_id", a.ID(), "events", len(events))
 	for _, eventData := range events {
-		eventID, err := typeid.From(eventData.EventType(), "")
+		eventID, err := typeid.WithPrefix(eventData.EventType())
 		if err != nil {
 			return fmt.Errorf("generating event ID: %w", err)
 		}
