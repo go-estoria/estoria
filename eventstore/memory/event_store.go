@@ -44,10 +44,22 @@ func (s *EventStore) ReadStream(ctx context.Context, streamID typeid.AnyID, opts
 		return nil, estoria.ErrStreamNotFound
 	}
 
+	if opts.BeginVersion < 0 {
+		return nil, fmt.Errorf("begin version must be 0 or greater: %d", opts.BeginVersion)
+	} else if opts.EndVersion < 0 {
+		return nil, fmt.Errorf("end version must be 0 or greater: %d", opts.EndVersion)
+	}
+
+	direction := 1
+	if opts.BeginVersion > opts.EndVersion {
+		direction = -1
+	}
+
 	return &StreamIterator{
-		streamID: streamID,
-		events:   stream,
-		cursor:   0,
+		streamID:  streamID,
+		events:    stream,
+		cursor:    opts.BeginVersion,
+		direction: direction,
 	}, nil
 }
 

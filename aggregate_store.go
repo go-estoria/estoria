@@ -25,12 +25,16 @@ type EventStreamWriter interface {
 
 type AppendStreamOptions struct{}
 
-type ReadStreamOptions struct{}
+type ReadStreamOptions struct {
+	BeginVersion int
+	EndVersion   int
+}
 
 // An AggregateStore loads and saves aggregates using an EventStore.
 type AggregateStore[E Entity] struct {
-	EventReader EventStreamReader
-	EventWriter EventStreamWriter
+	eventReader EventStreamReader
+	eventWriter EventStreamWriter
+	snapshotter Snapshotter[E]
 
 	newEntity          EntityFactory[E]
 	eventDataFactories map[string]func() EventData
@@ -43,15 +47,24 @@ func NewAggregateStore[E Entity](
 	eventReader EventStreamReader,
 	eventWriter EventStreamWriter,
 	entityFactory EntityFactory[E],
-) *AggregateStore[E] {
-	return &AggregateStore[E]{
-		EventReader:          eventReader,
-		EventWriter:          eventWriter,
+	opts ...AggregateStoreOption[E],
+) (*AggregateStore[E], error) {
+	store := &AggregateStore[E]{
+		eventReader:          eventReader,
+		eventWriter:          eventWriter,
 		newEntity:            entityFactory,
 		eventDataFactories:   make(map[string]func() EventData),
 		deserializeEventData: json.Unmarshal,
 		serializeEventData:   json.Marshal,
 	}
+
+	for _, opt := range opts {
+		if err := opt(store); err != nil {
+			return nil, fmt.Errorf("applying option: %w", err)
+		}
+	}
+
+	return store, nil
 }
 
 // Allow allows an event type to be used with the aggregate store.
@@ -73,14 +86,30 @@ func (c *AggregateStore[E]) Load(ctx context.Context, id typeid.AnyID) (*Aggrega
 	log := slog.Default().WithGroup("aggregatestore")
 	log.Debug("reading aggregate", "aggregate_id", id)
 
-	stream, err := c.EventReader.ReadStream(ctx, id, ReadStreamOptions{})
-	if err != nil {
-		return nil, fmt.Errorf("finding event stream: %w", err)
-	}
-
 	aggregate := &Aggregate[E]{
 		id:   id,
 		data: c.newEntity(),
+	}
+
+	streamVersion := 0
+	if c.snapshotter != nil {
+		snapshot, err := c.snapshotter.LoadSnapshot(ctx, id)
+		if errors.Is(err, ErrNoSnapshotFound) {
+			log.Debug("no snapshot found", "aggregate_id", id)
+		} else if err != nil {
+			log.Warn("error loading snapshot, aggregate will be loaded from stream", "aggregate_id", id, "error", err)
+		} else {
+			log.Debug("loaded snapshot", "aggregate_id", id, "stream_version", snapshot.StreamVersion)
+			streamVersion = snapshot.StreamVersion()
+			aggregate.data = snapshot.Entity()
+		}
+	}
+
+	stream, err := c.eventReader.ReadStream(ctx, id, ReadStreamOptions{
+		BeginVersion: streamVersion + 1,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("finding event stream: %w", err)
 	}
 
 	for {
@@ -146,7 +175,7 @@ func (c *AggregateStore[E]) Save(ctx context.Context, aggregate *Aggregate[E]) e
 	}
 
 	// assume to be atomic, for now (it's not)
-	if err := c.EventWriter.AppendStream(ctx, aggregate.ID(), AppendStreamOptions{}, toSave...); err != nil {
+	if err := c.eventWriter.AppendStream(ctx, aggregate.ID(), AppendStreamOptions{}, toSave...); err != nil {
 		return fmt.Errorf("saving events: %w", err)
 	}
 
@@ -155,6 +184,21 @@ func (c *AggregateStore[E]) Save(ctx context.Context, aggregate *Aggregate[E]) e
 	return nil
 }
 
+type AggregateStoreOption[E Entity] func(*AggregateStore[E]) error
+
+func WithSnapshotter[E Entity](s Snapshotter[E]) AggregateStoreOption[E] {
+	return func(c *AggregateStore[E]) error {
+		if s == nil {
+			return errors.New("snapshotter cannot be nil")
+		}
+
+		c.snapshotter = s
+		return nil
+	}
+}
+
 var ErrStreamNotFound = errors.New("stream not found")
 
 var ErrAggregateNotFound = errors.New("aggregate not found")
+
+var ErrNoSnapshotFound = errors.New("no snapshot found")

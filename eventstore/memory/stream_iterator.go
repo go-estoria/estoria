@@ -9,15 +9,16 @@ import (
 )
 
 type StreamIterator struct {
-	streamID typeid.AnyID
-	events   []estoria.Event
-	cursor   int
+	streamID  typeid.AnyID
+	events    []estoria.Event
+	cursor    int
+	direction int
 }
 
 func (i *StreamIterator) Next(ctx context.Context) (estoria.Event, error) {
 	if i.cursor < len(i.events) {
 		event := i.events[i.cursor]
-		i.cursor++
+		i.cursor += i.direction
 		return event, nil
 	}
 
