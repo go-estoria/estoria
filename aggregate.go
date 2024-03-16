@@ -14,6 +14,7 @@ type Aggregate[E Entity] struct {
 	id            typeid.AnyID
 	data          E
 	unsavedEvents []*event
+	version       int64
 }
 
 func (a *Aggregate[E]) ID() typeid.AnyID {
@@ -22,6 +23,10 @@ func (a *Aggregate[E]) ID() typeid.AnyID {
 
 func (a *Aggregate[E]) Entity() E {
 	return a.data
+}
+
+func (a *Aggregate[E]) Version() int64 {
+	return a.version
 }
 
 // Append appends the given events to the aggregate's unsaved events.

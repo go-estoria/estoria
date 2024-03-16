@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"time"
 
 	"go.jetpack.io/typeid"
 )
@@ -25,18 +26,29 @@ type EventStreamWriter interface {
 
 type AppendStreamOptions struct{}
 
-type ReadStreamOptions struct{}
+type ReadStreamOptions struct {
+	FromVersion int64
+	ToVersion   int64
+}
 
 // An AggregateStore loads and saves aggregates using an EventStore.
 type AggregateStore[E Entity] struct {
 	EventReader EventStreamReader
 	EventWriter EventStreamWriter
 
+	SnapshotReader EventStreamReader
+	SnapshotWriter EventStreamWriter
+
 	newEntity          EntityFactory[E]
 	eventDataFactories map[string]func() EventData
 
 	deserializeEventData func([]byte, any) error
 	serializeEventData   func(any) ([]byte, error)
+
+	deserializeSnapshotData func([]byte, any) error
+	serializeSnapshotData   func(any) ([]byte, error)
+
+	log *slog.Logger
 }
 
 func NewAggregateStore[E Entity](
@@ -45,12 +57,15 @@ func NewAggregateStore[E Entity](
 	entityFactory EntityFactory[E],
 ) *AggregateStore[E] {
 	return &AggregateStore[E]{
-		EventReader:          eventReader,
-		EventWriter:          eventWriter,
-		newEntity:            entityFactory,
-		eventDataFactories:   make(map[string]func() EventData),
-		deserializeEventData: json.Unmarshal,
-		serializeEventData:   json.Marshal,
+		EventReader:             eventReader,
+		EventWriter:             eventWriter,
+		newEntity:               entityFactory,
+		eventDataFactories:      make(map[string]func() EventData),
+		deserializeEventData:    json.Unmarshal,
+		serializeEventData:      json.Marshal,
+		deserializeSnapshotData: json.Unmarshal,
+		serializeSnapshotData:   json.Marshal,
+		log:                     slog.Default().WithGroup("aggregatestore"),
 	}
 }
 
@@ -70,17 +85,36 @@ func (c *AggregateStore[E]) Create() *Aggregate[E] {
 
 // Load loads an aggregate by its ID.
 func (c *AggregateStore[E]) Load(ctx context.Context, id typeid.AnyID) (*Aggregate[E], error) {
-	log := slog.Default().WithGroup("aggregatestore")
-	log.Debug("reading aggregate", "aggregate_id", id)
-
-	stream, err := c.EventReader.ReadStream(ctx, id, ReadStreamOptions{})
-	if err != nil {
-		return nil, fmt.Errorf("finding event stream: %w", err)
-	}
+	c.log.Debug("loading aggregate", "aggregate_id", id)
 
 	aggregate := &Aggregate[E]{
 		id:   id,
 		data: c.newEntity(),
+	}
+
+	// load the entire event stream for the aggregate unless a snapshot is found
+	var loadFromVersion int64
+
+	if snapshot, err := c.loadSnapshot(ctx, id); err != nil {
+		if errors.Is(err, ErrSnapshotNotFound) {
+			c.log.Debug("no snapshot found", "aggregate_id", id)
+		} else {
+			c.log.Warn("error loading snapshot", "aggregate_id", id, "error", err)
+		}
+	} else {
+		if err := c.deserializeSnapshotData(snapshot.Data(), &aggregate.data); err != nil {
+			c.log.Warn("error deserializing snapshot data", "aggregate_id", id, "error", err)
+		} else {
+			loadFromVersion = snapshot.AggregateVersion
+			c.log.Debug("loaded snapshot", "aggregate_id", id, "version", snapshot.AggregateVersion)
+		}
+	}
+
+	stream, err := c.EventReader.ReadStream(ctx, id, ReadStreamOptions{
+		FromVersion: loadFromVersion,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("finding event stream: %w", err)
 	}
 
 	for {
@@ -95,7 +129,7 @@ func (c *AggregateStore[E]) Load(ctx context.Context, id typeid.AnyID) (*Aggrega
 
 		rawEventData := evt.Data()
 		if len(rawEventData) == 0 {
-			slog.Warn("event has no data", "event_id", evt.ID())
+			c.log.Warn("event has no data", "event_id", evt.ID())
 			continue
 		}
 
@@ -109,7 +143,7 @@ func (c *AggregateStore[E]) Load(ctx context.Context, id typeid.AnyID) (*Aggrega
 			return nil, fmt.Errorf("deserializing event data: %w", err)
 		}
 
-		log.Debug("event data", "event_id", evt.ID(), "data", eventData)
+		c.log.Debug("event data", "event_id", evt.ID(), "data", eventData)
 
 		if err := aggregate.apply(ctx, &event{
 			id:        evt.ID(),
@@ -125,12 +159,44 @@ func (c *AggregateStore[E]) Load(ctx context.Context, id typeid.AnyID) (*Aggrega
 	return aggregate, nil
 }
 
+func (c *AggregateStore[E]) loadSnapshot(ctx context.Context, aggregateID typeid.AnyID) (*snapshot, error) {
+	if c.SnapshotReader == nil {
+		return nil, nil
+	}
+
+	snapshotStream, err := c.SnapshotReader.ReadStream(ctx, aggregateID, ReadStreamOptions{
+		FromVersion: -1,
+		ToVersion:   -1,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("finding snapshot stream: %w", err)
+	}
+
+	snapshotEvent, err := snapshotStream.Next(ctx)
+	if err == io.EOF {
+		return nil, ErrSnapshotNotFound
+	} else if err != nil {
+		return nil, fmt.Errorf("reading snapshot event: %w", err)
+	}
+
+	c.log.Debug("snapshot found", "aggregate_id", aggregateID, "snapshot_id", snapshotEvent.ID())
+
+	var snapshot snapshot
+	if err := c.deserializeEventData(snapshotEvent.Data(), &snapshot); err != nil {
+		return nil, fmt.Errorf("deserializing snapshot event data: %w", err)
+	}
+
+	c.log.Debug("snapshot data", "aggregate_id", aggregateID, "version", snapshot.AggregateVersion)
+
+	return &snapshot, nil
+}
+
 // Save saves an aggregate.
 func (c *AggregateStore[E]) Save(ctx context.Context, aggregate *Aggregate[E]) error {
-	slog.Default().WithGroup("aggregatewriter").Debug("writing aggregate", "aggregate_id", aggregate.ID(), "events", len(aggregate.unsavedEvents))
+	c.log.Debug("saving aggregate", "aggregate_id", aggregate.ID(), "events", len(aggregate.unsavedEvents))
 
 	if len(aggregate.unsavedEvents) == 0 {
-		slog.Debug("no events to save")
+		c.log.Debug("no events to save")
 		return nil
 	}
 
@@ -154,6 +220,44 @@ func (c *AggregateStore[E]) Save(ctx context.Context, aggregate *Aggregate[E]) e
 
 	return nil
 }
+
+// SaveSnapshot saves a snapshot of an aggregate.
+func (c *AggregateStore[E]) saveSnapshot(ctx context.Context, aggregate *Aggregate[E]) error {
+	if c.SnapshotWriter == nil {
+		return ErrSnapshotsNotSupported
+	}
+
+	data, err := c.serializeSnapshotData(aggregate.Entity())
+	if err != nil {
+		return fmt.Errorf("serializing snapshot data: %w", err)
+	}
+
+	eventID, err := typeid.From(aggregate.ID().Prefix(), "")
+	if err != nil {
+		return fmt.Errorf("generating event ID: %w", err)
+	}
+
+	snapshot := &snapshot{
+		AggregateID:      aggregate.ID(),
+		AggregateVersion: aggregate.Version(),
+		event: event{
+			id:        eventID,
+			streamID:  aggregate.ID(),
+			timestamp: time.Now(),
+			raw:       data,
+		},
+	}
+
+	if err := c.SnapshotWriter.AppendStream(ctx, aggregate.ID(), AppendStreamOptions{}, snapshot); err != nil {
+		return fmt.Errorf("saving snapshot: %w", err)
+	}
+
+	return nil
+}
+
+var ErrSnapshotsNotSupported = errors.New("snapshots not supported")
+
+var ErrSnapshotNotFound = errors.New("snapshot not found")
 
 var ErrStreamNotFound = errors.New("stream not found")
 
