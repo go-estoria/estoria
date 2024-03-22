@@ -37,6 +37,8 @@ func (s *EventStreamSnapshotReader) ReadSnapshot(ctx context.Context, aggregateI
 		return nil, errors.New("snapshot not found")
 	} else if err != nil {
 		return nil, fmt.Errorf("reading snapshot event: %w", err)
+	} else if event == nil {
+		return nil, errors.New("snapshot not found")
 	}
 
 	slog.Debug("snapshot found", "aggregate_id", aggregateID, "snapshot_id", event.ID())
