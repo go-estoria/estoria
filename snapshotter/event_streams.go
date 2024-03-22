@@ -24,7 +24,12 @@ func NewEventStreamSnapshotReader(eventReader estoria.EventStreamReader) *EventS
 }
 
 func (s *EventStreamSnapshotReader) ReadSnapshot(ctx context.Context, aggregateID typeid.AnyID) (estoria.Snapshot, error) {
-	stream, err := s.eventReader.ReadStream(ctx, aggregateID, estoria.ReadStreamOptions{
+	snapshotStreamID, err := typeid.From(aggregateID.Prefix()+"-snapshot", aggregateID.Suffix())
+	if err != nil {
+		return nil, fmt.Errorf("deriving snapshot ID: %w", err)
+	}
+
+	stream, err := s.eventReader.ReadStream(ctx, snapshotStreamID, estoria.ReadStreamOptions{
 		FromVersion: -1,
 		ToVersion:   -1,
 	})
@@ -62,15 +67,20 @@ func NewEventStreamSnapshotWriter(eventWriter estoria.EventStreamWriter) *EventS
 }
 
 func (s *EventStreamSnapshotWriter) WriteSnapshot(ctx context.Context, aggregateID typeid.AnyID, aggregateVersion int64, data []byte) error {
+	snapshotStreamID, err := typeid.From(aggregateID.Prefix()+"-snapshot", aggregateID.Suffix())
+	if err != nil {
+		return fmt.Errorf("deriving snapshot ID: %w", err)
+	}
+
 	eventID, err := typeid.WithPrefix(aggregateID.Prefix())
 	if err != nil {
 		return fmt.Errorf("generating snapshot event ID: %w", err)
 	}
 
 	snap := snapshot{
-		AggID:      aggregateID,
-		AggVersion: aggregateVersion,
-		AggData:    data,
+		aggregateID:      aggregateID,
+		aggregateVersion: aggregateVersion,
+		data:             data,
 	}
 
 	snapshotData, err := json.Marshal(snap)
@@ -80,12 +90,12 @@ func (s *EventStreamSnapshotWriter) WriteSnapshot(ctx context.Context, aggregate
 
 	event := &snapshotEvent{
 		EventID:        eventID,
-		EventStreamID:  aggregateID,
+		EventStreamID:  snapshotStreamID,
 		EventTimestamp: time.Now(),
 		EventData:      snapshotData,
 	}
 
-	if err := s.eventWriter.AppendStream(ctx, aggregateID, estoria.AppendStreamOptions{}, event); err != nil {
+	if err := s.eventWriter.AppendStream(ctx, snapshotStreamID, estoria.AppendStreamOptions{}, event); err != nil {
 		return fmt.Errorf("appending snapshot stream: %w", err)
 	}
 
@@ -93,21 +103,21 @@ func (s *EventStreamSnapshotWriter) WriteSnapshot(ctx context.Context, aggregate
 }
 
 type snapshot struct {
-	AggID      typeid.AnyID
-	AggVersion int64
-	AggData    []byte
+	aggregateID      typeid.AnyID
+	aggregateVersion int64
+	data             []byte
 }
 
 func (s *snapshot) AggregateID() typeid.AnyID {
-	return s.AggID
+	return s.aggregateID
 }
 
 func (s *snapshot) AggregateVersion() int64 {
-	return s.AggVersion
+	return s.aggregateVersion
 }
 
 func (s *snapshot) Data() []byte {
-	return s.AggData
+	return s.data
 }
 
 type snapshotEvent struct {
