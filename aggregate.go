@@ -65,5 +65,7 @@ func (a *Aggregate[E]) apply(ctx context.Context, evt *event) error {
 		return fmt.Errorf("applying event: %w", err)
 	}
 
+	a.version++
+
 	return nil
 }
