@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"time"
 
 	"go.jetpack.io/typeid"
 )
@@ -31,13 +30,21 @@ type ReadStreamOptions struct {
 	ToVersion   int64
 }
 
+type HookType int
+
+const (
+	BeforeLoadAggregate HookType = iota
+	AfterLoadAggregate
+	BeforeSaveAggregate
+	AfterSaveAggregate
+)
+
+type HookFunc[E Entity] func(context.Context, *Aggregate[E]) error
+
 // An AggregateStore loads and saves aggregates using an EventStore.
 type AggregateStore[E Entity] struct {
 	EventReader EventStreamReader
 	EventWriter EventStreamWriter
-
-	SnapshotReader EventStreamReader
-	SnapshotWriter EventStreamWriter
 
 	newEntity          EntityFactory[E]
 	eventDataFactories map[string]func() EventData
@@ -45,8 +52,7 @@ type AggregateStore[E Entity] struct {
 	deserializeEventData func([]byte, any) error
 	serializeEventData   func(any) ([]byte, error)
 
-	deserializeSnapshotData func([]byte, any) error
-	serializeSnapshotData   func(any) ([]byte, error)
+	hooks map[HookType][]HookFunc[E]
 
 	log *slog.Logger
 }
@@ -57,16 +63,22 @@ func NewAggregateStore[E Entity](
 	entityFactory EntityFactory[E],
 ) *AggregateStore[E] {
 	return &AggregateStore[E]{
-		EventReader:             eventReader,
-		EventWriter:             eventWriter,
-		newEntity:               entityFactory,
-		eventDataFactories:      make(map[string]func() EventData),
-		deserializeEventData:    json.Unmarshal,
-		serializeEventData:      json.Marshal,
-		deserializeSnapshotData: json.Unmarshal,
-		serializeSnapshotData:   json.Marshal,
-		log:                     slog.Default().WithGroup("aggregatestore"),
+		EventReader:          eventReader,
+		EventWriter:          eventWriter,
+		newEntity:            entityFactory,
+		eventDataFactories:   make(map[string]func() EventData),
+		deserializeEventData: json.Unmarshal,
+		serializeEventData:   json.Marshal,
+		log:                  slog.Default().WithGroup("aggregatestore"),
 	}
+}
+
+func (c *AggregateStore[E]) AddHook(hookType HookType, hook func(context.Context, *Aggregate[E]) error) {
+	if c.hooks == nil {
+		c.hooks = make(map[HookType][]HookFunc[E])
+	}
+
+	c.hooks[hookType] = append(c.hooks[hookType], hook)
 }
 
 // Allow allows an event type to be used with the aggregate store.
@@ -92,26 +104,16 @@ func (c *AggregateStore[E]) Load(ctx context.Context, id typeid.AnyID) (*Aggrega
 		data: c.newEntity(),
 	}
 
-	// load the entire event stream for the aggregate unless a snapshot is found
-	var loadFromVersion int64
-
-	if snapshot, err := c.loadSnapshot(ctx, id); err != nil {
-		if errors.Is(err, ErrSnapshotNotFound) {
-			c.log.Debug("no snapshot found", "aggregate_id", id)
-		} else {
-			c.log.Warn("error loading snapshot", "aggregate_id", id, "error", err)
-		}
-	} else {
-		if err := c.deserializeSnapshotData(snapshot.Data(), &aggregate.data); err != nil {
-			c.log.Warn("error deserializing snapshot data", "aggregate_id", id, "error", err)
-		} else {
-			loadFromVersion = snapshot.AggregateVersion
-			c.log.Debug("loaded snapshot", "aggregate_id", id, "version", snapshot.AggregateVersion)
+	if hooks, ok := c.hooks[BeforeLoadAggregate]; ok {
+		for _, hook := range hooks {
+			if err := hook(ctx, aggregate); err != nil {
+				return nil, fmt.Errorf("before-load aggregate hook: %w", err)
+			}
 		}
 	}
 
 	stream, err := c.EventReader.ReadStream(ctx, id, ReadStreamOptions{
-		FromVersion: loadFromVersion,
+		FromVersion: aggregate.Version() + 1,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("finding event stream: %w", err)
@@ -156,44 +158,28 @@ func (c *AggregateStore[E]) Load(ctx context.Context, id typeid.AnyID) (*Aggrega
 		}
 	}
 
+	if hooks, ok := c.hooks[AfterLoadAggregate]; ok {
+		for _, hook := range hooks {
+			if err := hook(ctx, aggregate); err != nil {
+				return nil, fmt.Errorf("after-load aggregate hook: %w", err)
+			}
+		}
+	}
+
 	return aggregate, nil
-}
-
-func (c *AggregateStore[E]) loadSnapshot(ctx context.Context, aggregateID typeid.AnyID) (*snapshot, error) {
-	if c.SnapshotReader == nil {
-		return nil, nil
-	}
-
-	snapshotStream, err := c.SnapshotReader.ReadStream(ctx, aggregateID, ReadStreamOptions{
-		FromVersion: -1,
-		ToVersion:   -1,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("finding snapshot stream: %w", err)
-	}
-
-	snapshotEvent, err := snapshotStream.Next(ctx)
-	if err == io.EOF {
-		return nil, ErrSnapshotNotFound
-	} else if err != nil {
-		return nil, fmt.Errorf("reading snapshot event: %w", err)
-	}
-
-	c.log.Debug("snapshot found", "aggregate_id", aggregateID, "snapshot_id", snapshotEvent.ID())
-
-	var snapshot snapshot
-	if err := c.deserializeEventData(snapshotEvent.Data(), &snapshot); err != nil {
-		return nil, fmt.Errorf("deserializing snapshot event data: %w", err)
-	}
-
-	c.log.Debug("snapshot data", "aggregate_id", aggregateID, "version", snapshot.AggregateVersion)
-
-	return &snapshot, nil
 }
 
 // Save saves an aggregate.
 func (c *AggregateStore[E]) Save(ctx context.Context, aggregate *Aggregate[E]) error {
 	c.log.Debug("saving aggregate", "aggregate_id", aggregate.ID(), "events", len(aggregate.unsavedEvents))
+
+	if hooks, ok := c.hooks[BeforeSaveAggregate]; ok {
+		for _, hook := range hooks {
+			if err := hook(ctx, aggregate); err != nil {
+				return fmt.Errorf("before-save aggregate hook: %w", err)
+			}
+		}
+	}
 
 	if len(aggregate.unsavedEvents) == 0 {
 		c.log.Debug("no events to save")
@@ -218,46 +204,16 @@ func (c *AggregateStore[E]) Save(ctx context.Context, aggregate *Aggregate[E]) e
 
 	aggregate.unsavedEvents = []*event{}
 
-	return nil
-}
-
-// SaveSnapshot saves a snapshot of an aggregate.
-func (c *AggregateStore[E]) saveSnapshot(ctx context.Context, aggregate *Aggregate[E]) error {
-	if c.SnapshotWriter == nil {
-		return ErrSnapshotsNotSupported
-	}
-
-	data, err := c.serializeSnapshotData(aggregate.Entity())
-	if err != nil {
-		return fmt.Errorf("serializing snapshot data: %w", err)
-	}
-
-	eventID, err := typeid.From(aggregate.ID().Prefix(), "")
-	if err != nil {
-		return fmt.Errorf("generating event ID: %w", err)
-	}
-
-	snapshot := &snapshot{
-		AggregateID:      aggregate.ID(),
-		AggregateVersion: aggregate.Version(),
-		event: event{
-			id:        eventID,
-			streamID:  aggregate.ID(),
-			timestamp: time.Now(),
-			raw:       data,
-		},
-	}
-
-	if err := c.SnapshotWriter.AppendStream(ctx, aggregate.ID(), AppendStreamOptions{}, snapshot); err != nil {
-		return fmt.Errorf("saving snapshot: %w", err)
+	if hooks, ok := c.hooks[AfterSaveAggregate]; ok {
+		for _, hook := range hooks {
+			if err := hook(ctx, aggregate); err != nil {
+				return fmt.Errorf("after-save aggregate hook: %w", err)
+			}
+		}
 	}
 
 	return nil
 }
-
-var ErrSnapshotsNotSupported = errors.New("snapshots not supported")
-
-var ErrSnapshotNotFound = errors.New("snapshot not found")
 
 var ErrStreamNotFound = errors.New("stream not found")
 
