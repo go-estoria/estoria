@@ -54,9 +54,13 @@ func (a *Aggregate[E]) SetEntity(entity E) {
 	a.data = entity
 }
 
+func (a *Aggregate[E]) SetVersion(version int64) {
+	a.version = version
+}
+
 // Apply applies the given events to the aggregate's state.
 func (a *Aggregate[E]) apply(ctx context.Context, evt *event) error {
-	slog.Debug("applying event to aggregate", "aggregate_id", a.ID(), "event_id", evt.ID())
+	slog.Debug("applying eve`nt to aggregate", "aggregate_id", a.ID(), "event_id", evt.ID())
 	if err := a.data.ApplyEvent(ctx, evt.data); err != nil {
 		return fmt.Errorf("applying event: %w", err)
 	}
