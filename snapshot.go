@@ -1,7 +1,6 @@
 package estoria
 
 import (
-	"context"
 	"time"
 
 	"go.jetpack.io/typeid"
@@ -13,16 +12,22 @@ type Snapshot interface {
 	Data() []byte
 }
 
-type SnapshotReader interface {
-	ReadSnapshot(ctx context.Context, aggregateID typeid.AnyID) (Snapshot, error)
+type snapshot struct {
+	aggregateID      typeid.AnyID
+	aggregateVersion int64
+	data             []byte
 }
 
-type SnapshotWriter interface {
-	WriteSnapshot(ctx context.Context, snapshot Snapshot) error
+func (s *snapshot) AggregateID() typeid.AnyID {
+	return s.aggregateID
 }
 
-type SnapshotPolicy interface {
-	ShouldSnapshot(aggregateID typeid.AnyID, aggregateVersion int64, timestamp time.Time) bool
+func (s *snapshot) AggregateVersion() int64 {
+	return s.aggregateVersion
+}
+
+func (s *snapshot) Data() []byte {
+	return s.data
 }
 
 type EventCountSnapshotPolicy struct {

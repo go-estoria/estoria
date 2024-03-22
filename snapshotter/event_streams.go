@@ -13,30 +13,13 @@ import (
 	"go.jetpack.io/typeid"
 )
 
-// An EventStreamsSnapshotter is a Snapshotter that reads and writes snapshots using event streams.
-type EventStreamsSnapshotter struct {
-	snapshotReader *EventStreamSnapshotReader
-	snapshotWriter *EventStreamSnapshotWriter
-	policy         estoria.SnapshotPolicy
-}
-
-func NewFromEventStreams(eventReader estoria.EventStreamReader, eventWriter estoria.EventStreamWriter) *EventStreamsSnapshotter {
-	return &EventStreamsSnapshotter{
-		snapshotReader: NewEventStreamSnapshotReader(eventReader),
-		snapshotWriter: NewEventStreamSnapshotWriter(eventWriter),
-	}
-}
-
 type EventStreamSnapshotReader struct {
 	eventReader estoria.EventStreamReader
-
-	log *slog.Logger
 }
 
 func NewEventStreamSnapshotReader(eventReader estoria.EventStreamReader) *EventStreamSnapshotReader {
 	return &EventStreamSnapshotReader{
 		eventReader: eventReader,
-		log:         slog.Default().WithGroup("snapshotter"),
 	}
 }
 
@@ -56,7 +39,7 @@ func (s *EventStreamSnapshotReader) ReadSnapshot(ctx context.Context, aggregateI
 		return nil, fmt.Errorf("reading snapshot event: %w", err)
 	}
 
-	s.log.Debug("snapshot found", "aggregate_id", aggregateID, "snapshot_id", event.ID())
+	slog.Debug("snapshot found", "aggregate_id", aggregateID, "snapshot_id", event.ID())
 
 	var snapshot snapshot
 	if err := json.Unmarshal(event.Data(), &snapshot); err != nil {
@@ -68,14 +51,11 @@ func (s *EventStreamSnapshotReader) ReadSnapshot(ctx context.Context, aggregateI
 
 type EventStreamSnapshotWriter struct {
 	eventWriter estoria.EventStreamWriter
-
-	log *slog.Logger
 }
 
 func NewEventStreamSnapshotWriter(eventWriter estoria.EventStreamWriter) *EventStreamSnapshotWriter {
 	return &EventStreamSnapshotWriter{
 		eventWriter: eventWriter,
-		log:         slog.Default().WithGroup("snapshotter"),
 	}
 }
 
