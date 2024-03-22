@@ -49,6 +49,11 @@ func (a *Aggregate[E]) Append(events ...EventData) error {
 	return nil
 }
 
+func (a *Aggregate[E]) SetEntity(entity E) {
+	a.unsavedEvents = nil
+	a.data = entity
+}
+
 // Apply applies the given events to the aggregate's state.
 func (a *Aggregate[E]) apply(ctx context.Context, evt *event) error {
 	slog.Debug("applying event to aggregate", "aggregate_id", a.ID(), "event_id", evt.ID())
