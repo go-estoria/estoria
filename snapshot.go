@@ -12,24 +12,6 @@ type Snapshot interface {
 	Data() []byte
 }
 
-type snapshot struct {
-	aggregateID      typeid.AnyID
-	aggregateVersion int64
-	data             []byte
-}
-
-func (s *snapshot) AggregateID() typeid.AnyID {
-	return s.aggregateID
-}
-
-func (s *snapshot) AggregateVersion() int64 {
-	return s.aggregateVersion
-}
-
-func (s *snapshot) Data() []byte {
-	return s.data
-}
-
 type EventCountSnapshotPolicy struct {
 	N int64
 }

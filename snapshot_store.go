@@ -15,7 +15,7 @@ type SnapshotReader interface {
 }
 
 type SnapshotWriter interface {
-	WriteSnapshot(ctx context.Context, snapshot Snapshot) error
+	WriteSnapshot(ctx context.Context, aggregateID typeid.AnyID, aggregateVersion int64, data []byte) error
 }
 
 type SnapshotPolicy interface {
@@ -77,13 +77,7 @@ func (s *SnapshotStore[E]) AggregateSaveHook() HookFunc[E] {
 			return fmt.Errorf("marshalling snapshot: %w", err)
 		}
 
-		snapshot := &snapshot{
-			aggregateID:      aggregate.ID(),
-			aggregateVersion: aggregate.Version(),
-			data:             data,
-		}
-
-		if err := s.writer.WriteSnapshot(ctx, snapshot); err != nil {
+		if err := s.writer.WriteSnapshot(ctx, aggregate.ID(), aggregate.Version(), data); err != nil {
 			return fmt.Errorf("writing snapshot: %w", err)
 		}
 
