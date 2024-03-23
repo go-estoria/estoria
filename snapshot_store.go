@@ -58,6 +58,12 @@ func (s *SnapshotStore[E]) AggregateLoadHook() HookFunc[E] {
 			return fmt.Errorf("unmarshalling snapshot: %w", err)
 		}
 
+		slog.Debug("loaded snapshot",
+			"aggregate_id", aggregate.ID(),
+			"version", snapshot.AggregateVersion(),
+			"entity", fmt.Sprintf("%+v", entity),
+		)
+
 		aggregate.SetEntity(entity)
 		aggregate.SetVersion(snapshot.AggregateVersion())
 

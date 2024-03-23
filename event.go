@@ -19,8 +19,7 @@ type event struct {
 	id        typeid.AnyID
 	streamID  typeid.AnyID
 	timestamp time.Time
-	data      EventData
-	raw       []byte
+	data      []byte
 }
 
 var _ Event = (*event)(nil)
@@ -42,7 +41,37 @@ func (e *event) Timestamp() time.Time {
 
 // Data returns the event's data.
 func (e *event) Data() []byte {
-	return e.raw
+	return e.data
+}
+
+// The internal representation of an unsaved event.
+type unsavedEvent struct {
+	id        typeid.AnyID
+	streamID  typeid.AnyID
+	timestamp time.Time
+	data      EventData
+}
+
+var _ Event = (*event)(nil)
+
+// EventID returns the ID of the event.
+func (e *unsavedEvent) ID() typeid.AnyID {
+	return e.id
+}
+
+// StreamID returns the ID of the aggregate that the event applies to.
+func (e *unsavedEvent) StreamID() typeid.AnyID {
+	return e.streamID
+}
+
+// Timestamp returns the time that the event occurred.
+func (e *unsavedEvent) Timestamp() time.Time {
+	return e.timestamp
+}
+
+// Data returns the event's data.
+func (e *unsavedEvent) Data() EventData {
+	return e.data
 }
 
 // EventData is the data of an event.

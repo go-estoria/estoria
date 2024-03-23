@@ -1,7 +1,6 @@
 package estoria
 
 import (
-	"context"
 	"fmt"
 	"log/slog"
 	"time"
@@ -12,19 +11,26 @@ import (
 // An Aggregate is a reconstructed representation of an event-sourced entity's state.
 type Aggregate[E Entity] struct {
 	id            typeid.AnyID
-	data          E
-	unsavedEvents []*event
+	entity        E
+	unsavedEvents []*unsavedEvent
 	version       int64
 }
 
+// ID returns the aggregate's ID.
+// The ID is the ID of the entity that the aggregate represents.
 func (a *Aggregate[E]) ID() typeid.AnyID {
-	return a.id
+	return a.entity.EntityID()
 }
 
+// Entity returns the aggregate's underlying entity.
+// The entity is the object that the aggregate represents.
 func (a *Aggregate[E]) Entity() E {
-	return a.data
+	return a.entity
 }
 
+// Version returns the aggregate's version.
+// The version is the number of events that have been applied to the aggregate.
+// An aggregate with no events has a version of 0.
 func (a *Aggregate[E]) Version() int64 {
 	return a.version
 }
@@ -38,7 +44,7 @@ func (a *Aggregate[E]) Append(events ...EventData) error {
 			return fmt.Errorf("generating event ID: %w", err)
 		}
 
-		a.unsavedEvents = append(a.unsavedEvents, &event{
+		a.unsavedEvents = append(a.unsavedEvents, &unsavedEvent{
 			id:        eventID,
 			streamID:  a.ID(),
 			timestamp: time.Now(),
@@ -51,21 +57,9 @@ func (a *Aggregate[E]) Append(events ...EventData) error {
 
 func (a *Aggregate[E]) SetEntity(entity E) {
 	a.unsavedEvents = nil
-	a.data = entity
+	a.entity = entity
 }
 
 func (a *Aggregate[E]) SetVersion(version int64) {
 	a.version = version
-}
-
-// Apply applies the given events to the aggregate's state.
-func (a *Aggregate[E]) apply(ctx context.Context, evt *event) error {
-	slog.Debug("applying eve`nt to aggregate", "aggregate_id", a.ID(), "event_id", evt.ID())
-	if err := a.data.ApplyEvent(ctx, evt.data); err != nil {
-		return fmt.Errorf("applying event: %w", err)
-	}
-
-	a.version++
-
-	return nil
 }
