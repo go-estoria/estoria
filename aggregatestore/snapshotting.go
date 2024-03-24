@@ -35,23 +35,19 @@ type SnapshottingAggregateStore[E estoria.Entity] struct {
 
 func NewSnapshottingAggregateStore[E estoria.Entity](
 	store *estoria.AggregateStore[E],
-	snapshotReader SnapshotReader,
-	snapshotWriter SnapshotWriter,
-	snapshotPolicy SnapshotPolicy,
+	reader SnapshotReader,
+	writer SnapshotWriter,
+	policy SnapshotPolicy,
 ) *SnapshottingAggregateStore[E] {
 	return &SnapshottingAggregateStore[E]{
 		store:  store,
-		reader: snapshotReader,
-		writer: snapshotWriter,
-		policy: snapshotPolicy,
+		reader: reader,
+		writer: writer,
+		policy: policy,
 
 		marshalEntitySnapshot:   func(entity E) ([]byte, error) { return json.Marshal(entity) },
 		unmarshalEntitySnapshot: func(data []byte, dest E) error { return json.Unmarshal(data, dest) },
 	}
-}
-
-func (s *SnapshottingAggregateStore[E]) NewAggregate() (*estoria.Aggregate[E], error) {
-	return s.store.NewAggregate()
 }
 
 // Load loads an aggregate by its ID.

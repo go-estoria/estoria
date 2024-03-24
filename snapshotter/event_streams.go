@@ -104,6 +104,8 @@ func (s *EventStreamSnapshotWriter) WriteSnapshot(ctx context.Context, aggregate
 		return fmt.Errorf("appending snapshot stream: %w", err)
 	}
 
+	slog.Debug("wrote snapshot", "aggregate_id", aggregateID, "snapshot_event_id", event.ID())
+
 	return nil
 }
 
