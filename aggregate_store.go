@@ -27,11 +27,24 @@ type AppendStreamOptions struct {
 	ExpectVersion int64
 }
 
+// ReadStreamOptions are options for reading an event stream.
 type ReadStreamOptions struct {
-	FromVersion int64
-	Count       int64
-	Direction   int
+	// Offset is the starting position in the stream (exclusive).
+	Offset int64
+
+	// Count is the number of events to read.
+	Count int64
+
+	// Direction is the direction to read the stream.
+	Direction ReadStreamDirection
 }
+
+type ReadStreamDirection int
+
+const (
+	Forward ReadStreamDirection = iota
+	Reverse
+)
 
 type HookType int
 
@@ -49,13 +62,11 @@ type AggregateStore[E Entity] struct {
 	EventReader EventStreamReader
 	EventWriter EventStreamWriter
 
-	newEntity          EntityFactory[E]
+	NewEntity          EntityFactory[E]
 	eventDataFactories map[string]func() EventData
 
-	deserializeEventData func([]byte, any) error
-	serializeEventData   func(any) ([]byte, error)
-
-	hooks map[HookType][]HookFunc[E]
+	unmarshalEventData func([]byte, EventData) error
+	marshalEventData   func(EventData) ([]byte, error)
 
 	log *slog.Logger
 }
@@ -66,22 +77,14 @@ func NewAggregateStore[E Entity](
 	entityFactory EntityFactory[E],
 ) *AggregateStore[E] {
 	return &AggregateStore[E]{
-		EventReader:          eventReader,
-		EventWriter:          eventWriter,
-		newEntity:            entityFactory,
-		eventDataFactories:   make(map[string]func() EventData),
-		deserializeEventData: json.Unmarshal,
-		serializeEventData:   json.Marshal,
-		log:                  slog.Default().WithGroup("aggregatestore"),
+		EventReader:        eventReader,
+		EventWriter:        eventWriter,
+		NewEntity:          entityFactory,
+		eventDataFactories: make(map[string]func() EventData),
+		unmarshalEventData: func(b []byte, d EventData) error { return json.Unmarshal(b, d) },
+		marshalEventData:   func(d EventData) ([]byte, error) { return json.Marshal(d) },
+		log:                slog.Default().WithGroup("aggregatestore"),
 	}
-}
-
-func (s *AggregateStore[E]) AddHook(hookType HookType, hook func(context.Context, *Aggregate[E]) error) {
-	if s.hooks == nil {
-		s.hooks = make(map[HookType][]HookFunc[E])
-	}
-
-	s.hooks[hookType] = append(s.hooks[hookType], hook)
 }
 
 // Allow allows an event type to be used with the aggregate store.
@@ -91,73 +94,89 @@ func (s *AggregateStore[E]) Allow(prototypes ...EventData) {
 	}
 }
 
-func (s *AggregateStore[E]) Create() *Aggregate[E] {
-	data := s.newEntity()
-	return &Aggregate[E]{
-		id:     data.EntityID(),
-		entity: data,
+func (s *AggregateStore[E]) NewAggregate() (*Aggregate[E], error) {
+	entity := s.NewEntity()
+	id, err := typeid.From(entity.EntityType(), "")
+	if err != nil {
+		return nil, fmt.Errorf("generating aggregate ID: %w", err)
 	}
+
+	return &Aggregate[E]{
+		id:     id,
+		entity: entity,
+	}, nil
 }
 
 // Load loads an aggregate by its ID.
 func (s *AggregateStore[E]) Load(ctx context.Context, id typeid.AnyID) (*Aggregate[E], error) {
 	s.log.Debug("loading aggregate", "aggregate_id", id)
 
-	aggregate := &Aggregate[E]{
-		id:     id,
-		entity: s.newEntity(),
+	aggregate, err := s.NewAggregate()
+	if err != nil {
+		return nil, fmt.Errorf("creating new aggregate: %w", err)
 	}
 
-	stream, err := s.EventReader.ReadStream(ctx, id, ReadStreamOptions{
-		FromVersion: aggregate.Version() + 1,
+	aggregate.SetID(id)
+
+	if err := s.Hydrate(ctx, aggregate); err != nil {
+		return nil, fmt.Errorf("hydrating aggregate from version %d: %w", aggregate.Version(), err)
+	}
+
+	return aggregate, nil
+}
+
+// Hydrate hydrates an aggregate.
+func (s *AggregateStore[E]) Hydrate(ctx context.Context, aggregate *Aggregate[E]) error {
+	s.log.Debug("hydrating aggregate from version", "aggregate_id", aggregate.ID(), "version", aggregate.Version())
+
+	if aggregate == nil {
+		return fmt.Errorf("aggregate is nil")
+	}
+
+	// Load the aggregate's events.
+	stream, err := s.EventReader.ReadStream(ctx, aggregate.ID(), ReadStreamOptions{
+		Offset: aggregate.Version(),
 	})
 	if errors.Is(err, ErrStreamNotFound) {
-		return nil, ErrAggregateNotFound
+		return ErrAggregateNotFound
 	} else if err != nil {
-		return nil, fmt.Errorf("reading event stream: %w", err)
+		return fmt.Errorf("reading event stream: %w", err)
 	}
 
+	// Apply the events to the aggregate.
 	for {
 		evt, err := stream.Next(ctx)
 		if err == io.EOF {
 			break
 		} else if err != nil {
-			return nil, fmt.Errorf("reading event: %w", err)
+			return fmt.Errorf("reading event: %w", err)
 		}
 
 		s.log.Debug("event data", "event_id", evt.ID(), "data", len(evt.Data()))
 
 		newEventData, ok := s.eventDataFactories[evt.ID().Prefix()]
 		if !ok {
-			return nil, fmt.Errorf("no event data factory for event type %s", evt.ID().Prefix())
+			return fmt.Errorf("no event data factory for event type %s", evt.ID().Prefix())
 		}
 
 		eventData := newEventData()
-		if err := s.deserializeEventData(evt.Data(), &eventData); err != nil {
-			return nil, fmt.Errorf("deserializing event data: %w", err)
+		if err := s.unmarshalEventData(evt.Data(), eventData); err != nil {
+			return fmt.Errorf("deserializing event data: %w", err)
 		}
 
 		if err := aggregate.entity.ApplyEvent(ctx, eventData); err != nil {
-			return nil, fmt.Errorf("applying event: %w", err)
+			return fmt.Errorf("applying event: %w", err)
 		}
 
 		aggregate.version++
 	}
 
-	return aggregate, nil
+	return nil
 }
 
 // Save saves an aggregate.
 func (s *AggregateStore[E]) Save(ctx context.Context, aggregate *Aggregate[E]) error {
 	s.log.Debug("saving aggregate", "aggregate_id", aggregate.ID(), "events", len(aggregate.unsavedEvents))
-
-	if hooks, ok := s.hooks[BeforeSaveAggregate]; ok {
-		for _, hook := range hooks {
-			if err := hook(ctx, aggregate); err != nil {
-				return fmt.Errorf("before-save aggregate hook: %w", err)
-			}
-		}
-	}
 
 	if len(aggregate.unsavedEvents) == 0 {
 		s.log.Debug("no events to save")
@@ -166,7 +185,7 @@ func (s *AggregateStore[E]) Save(ctx context.Context, aggregate *Aggregate[E]) e
 
 	toSave := make([]Event, len(aggregate.unsavedEvents))
 	for i, unsavedEvent := range aggregate.unsavedEvents {
-		data, err := s.serializeEventData(unsavedEvent.data)
+		data, err := s.marshalEventData(unsavedEvent.data)
 		if err != nil {
 			return fmt.Errorf("serializing event data: %w", err)
 		}
@@ -185,14 +204,6 @@ func (s *AggregateStore[E]) Save(ctx context.Context, aggregate *Aggregate[E]) e
 	}
 
 	aggregate.unsavedEvents = []*unsavedEvent{}
-
-	if hooks, ok := s.hooks[AfterSaveAggregate]; ok {
-		for _, hook := range hooks {
-			if err := hook(ctx, aggregate); err != nil {
-				return fmt.Errorf("after-save aggregate hook: %w", err)
-			}
-		}
-	}
 
 	return nil
 }

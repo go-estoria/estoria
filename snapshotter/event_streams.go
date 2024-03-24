@@ -32,9 +32,9 @@ func (s *EventStreamSnapshotReader) ReadSnapshot(ctx context.Context, aggregateI
 	}
 
 	stream, err := s.eventReader.ReadStream(ctx, snapshotStreamID, estoria.ReadStreamOptions{
-		FromVersion: 0,
-		Count:       1,
-		Direction:   -1,
+		Offset:    0,
+		Count:     1,
+		Direction: estoria.Reverse,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("finding snapshot stream: %w", err)

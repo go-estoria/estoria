@@ -19,7 +19,7 @@ type Aggregate[E Entity] struct {
 // ID returns the aggregate's ID.
 // The ID is the ID of the entity that the aggregate represents.
 func (a *Aggregate[E]) ID() typeid.AnyID {
-	return a.entity.EntityID()
+	return a.id
 }
 
 // Entity returns the aggregate's underlying entity.
@@ -53,6 +53,10 @@ func (a *Aggregate[E]) Append(events ...EventData) error {
 	}
 
 	return nil
+}
+
+func (a *Aggregate[E]) SetID(id typeid.AnyID) {
+	a.id = id
 }
 
 func (a *Aggregate[E]) SetEntity(entity E) {
