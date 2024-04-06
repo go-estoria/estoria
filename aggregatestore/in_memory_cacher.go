@@ -25,7 +25,7 @@ type cacheEntry[E estoria.Entity] struct {
 	lastUsed  time.Time
 }
 
-func NewInMemoryCacher[E estoria.Entity](opts ...InMemoryCacheOption) *InMemoryCache[E] {
+func NewInMemoryCache[E estoria.Entity](opts ...InMemoryCacheOption) *InMemoryCache[E] {
 	return &InMemoryCache[E]{
 		evictionPolicy: CacheEvictionPolicy{},
 	}

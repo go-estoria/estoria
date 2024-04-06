@@ -50,8 +50,18 @@ func NewSnapshottingAggregateStore[E estoria.Entity](
 	}
 }
 
+// Allow allows an event type to be used with the aggregate store.
+func (s *SnapshottingAggregateStore[E]) Allow(prototypes ...estoria.EventData) {
+	s.store.Allow(prototypes...)
+}
+
+// NewAggregate creates a new aggregate.
+func (s *SnapshottingAggregateStore[E]) NewAggregate() (*estoria.Aggregate[E], error) {
+	return s.store.NewAggregate()
+}
+
 // Load loads an aggregate by its ID.
-func (s *SnapshottingAggregateStore[E]) Hydrate(ctx context.Context, aggregate *estoria.Aggregate[E]) error {
+func (s *SnapshottingAggregateStore[E]) Load(ctx context.Context, aggregate *estoria.Aggregate[E]) error {
 	snapshot, err := s.reader.ReadSnapshot(ctx, aggregate.ID())
 	if err != nil {
 		slog.Warn("failed to read snapshot", "error", err)
@@ -75,6 +85,11 @@ func (s *SnapshottingAggregateStore[E]) Hydrate(ctx context.Context, aggregate *
 	aggregate.SetEntity(entity)
 	aggregate.SetVersion(snapshot.AggregateVersion())
 
+	return s.store.Hydrate(ctx, aggregate)
+}
+
+// Hydrate hydrates an aggregate.
+func (s *SnapshottingAggregateStore[E]) Hydrate(ctx context.Context, aggregate *estoria.Aggregate[E]) error {
 	return s.store.Hydrate(ctx, aggregate)
 }
 

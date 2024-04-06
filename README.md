@@ -2,7 +2,7 @@
 
 ## Motivations
 
-- Provide adequate abstractions at every layer to allow for hyper customization and extensibility
+- Provide adequate abstractions at every layer to allow for customization and extensibility
 - Assume nothing about storage backends
 - Provide sensible defaults and factories for common implementations
 - Ability for individual entities to be event-sourced, rather than the entire app's data
@@ -10,11 +10,7 @@
 
 ## Feature Brainstorming
 
-- Diffing of entities to auto-generate events?!?
-- Middleware
-  - Event appending
-  - Event application (upgrading events, etc)
-  - Tracing: OTEL, etc
+- Diffing of entities to auto-generate events
 - CQRS components?
 - Outbox functionality
 - Event bus(es)
