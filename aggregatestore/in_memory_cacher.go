@@ -16,7 +16,7 @@ type InMemoryCacher[E estoria.Entity] struct {
 	mu             sync.RWMutex
 }
 
-var _ Cacher[estoria.Entity] = &InMemoryCacher[estoria.Entity]{}
+var _ AggregateCache[estoria.Entity] = &InMemoryCacher[estoria.Entity]{}
 
 type cacheEntry[E estoria.Entity] struct {
 	aggregate *estoria.Aggregate[E]
