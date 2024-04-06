@@ -127,6 +127,35 @@ func (s *snapshot) Data() []byte {
 	return s.data
 }
 
+func (s *snapshot) MarshalJSON() ([]byte, error) {
+	return json.Marshal(map[string]interface{}{
+		"aggregate_id":      s.aggregateID,
+		"aggregate_version": s.aggregateVersion,
+		"data":              s.data,
+	})
+}
+
+func (s *snapshot) UnmarshalJSON(data []byte) error {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return fmt.Errorf("unmarshalling snapshot fields: %w", err)
+	}
+
+	if err := json.Unmarshal(fields["aggregate_id"], &s.aggregateID); err != nil {
+		return fmt.Errorf("unmarshalling aggregate ID: %w", err)
+	}
+
+	if err := json.Unmarshal(fields["aggregate_version"], &s.aggregateVersion); err != nil {
+		return fmt.Errorf("unmarshalling aggregate version: %w", err)
+	}
+
+	if err := json.Unmarshal(fields["data"], &s.data); err != nil {
+		return fmt.Errorf("unmarshalling data: %w", err)
+	}
+
+	return nil
+}
+
 type snapshotEvent struct {
 	EventID        typeid.AnyID
 	EventStreamID  typeid.AnyID
