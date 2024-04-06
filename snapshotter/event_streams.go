@@ -42,7 +42,7 @@ func (s *EventStreamSnapshotReader) ReadSnapshot(ctx context.Context, aggregateI
 
 	event, err := stream.Next(ctx)
 	if err == io.EOF {
-		return nil, errors.New("snapshot not found")
+		return nil, nil
 	} else if err != nil {
 		return nil, fmt.Errorf("reading snapshot event: %w", err)
 	} else if event == nil {
