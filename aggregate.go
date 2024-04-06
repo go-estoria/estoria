@@ -16,6 +16,16 @@ type Aggregate[E Entity] struct {
 	version       int64
 }
 
+// NewAggregate returns a new aggregate with the given ID and entity.
+func NewAggregate[E Entity](id typeid.AnyID, entity E) *Aggregate[E] {
+	return &Aggregate[E]{
+		id:            id,
+		entity:        entity,
+		version:       0,
+		unsavedEvents: nil,
+	}
+}
+
 // ID returns the aggregate's ID.
 // The ID is the ID of the entity that the aggregate represents.
 func (a *Aggregate[E]) ID() typeid.AnyID {

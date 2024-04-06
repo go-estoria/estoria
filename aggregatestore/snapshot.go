@@ -24,7 +24,7 @@ type SnapshotPolicy interface {
 }
 
 type SnapshottingAggregateStore[E estoria.Entity] struct {
-	store  *estoria.AggregateStore[E]
+	store  AggregateStore[E]
 	reader SnapshotReader
 	writer SnapshotWriter
 	policy SnapshotPolicy
@@ -34,13 +34,13 @@ type SnapshottingAggregateStore[E estoria.Entity] struct {
 }
 
 func NewSnapshottingAggregateStore[E estoria.Entity](
-	store *estoria.AggregateStore[E],
+	inner AggregateStore[E],
 	reader SnapshotReader,
 	writer SnapshotWriter,
 	policy SnapshotPolicy,
 ) *SnapshottingAggregateStore[E] {
 	return &SnapshottingAggregateStore[E]{
-		store:  store,
+		store:  inner,
 		reader: reader,
 		writer: writer,
 		policy: policy,
