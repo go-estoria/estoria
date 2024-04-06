@@ -33,6 +33,8 @@ type SnapshottingAggregateStore[E estoria.Entity] struct {
 	unmarshalEntitySnapshot func(data []byte, dest E) error
 }
 
+var _ AggregateStore[estoria.Entity] = (*SnapshottingAggregateStore[estoria.Entity])(nil)
+
 func NewSnapshottingAggregateStore[E estoria.Entity](
 	inner AggregateStore[E],
 	reader SnapshotReader,
@@ -61,19 +63,26 @@ func (s *SnapshottingAggregateStore[E]) NewAggregate() (*estoria.Aggregate[E], e
 }
 
 // Load loads an aggregate by its ID.
-func (s *SnapshottingAggregateStore[E]) Load(ctx context.Context, aggregate *estoria.Aggregate[E]) error {
-	snapshot, err := s.reader.ReadSnapshot(ctx, aggregate.ID())
+func (s *SnapshottingAggregateStore[E]) Load(ctx context.Context, aggregateID typeid.AnyID) (*estoria.Aggregate[E], error) {
+	snapshot, err := s.reader.ReadSnapshot(ctx, aggregateID)
 	if err != nil {
 		slog.Warn("failed to read snapshot", "error", err)
-		return s.store.Hydrate(ctx, aggregate)
+		return s.store.Load(ctx, aggregateID)
 	} else if snapshot == nil {
 		slog.Debug("no snapshot found")
-		return s.store.Hydrate(ctx, aggregate)
+		return s.store.Load(ctx, aggregateID)
+	}
+
+	aggregate, err := s.NewAggregate()
+	if err != nil {
+		slog.Warn("failed to create new aggregate", "error", err)
+		return s.store.Load(ctx, aggregateID)
 	}
 
 	entity := aggregate.Entity()
 	if err := s.unmarshalEntitySnapshot(snapshot.Data(), entity); err != nil {
-		return fmt.Errorf("unmarshalling snapshot: %w", err)
+		slog.Warn("failed to unmarshal snapshot", "error", err)
+		return s.store.Load(ctx, aggregateID)
 	}
 
 	slog.Debug("loaded snapshot",
@@ -85,7 +94,12 @@ func (s *SnapshottingAggregateStore[E]) Load(ctx context.Context, aggregate *est
 	aggregate.SetEntity(entity)
 	aggregate.SetVersion(snapshot.AggregateVersion())
 
-	return s.store.Hydrate(ctx, aggregate)
+	if err := s.store.Hydrate(ctx, aggregate); err != nil {
+		slog.Warn("failed to hydrate aggregate", "error", err)
+		return s.store.Load(ctx, aggregateID)
+	}
+
+	return aggregate, nil
 }
 
 // Hydrate hydrates an aggregate.
