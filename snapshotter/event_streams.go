@@ -141,9 +141,17 @@ func (s *snapshot) UnmarshalJSON(data []byte) error {
 		return fmt.Errorf("unmarshalling snapshot fields: %w", err)
 	}
 
-	if err := json.Unmarshal(fields["aggregate_id"], &s.aggregateID); err != nil {
+	aggregateIDStr := ""
+	if err := json.Unmarshal(fields["aggregate_id"], &aggregateIDStr); err != nil {
 		return fmt.Errorf("unmarshalling aggregate ID: %w", err)
 	}
+
+	aggregateID, err := typeid.FromString(aggregateIDStr)
+	if err != nil {
+		return fmt.Errorf("parsing aggregate ID: %w", err)
+	}
+
+	s.aggregateID = aggregateID
 
 	if err := json.Unmarshal(fields["aggregate_version"], &s.aggregateVersion); err != nil {
 		return fmt.Errorf("unmarshalling aggregate version: %w", err)
