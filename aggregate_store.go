@@ -127,7 +127,8 @@ func (s *AggregateStore[E]) Load(ctx context.Context, id typeid.AnyID) (*Aggrega
 
 // Hydrate hydrates an aggregate.
 func (s *AggregateStore[E]) Hydrate(ctx context.Context, aggregate *Aggregate[E]) error {
-	s.log.Debug("hydrating aggregate from version", "aggregate_id", aggregate.ID(), "version", aggregate.Version())
+	log := s.log.With("aggregate_id", aggregate.ID(), "version", aggregate.Version())
+	log.Debug("hydrating aggregate")
 
 	if aggregate == nil {
 		return fmt.Errorf("aggregate is nil")
@@ -145,16 +146,13 @@ func (s *AggregateStore[E]) Hydrate(ctx context.Context, aggregate *Aggregate[E]
 
 	// Apply the events to the aggregate.
 	for {
-		s.log.Debug("reading next event")
 		evt, err := stream.Next(ctx)
 		if err == io.EOF {
-			s.log.Debug("end of stream")
+			log.Debug("end of event stream")
 			break
 		} else if err != nil {
 			return fmt.Errorf("reading event: %w", err)
 		}
-
-		s.log.Debug("event data", "event_id", evt.ID(), "data", len(evt.Data()))
 
 		newEventData, ok := s.eventDataFactories[evt.ID().Prefix()]
 		if !ok {
