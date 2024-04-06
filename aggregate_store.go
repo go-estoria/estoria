@@ -145,8 +145,10 @@ func (s *AggregateStore[E]) Hydrate(ctx context.Context, aggregate *Aggregate[E]
 
 	// Apply the events to the aggregate.
 	for {
+		s.log.Debug("reading next event")
 		evt, err := stream.Next(ctx)
 		if err == io.EOF {
+			s.log.Debug("end of stream")
 			break
 		} else if err != nil {
 			return fmt.Errorf("reading event: %w", err)
