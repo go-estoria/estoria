@@ -49,6 +49,16 @@ func NewCachedAggregateStore[E estoria.Entity](
 	}
 }
 
+// Allow allows an event type to be used with the aggregate store.
+func (s *CachedAggregateStore[E]) Allow(prototypes ...estoria.EventData) {
+	s.store.Allow(prototypes...)
+}
+
+// NewAggregate creates a new aggregate.
+func (s *CachedAggregateStore[E]) NewAggregate() (*estoria.Aggregate[E], error) {
+	return s.store.NewAggregate()
+}
+
 func (s *CachedAggregateStore[E]) Load(ctx context.Context, id typeid.AnyID) (*estoria.Aggregate[E], error) {
 	aggregate, err := s.cache.GetAggregate(ctx, id)
 	if err != nil {
@@ -60,6 +70,11 @@ func (s *CachedAggregateStore[E]) Load(ctx context.Context, id typeid.AnyID) (*e
 	}
 
 	return aggregate, nil
+}
+
+// Hydrate hydrates an aggregate.
+func (s *CachedAggregateStore[E]) Hydrate(ctx context.Context, aggregate *estoria.Aggregate[E]) error {
+	return s.store.Hydrate(ctx, aggregate)
 }
 
 // Save saves an aggregate.
