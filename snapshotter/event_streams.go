@@ -83,9 +83,9 @@ func (s *EventStreamSnapshotWriter) WriteSnapshot(ctx context.Context, aggregate
 	}
 
 	snap := snapshot{
-		aggregateID:      aggregateID,
-		aggregateVersion: aggregateVersion,
-		data:             data,
+		SSAggregateID:      aggregateID,
+		SSAggregateVersion: aggregateVersion,
+		EntityData:         data,
 	}
 
 	snapshotData, err := json.Marshal(snap)
@@ -110,21 +110,21 @@ func (s *EventStreamSnapshotWriter) WriteSnapshot(ctx context.Context, aggregate
 }
 
 type snapshot struct {
-	aggregateID      typeid.AnyID
-	aggregateVersion int64
-	data             json.RawMessage
+	SSAggregateID      typeid.AnyID
+	SSAggregateVersion int64
+	EntityData         json.RawMessage
 }
 
 func (s *snapshot) AggregateID() typeid.AnyID {
-	return s.aggregateID
+	return s.SSAggregateID
 }
 
 func (s *snapshot) AggregateVersion() int64 {
-	return s.aggregateVersion
+	return s.SSAggregateVersion
 }
 
 func (s *snapshot) Data() []byte {
-	return s.data
+	return s.EntityData
 }
 
 type snapshotEvent struct {
