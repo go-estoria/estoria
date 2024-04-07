@@ -49,7 +49,7 @@ func (s *EventStreamSnapshotReader) ReadSnapshot(ctx context.Context, aggregateI
 		return nil, errors.New("snapshot not found")
 	}
 
-	slog.Debug("snapshot found", "aggregate_id", aggregateID, "snapshot_event_id", event.ID())
+	slog.Debug("snapshot found", "aggregate_id", aggregateID, "snapshot_event_id", event.ID(), "event_data_length", len(event.Data()))
 
 	var snapshot snapshot
 	if err := json.Unmarshal(event.Data(), &snapshot); err != nil {
