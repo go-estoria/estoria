@@ -78,8 +78,8 @@ func (s *CachedAggregateStore[E]) Hydrate(ctx context.Context, aggregate *estori
 }
 
 // Save saves an aggregate.
-func (s *CachedAggregateStore[E]) Save(ctx context.Context, aggregate *estoria.Aggregate[E]) error {
-	if err := s.store.Save(ctx, aggregate); err != nil {
+func (s *CachedAggregateStore[E]) Save(ctx context.Context, aggregate *estoria.Aggregate[E], opts estoria.SaveAggregateOptions) error {
+	if err := s.store.Save(ctx, aggregate, opts); err != nil {
 		return err
 	}
 

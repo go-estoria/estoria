@@ -175,7 +175,7 @@ func (s *AggregateStore[E]) Hydrate(ctx context.Context, aggregate *Aggregate[E]
 }
 
 // Save saves an aggregate.
-func (s *AggregateStore[E]) Save(ctx context.Context, aggregate *Aggregate[E]) error {
+func (s *AggregateStore[E]) Save(ctx context.Context, aggregate *Aggregate[E], opts SaveAggregateOptions) error {
 	s.log.Debug("saving aggregate", "aggregate_id", aggregate.ID(), "events", len(aggregate.unsavedEvents))
 
 	if len(aggregate.unsavedEvents) == 0 {
@@ -203,9 +203,26 @@ func (s *AggregateStore[E]) Save(ctx context.Context, aggregate *Aggregate[E]) e
 		return fmt.Errorf("saving events: %w", err)
 	}
 
-	aggregate.unsavedEvents = []*unsavedEvent{}
+	for _, unsavedEvent := range aggregate.unsavedEvents {
+		aggregate.QueueEventForApplication(unsavedEvent.data)
+	}
+
+	aggregate.unsavedEvents = nil
+
+	if !opts.SkipApply {
+		if err := aggregate.applyUnappliedEvents(ctx); err != nil {
+			return fmt.Errorf("applying unapplied events: %w", err)
+		}
+	}
 
 	return nil
+}
+
+type SaveAggregateOptions struct {
+	// SkipApply skips applying the events to the entity.
+	// This is useful in situations where it is desireable to delay the application of events,
+	// such as when wrapping the aggregate store with additional functionality.
+	SkipApply bool
 }
 
 var ErrStreamNotFound = errors.New("stream not found")

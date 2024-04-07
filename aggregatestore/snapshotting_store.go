@@ -3,6 +3,7 @@ package aggregatestore
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"time"
@@ -87,6 +88,8 @@ func (s *SnapshottingAggregateStore[E]) Load(ctx context.Context, aggregateID ty
 		return s.inner.Load(ctx, aggregateID)
 	}
 
+	aggregate.SetID(aggregateID)
+
 	entity := aggregate.Entity()
 	if err := s.serde.UnmarshalEntitySnapshot(snapshot.EntityData(), &entity); err != nil {
 		slog.Warn("failed to unmarshal snapshot", "error", err)
@@ -116,22 +119,40 @@ func (s *SnapshottingAggregateStore[E]) Hydrate(ctx context.Context, aggregate *
 }
 
 // Save saves an aggregate.
-func (s *SnapshottingAggregateStore[E]) Save(ctx context.Context, aggregate *estoria.Aggregate[E]) error {
-	if err := s.inner.Save(ctx, aggregate); err != nil {
+func (s *SnapshottingAggregateStore[E]) Save(ctx context.Context, aggregate *estoria.Aggregate[E], opts estoria.SaveAggregateOptions) error {
+
+	// defer applying events so a snapshot can be taken at an exact version if needed
+	opts.SkipApply = true
+
+	if err := s.inner.Save(ctx, aggregate, opts); err != nil {
 		return fmt.Errorf("saving aggregate: %w", err)
 	}
 
-	if !s.policy.ShouldSnapshot(aggregate.ID(), aggregate.Version(), time.Now()) {
-		return nil
-	}
+	slog.Debug("saved aggregate", "aggregate_id", aggregate.ID(), "version", aggregate.Version())
 
-	data, err := s.serde.MarshalEntitySnapshot(aggregate.Entity())
-	if err != nil {
-		return fmt.Errorf("marshalling snapshot: %w", err)
-	}
+	now := time.Now()
+	for {
+		err := aggregate.ApplyNext(ctx)
+		if errors.Is(err, estoria.ErrNoUnappliedEvents) {
+			break
+		} else if err != nil {
+			return fmt.Errorf("applying next event: %w", err)
+		}
 
-	if err := s.writer.WriteSnapshot(ctx, aggregate.ID(), aggregate.Version(), data); err != nil {
-		return fmt.Errorf("writing snapshot: %w", err)
+		if s.policy.ShouldSnapshot(aggregate.ID(), aggregate.Version(), now) {
+			data, err := s.serde.MarshalEntitySnapshot(aggregate.Entity())
+			if err != nil {
+				slog.Error("failed to marshal snapshot", "error", err)
+				continue
+			}
+
+			if err := s.writer.WriteSnapshot(ctx, aggregate.ID(), aggregate.Version(), data); err != nil {
+				slog.Error("failed to write snapshot", "error", err)
+				continue
+			}
+		}
+
+		slog.Debug("applied event", "aggregate_id", aggregate.ID(), "version", aggregate.Version())
 	}
 
 	return nil
