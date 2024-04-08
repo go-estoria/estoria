@@ -132,7 +132,7 @@ func (s *AggregateStore[E]) Load(ctx context.Context, id typeid.AnyID, opts Load
 // Hydrate hydrates an aggregate.
 func (s *AggregateStore[E]) Hydrate(ctx context.Context, aggregate *Aggregate[E], opts HydrateAggregateOptions) error {
 	log := s.log.With("aggregate_id", aggregate.ID())
-	log.Debug("hydrating aggregate", "from_version", aggregate.Version(), "to_version", opts.ToVersion)
+	log.Debug("hydrating aggregate from event store", "from_version", aggregate.Version(), "to_version", opts.ToVersion)
 
 	if aggregate == nil {
 		return fmt.Errorf("aggregate is nil")
