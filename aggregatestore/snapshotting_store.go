@@ -9,11 +9,12 @@ import (
 	"time"
 
 	"github.com/go-estoria/estoria"
+	"github.com/go-estoria/estoria/snapshotter"
 	"go.jetpack.io/typeid"
 )
 
 type SnapshotReader interface {
-	ReadSnapshot(ctx context.Context, aggregateID typeid.AnyID) (estoria.Snapshot, error)
+	ReadSnapshot(ctx context.Context, aggregateID typeid.AnyID, opts snapshotter.ReadSnapshotOptions) (estoria.Snapshot, error)
 }
 
 type SnapshotWriter interface {
@@ -72,20 +73,23 @@ func (s *SnapshottingAggregateStore[E]) NewAggregate() (*estoria.Aggregate[E], e
 }
 
 // Load loads an aggregate by its ID.
-func (s *SnapshottingAggregateStore[E]) Load(ctx context.Context, aggregateID typeid.AnyID) (*estoria.Aggregate[E], error) {
-	snapshot, err := s.reader.ReadSnapshot(ctx, aggregateID)
+func (s *SnapshottingAggregateStore[E]) Load(ctx context.Context, aggregateID typeid.AnyID, opts estoria.LoadAggregateOptions) (*estoria.Aggregate[E], error) {
+	readOpts := snapshotter.ReadSnapshotOptions{
+		MaxVersion: opts.ToVersion,
+	}
+	snapshot, err := s.reader.ReadSnapshot(ctx, aggregateID, readOpts)
 	if err != nil {
 		slog.Warn("failed to read snapshot", "error", err)
-		return s.inner.Load(ctx, aggregateID)
+		return s.inner.Load(ctx, aggregateID, opts)
 	} else if snapshot == nil {
 		slog.Debug("no snapshot found")
-		return s.inner.Load(ctx, aggregateID)
+		return s.inner.Load(ctx, aggregateID, opts)
 	}
 
 	aggregate, err := s.NewAggregate()
 	if err != nil {
 		slog.Warn("failed to create new aggregate", "error", err)
-		return s.inner.Load(ctx, aggregateID)
+		return s.inner.Load(ctx, aggregateID, opts)
 	}
 
 	aggregate.SetID(aggregateID)
@@ -93,7 +97,7 @@ func (s *SnapshottingAggregateStore[E]) Load(ctx context.Context, aggregateID ty
 	entity := aggregate.Entity()
 	if err := s.serde.UnmarshalEntitySnapshot(snapshot.EntityData(), &entity); err != nil {
 		slog.Warn("failed to unmarshal snapshot", "error", err)
-		return s.inner.Load(ctx, aggregateID)
+		return s.inner.Load(ctx, aggregateID, opts)
 	}
 
 	slog.Debug("loaded snapshot",
@@ -105,23 +109,27 @@ func (s *SnapshottingAggregateStore[E]) Load(ctx context.Context, aggregateID ty
 	aggregate.SetEntity(entity)
 	aggregate.SetVersion(snapshot.AggregateVersion())
 
-	if err := s.inner.Hydrate(ctx, aggregate); err != nil {
+	hydrateOpts := estoria.HydrateAggregateOptions{
+		ToVersion: opts.ToVersion,
+	}
+
+	if err := s.Hydrate(ctx, aggregate, hydrateOpts); err != nil {
 		slog.Warn("failed to hydrate aggregate", "error", err)
-		return s.inner.Load(ctx, aggregateID)
+		return s.inner.Load(ctx, aggregateID, opts)
 	}
 
 	return aggregate, nil
 }
 
 // Hydrate hydrates an aggregate.
-func (s *SnapshottingAggregateStore[E]) Hydrate(ctx context.Context, aggregate *estoria.Aggregate[E]) error {
-	return s.inner.Hydrate(ctx, aggregate)
+func (s *SnapshottingAggregateStore[E]) Hydrate(ctx context.Context, aggregate *estoria.Aggregate[E], opts estoria.HydrateAggregateOptions) error {
+	return s.inner.Hydrate(ctx, aggregate, opts)
 }
 
 // Save saves an aggregate.
 func (s *SnapshottingAggregateStore[E]) Save(ctx context.Context, aggregate *estoria.Aggregate[E], opts estoria.SaveAggregateOptions) error {
 
-	// defer applying events so a snapshot can be taken at an exact version if needed
+	// defer applying events so a snapshot can be taken at an exact version
 	opts.SkipApply = true
 
 	if err := s.inner.Save(ctx, aggregate, opts); err != nil {

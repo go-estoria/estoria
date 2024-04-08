@@ -59,22 +59,22 @@ func (s *CachedAggregateStore[E]) NewAggregate() (*estoria.Aggregate[E], error) 
 	return s.store.NewAggregate()
 }
 
-func (s *CachedAggregateStore[E]) Load(ctx context.Context, id typeid.AnyID) (*estoria.Aggregate[E], error) {
+func (s *CachedAggregateStore[E]) Load(ctx context.Context, id typeid.AnyID, opts estoria.LoadAggregateOptions) (*estoria.Aggregate[E], error) {
 	aggregate, err := s.cache.GetAggregate(ctx, id)
 	if err != nil {
 		slog.Warn("failed to read cache", "error", err)
-		return s.store.Load(ctx, id)
+		return s.store.Load(ctx, id, opts)
 	} else if aggregate == nil {
 		slog.Debug("aggregate not in cache", "aggregate_id", id)
-		return s.store.Load(ctx, id)
+		return s.store.Load(ctx, id, opts)
 	}
 
 	return aggregate, nil
 }
 
 // Hydrate hydrates an aggregate.
-func (s *CachedAggregateStore[E]) Hydrate(ctx context.Context, aggregate *estoria.Aggregate[E]) error {
-	return s.store.Hydrate(ctx, aggregate)
+func (s *CachedAggregateStore[E]) Hydrate(ctx context.Context, aggregate *estoria.Aggregate[E], opts estoria.HydrateAggregateOptions) error {
+	return s.store.Hydrate(ctx, aggregate, opts)
 }
 
 // Save saves an aggregate.

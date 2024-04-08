@@ -23,7 +23,7 @@ func NewEventStreamSnapshotReader(eventReader estoria.EventStreamReader) *EventS
 	}
 }
 
-func (s *EventStreamSnapshotReader) ReadSnapshot(ctx context.Context, aggregateID typeid.AnyID) (estoria.Snapshot, error) {
+func (s *EventStreamSnapshotReader) ReadSnapshot(ctx context.Context, aggregateID typeid.AnyID, opts ReadSnapshotOptions) (estoria.Snapshot, error) {
 	slog.Debug("reading snapshot", "aggregate_id", aggregateID)
 
 	snapshotStreamID, err := typeid.From(aggregateID.Prefix()+"snapshots", aggregateID.Suffix())
@@ -57,6 +57,10 @@ func (s *EventStreamSnapshotReader) ReadSnapshot(ctx context.Context, aggregateI
 	}
 
 	return &snapshot, nil
+}
+
+type ReadSnapshotOptions struct {
+	MaxVersion int64
 }
 
 type EventStreamSnapshotWriter struct {

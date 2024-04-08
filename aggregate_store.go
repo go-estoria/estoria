@@ -108,7 +108,7 @@ func (s *AggregateStore[E]) NewAggregate() (*Aggregate[E], error) {
 }
 
 // Load loads an aggregate by its ID.
-func (s *AggregateStore[E]) Load(ctx context.Context, id typeid.AnyID) (*Aggregate[E], error) {
+func (s *AggregateStore[E]) Load(ctx context.Context, id typeid.AnyID, opts LoadAggregateOptions) (*Aggregate[E], error) {
 	s.log.Debug("loading aggregate", "aggregate_id", id)
 
 	aggregate, err := s.NewAggregate()
@@ -118,7 +118,11 @@ func (s *AggregateStore[E]) Load(ctx context.Context, id typeid.AnyID) (*Aggrega
 
 	aggregate.SetID(id)
 
-	if err := s.Hydrate(ctx, aggregate); err != nil {
+	hydrateOpts := HydrateAggregateOptions{
+		ToVersion: opts.ToVersion,
+	}
+
+	if err := s.Hydrate(ctx, aggregate, hydrateOpts); err != nil {
 		return nil, fmt.Errorf("hydrating aggregate from version %d: %w", aggregate.Version(), err)
 	}
 
@@ -126,17 +130,26 @@ func (s *AggregateStore[E]) Load(ctx context.Context, id typeid.AnyID) (*Aggrega
 }
 
 // Hydrate hydrates an aggregate.
-func (s *AggregateStore[E]) Hydrate(ctx context.Context, aggregate *Aggregate[E]) error {
+func (s *AggregateStore[E]) Hydrate(ctx context.Context, aggregate *Aggregate[E], opts HydrateAggregateOptions) error {
 	log := s.log.With("aggregate_id", aggregate.ID())
-	log.Debug("hydrating aggregate", "from_version", aggregate.Version())
+	log.Debug("hydrating aggregate", "from_version", aggregate.Version(), "to_version", opts.ToVersion)
 
 	if aggregate == nil {
 		return fmt.Errorf("aggregate is nil")
+	} else if opts.ToVersion > 0 {
+		if aggregate.Version() == opts.ToVersion {
+			log.Debug("aggregate already at target version, nothing to hydrate", "version", opts.ToVersion)
+			return nil
+		} else if aggregate.Version() > opts.ToVersion {
+			return fmt.Errorf("cannot hydrate aggregate with greater version than target version")
+		}
 	}
 
 	// Load the aggregate's events.
 	stream, err := s.EventReader.ReadStream(ctx, aggregate.ID(), ReadStreamOptions{
-		Offset: aggregate.Version(),
+		Offset:    aggregate.Version(),
+		Count:     opts.ToVersion - aggregate.Version(),
+		Direction: Forward,
 	})
 	if errors.Is(err, ErrStreamNotFound) {
 		return ErrAggregateNotFound
@@ -216,6 +229,18 @@ func (s *AggregateStore[E]) Save(ctx context.Context, aggregate *Aggregate[E], o
 	}
 
 	return nil
+}
+
+type LoadAggregateOptions struct {
+	// ToVersion is the version to load the aggregate to.
+	// Default: 0 (load to the latest version)
+	ToVersion int64
+}
+
+type HydrateAggregateOptions struct {
+	// ToVersion is the version to hydrate the aggregate to.
+	// Default: 0 (hydrate to the latest version)
+	ToVersion int64
 }
 
 type SaveAggregateOptions struct {
