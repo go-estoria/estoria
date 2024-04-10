@@ -3,7 +3,6 @@ package memory
 import (
 	"context"
 	"fmt"
-	"log/slog"
 	"slices"
 	"sync"
 
@@ -30,7 +29,6 @@ func (s *EventStore) AppendStream(ctx context.Context, streamID typeid.AnyID, op
 			return ErrEventExists{EventID: event.ID()}
 		}
 
-		slog.Default().WithGroup("eventwriter").Debug("appending event", "event_id", event.ID())
 		tx = append(tx, event)
 	}
 
