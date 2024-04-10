@@ -131,8 +131,6 @@ func (s *SnapshottingAggregateStore[E]) Save(ctx context.Context, aggregate *est
 		return fmt.Errorf("saving aggregate: %w", err)
 	}
 
-	slog.Debug("saved aggregate", "aggregate_id", aggregate.ID(), "version", aggregate.Version())
-
 	now := time.Now()
 	for {
 		err := aggregate.ApplyNext(ctx)

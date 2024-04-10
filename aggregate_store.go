@@ -109,7 +109,7 @@ func (s *AggregateStore[E]) NewAggregate() (*Aggregate[E], error) {
 
 // Load loads an aggregate by its ID.
 func (s *AggregateStore[E]) Load(ctx context.Context, id typeid.AnyID, opts LoadAggregateOptions) (*Aggregate[E], error) {
-	s.log.Debug("loading aggregate", "aggregate_id", id)
+	s.log.Debug("loading aggregate from event store", "aggregate_id", id)
 
 	aggregate, err := s.NewAggregate()
 	if err != nil {
@@ -189,7 +189,7 @@ func (s *AggregateStore[E]) Hydrate(ctx context.Context, aggregate *Aggregate[E]
 
 // Save saves an aggregate.
 func (s *AggregateStore[E]) Save(ctx context.Context, aggregate *Aggregate[E], opts SaveAggregateOptions) error {
-	s.log.Debug("saving aggregate", "aggregate_id", aggregate.ID(), "events", len(aggregate.unsavedEvents))
+	s.log.Debug("saving aggregate to event store", "aggregate_id", aggregate.ID(), "events", len(aggregate.unsavedEvents))
 
 	if len(aggregate.unsavedEvents) == 0 {
 		s.log.Debug("no events to save")
