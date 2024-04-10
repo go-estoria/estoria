@@ -7,8 +7,29 @@ import (
 	"time"
 
 	"github.com/go-estoria/estoria"
+	"github.com/go-estoria/estoria/aggregatestore"
 	"go.jetpack.io/typeid"
 )
+
+type CacheEvictionPolicy struct {
+	// EvictionInterval is the interval at which the cache is checked for items to evict.
+	// The default is 0, which means no periodic evictions will occur.
+	EvictionInterval time.Duration
+
+	// MaxAge is the maximum age of an item in the cache before it is evicted.
+	// A non-zero EvictionInterval is required for this to take effect.
+	// The default is 0, which means no periodic evictions based on age will occur.
+	MaxAge time.Duration
+
+	// MaxIdle is the maximum time an item can be idle in the cache before it is evicted.
+	// A non-zero EvictionInterval is required for this to take effect.
+	// The default is 0, which means no periodic evictions based on idle time will occur.
+	MaxIdle time.Duration
+
+	// MaxSize is the maximum number of items in the cache before it starts evicting.
+	// The default is 0, which means the cache can grow unbounded.
+	MaxSize int
+}
 
 type InMemoryCache[E estoria.Entity] struct {
 	cancel         context.CancelFunc
@@ -17,7 +38,7 @@ type InMemoryCache[E estoria.Entity] struct {
 	mu             sync.RWMutex
 }
 
-var _ AggregateCache[estoria.Entity] = &InMemoryCache[estoria.Entity]{}
+var _ aggregatestore.AggregateCache[estoria.Entity] = &InMemoryCache[estoria.Entity]{}
 
 type cacheEntry[E estoria.Entity] struct {
 	aggregate *estoria.Aggregate[E]
