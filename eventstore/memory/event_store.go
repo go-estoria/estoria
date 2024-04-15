@@ -38,14 +38,26 @@ func (s *EventStore) AppendStream(ctx context.Context, streamID typeid.AnyID, op
 
 func (s *EventStore) ReadStream(ctx context.Context, streamID typeid.AnyID, opts estoria.ReadStreamOptions) (estoria.EventStreamIterator, error) {
 	stream, ok := s.Events[streamID.String()]
-	if !ok {
+	if !ok || len(stream) == 0 {
 		return nil, estoria.ErrStreamNotFound
 	}
 
+	cursor := int64(0)
+	if opts.Offset > 0 {
+		cursor = opts.Offset
+	}
+
+	limit := int64(0)
+	if opts.Count > 0 {
+		limit = opts.Count
+	}
+
 	return &StreamIterator{
-		streamID: streamID,
-		events:   stream,
-		cursor:   0,
+		streamID:  streamID,
+		events:    stream,
+		cursor:    cursor,
+		direction: opts.Direction,
+		limit:     limit,
 	}, nil
 }
 

@@ -9,17 +9,22 @@ import (
 )
 
 type StreamIterator struct {
-	streamID typeid.AnyID
-	events   []estoria.Event
-	cursor   int
+	streamID  typeid.AnyID
+	events    []estoria.Event
+	cursor    int64
+	direction estoria.ReadStreamDirection
+	limit     int64
 }
 
 func (i *StreamIterator) Next(ctx context.Context) (estoria.Event, error) {
-	if i.cursor < len(i.events) {
-		event := i.events[i.cursor]
-		i.cursor++
-		return event, nil
+	if i.direction == estoria.Forward && i.cursor >= int64(len(i.events)) {
+		return nil, io.EOF
+	} else if i.direction == estoria.Reverse && i.cursor < 0 {
+		return nil, io.EOF
 	}
 
-	return nil, io.EOF
+	event := i.events[i.cursor]
+	i.cursor++
+
+	return event, nil
 }

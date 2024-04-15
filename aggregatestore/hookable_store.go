@@ -43,11 +43,11 @@ func NewHookableAggregateStore[E estoria.Entity](
 	}
 }
 
-func (s *HookableAggregateStore[E]) AddPrecreateHook(stage HookStage, hook PrecreateHook) {
+func (s *HookableAggregateStore[E]) AddPrecreateHook(hook PrecreateHook) {
 	s.precreateHooks = append(s.precreateHooks, hook)
 }
 
-func (s *HookableAggregateStore[E]) AddPreloadHook(stage HookStage, hook PreloadHook) {
+func (s *HookableAggregateStore[E]) AddPreloadHook(hook PreloadHook) {
 	s.preloadHooks = append(s.preloadHooks, hook)
 }
 
