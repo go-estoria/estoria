@@ -136,21 +136,28 @@ func (s *AggregateStore[E]) Hydrate(ctx context.Context, aggregate *Aggregate[E]
 
 	if aggregate == nil {
 		return fmt.Errorf("aggregate is nil")
-	} else if opts.ToVersion > 0 {
+	} else if opts.ToVersion < 0 {
+		return fmt.Errorf("invalid target version")
+	}
+
+	readOpts := ReadStreamOptions{
+		Offset:    aggregate.Version(),
+		Direction: Forward,
+	}
+
+	if opts.ToVersion > 0 {
 		if aggregate.Version() == opts.ToVersion {
 			log.Debug("aggregate already at target version, nothing to hydrate", "version", opts.ToVersion)
 			return nil
 		} else if aggregate.Version() > opts.ToVersion {
 			return fmt.Errorf("cannot hydrate aggregate with greater version than target version")
 		}
+
+		readOpts.Count = opts.ToVersion - aggregate.Version()
 	}
 
 	// Load the aggregate's events.
-	stream, err := s.EventReader.ReadStream(ctx, aggregate.ID(), ReadStreamOptions{
-		Offset:    aggregate.Version(),
-		Count:     opts.ToVersion - aggregate.Version(),
-		Direction: Forward,
-	})
+	stream, err := s.EventReader.ReadStream(ctx, aggregate.ID(), readOpts)
 	if errors.Is(err, ErrStreamNotFound) {
 		return ErrAggregateNotFound
 	} else if err != nil {
