@@ -23,6 +23,11 @@ type EventStreamWriter interface {
 	AppendStream(ctx context.Context, id typeid.AnyID, opts AppendStreamOptions, events ...Event) error
 }
 
+type EventStore interface {
+	EventStreamReader
+	EventStreamWriter
+}
+
 type AppendStreamOptions struct {
 	ExpectVersion int64
 }
