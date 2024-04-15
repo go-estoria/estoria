@@ -14,6 +14,7 @@ type StreamIterator struct {
 	cursor    int64
 	direction estoria.ReadStreamDirection
 	limit     int64
+	retrieved int64
 }
 
 func (i *StreamIterator) Next(ctx context.Context) (estoria.Event, error) {
@@ -21,10 +22,18 @@ func (i *StreamIterator) Next(ctx context.Context) (estoria.Event, error) {
 		return nil, io.EOF
 	} else if i.direction == estoria.Reverse && i.cursor < 0 {
 		return nil, io.EOF
+	} else if i.limit > 0 && i.retrieved >= i.limit {
+		return nil, io.EOF
 	}
 
 	event := i.events[i.cursor]
-	i.cursor++
+	if i.direction == estoria.Reverse {
+		i.cursor--
+	} else {
+		i.cursor++
+	}
+
+	i.retrieved++
 
 	return event, nil
 }

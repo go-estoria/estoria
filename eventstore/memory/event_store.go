@@ -43,8 +43,16 @@ func (s *EventStore) ReadStream(ctx context.Context, streamID typeid.AnyID, opts
 	}
 
 	cursor := int64(0)
+	if opts.Direction == estoria.Reverse {
+		cursor = int64(len(stream) - 1)
+	}
+
 	if opts.Offset > 0 {
-		cursor = opts.Offset
+		if opts.Direction == estoria.Reverse {
+			cursor -= int64(opts.Offset)
+		} else {
+			cursor += int64(opts.Offset)
+		}
 	}
 
 	limit := int64(0)
