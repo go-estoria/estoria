@@ -14,7 +14,7 @@ import (
 type Aggregate[E Entity] struct {
 	id                  typeid.AnyID
 	entity              E
-	unsavedEvents       []*unsavedEvent
+	unsavedEvents       []AggregateEvent
 	firstUnappliedEvent *unappliedEvent
 	lastUnappliedEvent  *unappliedEvent
 	version             int64

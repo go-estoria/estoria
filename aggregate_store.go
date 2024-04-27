@@ -210,15 +210,15 @@ func (s *AggregateStore[E]) Save(ctx context.Context, aggregate *Aggregate[E], o
 
 	toSave := make([]EventStoreEvent, len(aggregate.unsavedEvents))
 	for i, unsavedEvent := range aggregate.unsavedEvents {
-		data, err := s.marshalEventData(unsavedEvent.data)
+		data, err := s.marshalEventData(unsavedEvent.Data())
 		if err != nil {
 			return fmt.Errorf("serializing event data: %w", err)
 		}
 
 		toSave[i] = &event{
-			id:        unsavedEvent.id,
-			streamID:  unsavedEvent.aggregateID,
-			timestamp: unsavedEvent.timestamp,
+			id:        unsavedEvent.ID(),
+			streamID:  unsavedEvent.AggregateID(),
+			timestamp: unsavedEvent.Timestamp(),
 			data:      data,
 		}
 	}
@@ -229,7 +229,7 @@ func (s *AggregateStore[E]) Save(ctx context.Context, aggregate *Aggregate[E], o
 	}
 
 	for _, unsavedEvent := range aggregate.unsavedEvents {
-		aggregate.QueueEventForApplication(unsavedEvent.data)
+		aggregate.QueueEventForApplication(unsavedEvent.Data())
 	}
 
 	aggregate.unsavedEvents = nil

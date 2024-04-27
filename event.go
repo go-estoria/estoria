@@ -59,6 +59,28 @@ type unsavedEvent struct {
 	data        EventData
 }
 
+var _ AggregateEvent = (*unsavedEvent)(nil)
+
+// ID returns the ID of the event.
+func (e *unsavedEvent) ID() typeid.AnyID {
+	return e.id
+}
+
+// AggregateID returns the ID of the aggregate that the event applies to.
+func (e *unsavedEvent) AggregateID() typeid.AnyID {
+	return e.aggregateID
+}
+
+// Timestamp returns the time that the event occurred.
+func (e *unsavedEvent) Timestamp() time.Time {
+	return e.timestamp
+}
+
+// Data returns the event's data.
+func (e *unsavedEvent) Data() EventData {
+	return e.data
+}
+
 // EventData is the data of an event.
 type EventData interface {
 	EventType() string
