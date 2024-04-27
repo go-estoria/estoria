@@ -26,7 +26,7 @@ type Iterator interface {
 }
 
 type Handler interface {
-	Handle(event OutboxEntry) error
+	Handle(ctx context.Context, event OutboxEntry) error
 }
 
 type Processor struct {
@@ -62,7 +62,7 @@ func (p *Processor) Stop() {
 	close(p.stopped)
 }
 
-func (p *Processor) Handle(entry OutboxEntry) error {
+func (p *Processor) Handle(ctx context.Context, entry OutboxEntry) error {
 	handlers, ok := p.handlers[entry.EventID().Prefix()]
 	if !ok {
 		slog.Debug("no outbox handlers for event type", "event_type", entry.EventID().Prefix())
@@ -70,7 +70,7 @@ func (p *Processor) Handle(entry OutboxEntry) error {
 	}
 
 	for _, handler := range handlers {
-		if err := handler.Handle(entry); err != nil {
+		if err := handler.Handle(ctx, entry); err != nil {
 			return fmt.Errorf("handling outbox entry: %w", err)
 		}
 	}
@@ -96,7 +96,7 @@ func (p Processor) run(ctx context.Context, iterator Iterator) {
 			p.Stop()
 		}
 
-		if err := p.Handle(entry); err != nil {
+		if err := p.Handle(ctx, entry); err != nil {
 			slog.Error("handling outbox entry", "error", err)
 			p.Stop()
 		}
