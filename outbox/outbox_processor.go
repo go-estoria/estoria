@@ -10,6 +10,10 @@ import (
 	"go.jetpack.io/typeid"
 )
 
+type Outbox interface {
+	Iterator() (Iterator, error)
+}
+
 type OutboxEntry interface {
 	Timestamp() time.Time
 	StreamID() typeid.AnyID
@@ -26,16 +30,15 @@ type Handler interface {
 }
 
 type Processor struct {
-	iterator Iterator
+	outbox   Outbox
 	handlers map[string][]Handler // event type -> handlers
 	stopped  chan struct{}
 }
 
-func NewProcessor(iterator Iterator) *Processor {
+func NewProcessor(outbox Outbox) *Processor {
 	return &Processor{
-		iterator: iterator,
+		outbox:   outbox,
 		handlers: make(map[string][]Handler),
-		stopped:  nil,
 	}
 }
 
@@ -44,9 +47,14 @@ func (p *Processor) RegisterHandlers(eventType estoria.EventData, handlers ...Ha
 }
 
 func (p *Processor) Start(ctx context.Context) error {
+	iterator, err := p.outbox.Iterator()
+	if err != nil {
+		return fmt.Errorf("creating outbox iterator: %w", err)
+	}
+
 	slog.Debug("starting outbox processor", "handlers", len(p.handlers))
 	p.stopped = make(chan struct{})
-	go p.run(ctx)
+	go p.run(ctx, iterator)
 	return nil
 }
 
@@ -70,7 +78,7 @@ func (p *Processor) Handle(entry OutboxEntry) error {
 	return nil
 }
 
-func (p Processor) run(ctx context.Context) {
+func (p Processor) run(ctx context.Context, iterator Iterator) {
 	for {
 		select {
 		case <-ctx.Done():
@@ -82,7 +90,7 @@ func (p Processor) run(ctx context.Context) {
 		default:
 		}
 
-		entry, err := p.iterator.Next(ctx)
+		entry, err := iterator.Next(ctx)
 		if err != nil {
 			slog.Error("reading outbox entry", "error", err)
 			p.Stop()
