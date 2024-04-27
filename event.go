@@ -6,8 +6,8 @@ import (
 	"go.jetpack.io/typeid"
 )
 
-// An Event is a state change to an entity.
-type Event interface {
+// An EventStoreEvent is a state change to an entity.
+type EventStoreEvent interface {
 	ID() typeid.AnyID
 	StreamID() typeid.AnyID
 	Timestamp() time.Time
@@ -22,7 +22,7 @@ type event struct {
 	data      []byte
 }
 
-var _ Event = (*event)(nil)
+var _ EventStoreEvent = (*event)(nil)
 
 // EventID returns the ID of the event.
 func (e *event) ID() typeid.AnyID {

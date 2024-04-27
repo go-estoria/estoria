@@ -11,19 +11,19 @@ import (
 )
 
 type EventStore struct {
-	Events map[string][]estoria.Event
+	Events map[string][]estoria.EventStoreEvent
 
 	mu sync.RWMutex
 }
 
-func (s *EventStore) AppendStream(ctx context.Context, streamID typeid.AnyID, opts estoria.AppendStreamOptions, events ...estoria.Event) error {
+func (s *EventStore) AppendStream(ctx context.Context, streamID typeid.AnyID, opts estoria.AppendStreamOptions, events ...estoria.EventStoreEvent) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	stream := s.Events[streamID.String()]
-	tx := []estoria.Event{}
+	tx := []estoria.EventStoreEvent{}
 	for _, event := range events {
-		if slices.ContainsFunc(stream, func(e estoria.Event) bool {
+		if slices.ContainsFunc(stream, func(e estoria.EventStoreEvent) bool {
 			return event.ID().String() == e.ID().String()
 		}) {
 			return ErrEventExists{EventID: event.ID()}

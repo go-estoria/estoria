@@ -12,7 +12,7 @@ import (
 )
 
 type EventStreamIterator interface {
-	Next(ctx context.Context) (Event, error)
+	Next(ctx context.Context) (EventStoreEvent, error)
 }
 
 type EventStreamReader interface {
@@ -20,7 +20,7 @@ type EventStreamReader interface {
 }
 
 type EventStreamWriter interface {
-	AppendStream(ctx context.Context, id typeid.AnyID, opts AppendStreamOptions, events ...Event) error
+	AppendStream(ctx context.Context, id typeid.AnyID, opts AppendStreamOptions, events ...EventStoreEvent) error
 }
 
 type EventStore interface {
@@ -208,7 +208,7 @@ func (s *AggregateStore[E]) Save(ctx context.Context, aggregate *Aggregate[E], o
 		return nil
 	}
 
-	toSave := make([]Event, len(aggregate.unsavedEvents))
+	toSave := make([]EventStoreEvent, len(aggregate.unsavedEvents))
 	for i, unsavedEvent := range aggregate.unsavedEvents {
 		data, err := s.marshalEventData(unsavedEvent.data)
 		if err != nil {
