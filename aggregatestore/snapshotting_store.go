@@ -31,17 +31,17 @@ type EntitySnapshotSerde[E estoria.Entity] interface {
 }
 
 type SnapshottingAggregateStore[E estoria.Entity] struct {
-	inner  AggregateStore[E]
+	inner  estoria.AggregateStore[E]
 	reader SnapshotReader
 	writer SnapshotWriter
 	policy SnapshotPolicy
 	serde  EntitySnapshotSerde[E]
 }
 
-var _ AggregateStore[estoria.Entity] = (*SnapshottingAggregateStore[estoria.Entity])(nil)
+var _ estoria.AggregateStore[estoria.Entity] = (*SnapshottingAggregateStore[estoria.Entity])(nil)
 
 func NewSnapshottingAggregateStore[E estoria.Entity](
-	inner AggregateStore[E],
+	inner estoria.AggregateStore[E],
 	reader SnapshotReader,
 	writer SnapshotWriter,
 	policy SnapshotPolicy,

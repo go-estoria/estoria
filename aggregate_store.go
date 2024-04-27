@@ -11,59 +11,48 @@ import (
 	"go.jetpack.io/typeid"
 )
 
-type EventStreamIterator interface {
-	Next(ctx context.Context) (EventStoreEvent, error)
+type AggregateStore[E Entity] interface {
+	NewAggregate() (*Aggregate[E], error)
+	Allow(prototypes ...EventData)
+	Load(ctx context.Context, id typeid.AnyID, opts LoadAggregateOptions) (*Aggregate[E], error)
+	Hydrate(ctx context.Context, aggregate *Aggregate[E], opts HydrateAggregateOptions) error
+	Save(ctx context.Context, aggregate *Aggregate[E], opts SaveAggregateOptions) error
 }
 
-type EventStreamReader interface {
-	ReadStream(ctx context.Context, id typeid.AnyID, opts ReadStreamOptions) (EventStreamIterator, error)
+// LoadAggregateOptions are options for loading an aggregate.
+type LoadAggregateOptions struct {
+	// ToVersion is the version to load the aggregate to.
+	//
+	// Default: 0 (load to the latest version)
+	ToVersion int64
 }
 
-type EventStreamWriter interface {
-	AppendStream(ctx context.Context, id typeid.AnyID, opts AppendStreamOptions, events ...EventStoreEvent) error
+// HydrateAggregateOptions are options for hydrating an aggregate.
+type HydrateAggregateOptions struct {
+	// ToVersion is the version to hydrate the aggregate to.
+	//
+	// Default: 0 (hydrate to the latest version)
+	ToVersion int64
 }
 
-type EventStore interface {
-	EventStreamReader
-	EventStreamWriter
+// SaveAggregateOptions are options for saving an aggregate.
+type SaveAggregateOptions struct {
+	// SkipApply skips applying the events to the entity.
+	// This is useful in situations where it is desireable to delay the application of events,
+	// such as when wrapping the aggregate store with additional functionality.
+	//
+	// Default: false
+	SkipApply bool
 }
 
-type AppendStreamOptions struct {
-	ExpectVersion int64
-}
+// ErrStreamNotFound is returned when a stream is not found.
+var ErrStreamNotFound = errors.New("stream not found")
 
-// ReadStreamOptions are options for reading an event stream.
-type ReadStreamOptions struct {
-	// Offset is the starting position in the stream (exclusive).
-	Offset int64
+// ErrAggregateNotFound is returned when an aggregate is not found.
+var ErrAggregateNotFound = errors.New("aggregate not found")
 
-	// Count is the number of events to read.
-	Count int64
-
-	// Direction is the direction to read the stream.
-	Direction ReadStreamDirection
-}
-
-type ReadStreamDirection int
-
-const (
-	Forward ReadStreamDirection = iota
-	Reverse
-)
-
-type HookType int
-
-const (
-	BeforeLoadAggregate HookType = iota
-	AfterLoadAggregate
-	BeforeSaveAggregate
-	AfterSaveAggregate
-)
-
-type HookFunc[E Entity] func(context.Context, *Aggregate[E]) error
-
-// An AggregateStore loads and saves aggregates using an EventStore.
-type AggregateStore[E Entity] struct {
+// An EventSourcedAggregateStore loads and saves aggregates using an EventStore.
+type EventSourcedAggregateStore[E Entity] struct {
 	EventReader EventStreamReader
 	EventWriter EventStreamWriter
 
@@ -80,8 +69,8 @@ func NewAggregateStore[E Entity](
 	eventReader EventStreamReader,
 	eventWriter EventStreamWriter,
 	entityFactory EntityFactory[E],
-) *AggregateStore[E] {
-	return &AggregateStore[E]{
+) *EventSourcedAggregateStore[E] {
+	return &EventSourcedAggregateStore[E]{
 		EventReader:        eventReader,
 		EventWriter:        eventWriter,
 		NewEntity:          entityFactory,
@@ -93,13 +82,13 @@ func NewAggregateStore[E Entity](
 }
 
 // Allow allows an event type to be used with the aggregate store.
-func (s *AggregateStore[E]) Allow(prototypes ...EventData) {
+func (s *EventSourcedAggregateStore[E]) Allow(prototypes ...EventData) {
 	for _, prototype := range prototypes {
 		s.eventDataFactories[prototype.EventType()] = prototype.New
 	}
 }
 
-func (s *AggregateStore[E]) NewAggregate() (*Aggregate[E], error) {
+func (s *EventSourcedAggregateStore[E]) NewAggregate() (*Aggregate[E], error) {
 	entity := s.NewEntity()
 	id, err := typeid.From(entity.EntityType(), "")
 	if err != nil {
@@ -113,7 +102,7 @@ func (s *AggregateStore[E]) NewAggregate() (*Aggregate[E], error) {
 }
 
 // Load loads an aggregate by its ID.
-func (s *AggregateStore[E]) Load(ctx context.Context, id typeid.AnyID, opts LoadAggregateOptions) (*Aggregate[E], error) {
+func (s *EventSourcedAggregateStore[E]) Load(ctx context.Context, id typeid.AnyID, opts LoadAggregateOptions) (*Aggregate[E], error) {
 	s.log.Debug("loading aggregate from event store", "aggregate_id", id)
 
 	aggregate, err := s.NewAggregate()
@@ -135,7 +124,7 @@ func (s *AggregateStore[E]) Load(ctx context.Context, id typeid.AnyID, opts Load
 }
 
 // Hydrate hydrates an aggregate.
-func (s *AggregateStore[E]) Hydrate(ctx context.Context, aggregate *Aggregate[E], opts HydrateAggregateOptions) error {
+func (s *EventSourcedAggregateStore[E]) Hydrate(ctx context.Context, aggregate *Aggregate[E], opts HydrateAggregateOptions) error {
 	log := s.log.With("aggregate_id", aggregate.ID())
 	log.Debug("hydrating aggregate from event store", "from_version", aggregate.Version(), "to_version", opts.ToVersion)
 
@@ -200,7 +189,7 @@ func (s *AggregateStore[E]) Hydrate(ctx context.Context, aggregate *Aggregate[E]
 }
 
 // Save saves an aggregate.
-func (s *AggregateStore[E]) Save(ctx context.Context, aggregate *Aggregate[E], opts SaveAggregateOptions) error {
+func (s *EventSourcedAggregateStore[E]) Save(ctx context.Context, aggregate *Aggregate[E], opts SaveAggregateOptions) error {
 	s.log.Debug("saving aggregate to event store", "aggregate_id", aggregate.ID(), "events", len(aggregate.unsavedEvents))
 
 	if len(aggregate.unsavedEvents) == 0 {
@@ -242,26 +231,3 @@ func (s *AggregateStore[E]) Save(ctx context.Context, aggregate *Aggregate[E], o
 
 	return nil
 }
-
-type LoadAggregateOptions struct {
-	// ToVersion is the version to load the aggregate to.
-	// Default: 0 (load to the latest version)
-	ToVersion int64
-}
-
-type HydrateAggregateOptions struct {
-	// ToVersion is the version to hydrate the aggregate to.
-	// Default: 0 (hydrate to the latest version)
-	ToVersion int64
-}
-
-type SaveAggregateOptions struct {
-	// SkipApply skips applying the events to the entity.
-	// This is useful in situations where it is desireable to delay the application of events,
-	// such as when wrapping the aggregate store with additional functionality.
-	SkipApply bool
-}
-
-var ErrStreamNotFound = errors.New("stream not found")
-
-var ErrAggregateNotFound = errors.New("aggregate not found")

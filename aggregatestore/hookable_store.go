@@ -26,14 +26,14 @@ type PreloadHook func(ctx context.Context, id typeid.AnyID) error
 type Hook[E estoria.Entity] func(ctx context.Context, aggregate *estoria.Aggregate[E]) error
 
 type HookableAggregateStore[E estoria.Entity] struct {
-	store          AggregateStore[E]
+	store          estoria.AggregateStore[E]
 	precreateHooks []PrecreateHook
 	preloadHooks   []PreloadHook
 	hooks          map[HookStage][]Hook[E]
 }
 
 func NewHookableAggregateStore[E estoria.Entity](
-	inner AggregateStore[E],
+	inner estoria.AggregateStore[E],
 ) *HookableAggregateStore[E] {
 	return &HookableAggregateStore[E]{
 		store:          inner,

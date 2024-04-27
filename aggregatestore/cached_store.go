@@ -14,12 +14,12 @@ type AggregateCache[E estoria.Entity] interface {
 }
 
 type CachedAggregateStore[E estoria.Entity] struct {
-	store AggregateStore[E]
+	store estoria.AggregateStore[E]
 	cache AggregateCache[E]
 }
 
 func NewCachedAggregateStore[E estoria.Entity](
-	inner AggregateStore[E],
+	inner estoria.AggregateStore[E],
 	cacher AggregateCache[E],
 ) *CachedAggregateStore[E] {
 	return &CachedAggregateStore[E]{
