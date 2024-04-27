@@ -49,10 +49,10 @@ func (a *Aggregate[E]) Append(events ...EventData) error {
 		}
 
 		a.unsavedEvents = append(a.unsavedEvents, &unsavedEvent{
-			id:        eventID,
-			streamID:  a.ID(),
-			timestamp: time.Now(),
-			data:      eventData,
+			id:          eventID,
+			aggregateID: a.ID(),
+			timestamp:   time.Now(),
+			data:        eventData,
 		})
 	}
 

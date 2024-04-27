@@ -217,7 +217,7 @@ func (s *AggregateStore[E]) Save(ctx context.Context, aggregate *Aggregate[E], o
 
 		toSave[i] = &event{
 			id:        unsavedEvent.id,
-			streamID:  unsavedEvent.streamID,
+			streamID:  unsavedEvent.aggregateID,
 			timestamp: unsavedEvent.timestamp,
 			data:      data,
 		}

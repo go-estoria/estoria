@@ -6,7 +6,7 @@ import (
 	"go.jetpack.io/typeid"
 )
 
-// An EventStoreEvent is a state change to an entity.
+// An EventStoreEvent can be appended to and loaded from an event store.
 type EventStoreEvent interface {
 	ID() typeid.AnyID
 	StreamID() typeid.AnyID
@@ -14,7 +14,7 @@ type EventStoreEvent interface {
 	Data() []byte
 }
 
-// The internal representation of an event.
+// The internal representation of an event store event.
 type event struct {
 	id        typeid.AnyID
 	streamID  typeid.AnyID
@@ -29,7 +29,7 @@ func (e *event) ID() typeid.AnyID {
 	return e.id
 }
 
-// StreamID returns the ID of the aggregate that the event applies to.
+// StreamID returns the ID of the stream that the event applies to.
 func (e *event) StreamID() typeid.AnyID {
 	return e.streamID
 }
@@ -44,12 +44,19 @@ func (e *event) Data() []byte {
 	return e.data
 }
 
+type AggregateEvent interface {
+	ID() typeid.AnyID
+	AggregateID() typeid.AnyID
+	Timestamp() time.Time
+	Data() EventData
+}
+
 // The internal representation of an unsaved event.
 type unsavedEvent struct {
-	id        typeid.AnyID
-	streamID  typeid.AnyID
-	timestamp time.Time
-	data      EventData
+	id          typeid.AnyID
+	aggregateID typeid.AnyID
+	timestamp   time.Time
+	data        EventData
 }
 
 // EventData is the data of an event.
