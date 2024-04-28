@@ -14,15 +14,15 @@ type Outbox interface {
 	Iterator() (Iterator, error)
 }
 
+type Iterator interface {
+	Next(ctx context.Context) (OutboxEntry, error)
+}
+
 type OutboxEntry interface {
 	Timestamp() time.Time
 	StreamID() typeid.AnyID
 	EventID() typeid.AnyID
 	EventData() []byte
-}
-
-type Iterator interface {
-	Next(ctx context.Context) (OutboxEntry, error)
 }
 
 type Handler interface {
@@ -32,7 +32,7 @@ type Handler interface {
 type Processor struct {
 	outbox   Outbox
 	handlers map[string][]Handler // event type -> handlers
-	stopped  chan struct{}
+	stop     context.CancelFunc
 }
 
 func NewProcessor(outbox Outbox) *Processor {
@@ -53,13 +53,15 @@ func (p *Processor) Start(ctx context.Context) error {
 	}
 
 	slog.Debug("starting outbox processor", "handlers", len(p.handlers))
-	p.stopped = make(chan struct{})
+
+	ctx, cancel := context.WithCancel(ctx)
+	p.stop = cancel
 	go p.run(ctx, iterator)
 	return nil
 }
 
 func (p *Processor) Stop() {
-	close(p.stopped)
+	p.stop()
 }
 
 func (p *Processor) Handle(ctx context.Context, entry OutboxEntry) error {
@@ -78,13 +80,10 @@ func (p *Processor) Handle(ctx context.Context, entry OutboxEntry) error {
 	return nil
 }
 
-func (p Processor) run(ctx context.Context, iterator Iterator) {
+func (p *Processor) run(ctx context.Context, iterator Iterator) {
 	for {
 		select {
 		case <-ctx.Done():
-			slog.Debug("context done, stopping outbox processor")
-			return
-		case <-p.stopped:
 			slog.Debug("stopping outbox processor")
 			return
 		default:
