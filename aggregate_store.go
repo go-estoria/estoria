@@ -218,7 +218,7 @@ func (s *EventSourcedAggregateStore[E]) Save(ctx context.Context, aggregate *Agg
 	}
 
 	for _, unsavedEvent := range aggregate.unsavedEvents {
-		aggregate.QueueEventForApplication(unsavedEvent.Data())
+		aggregate.queueEventForApplication(unsavedEvent.Data())
 	}
 
 	aggregate.unsavedEvents = nil
