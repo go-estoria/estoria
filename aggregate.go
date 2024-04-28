@@ -10,21 +10,6 @@ import (
 	"go.jetpack.io/typeid"
 )
 
-// type Aggregate interface {
-// 	ID() typeid.AnyID
-// 	Entity() Entity
-// 	Version() int64
-
-// 	SetID(id typeid.AnyID)
-// 	SetEntity(entity Entity)
-// 	SetVersion(version int64)
-// }
-
-// type AppendableAggregate interface {
-// 	Aggregate
-// 	Append(events ...EventData) error
-// }
-
 // An Aggregate is a reconstructed representation of an event-sourced entity's state.
 type Aggregate[E Entity] struct {
 	id                  typeid.AnyID

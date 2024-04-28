@@ -45,6 +45,11 @@ type SaveAggregateOptions struct {
 	SkipApply bool
 }
 
+type EventDataSerde interface {
+	Unmarshal(b []byte, d EventData) error
+	Marshal(d EventData) ([]byte, error)
+}
+
 // ErrStreamNotFound is returned when a stream is not found.
 var ErrStreamNotFound = errors.New("stream not found")
 
@@ -58,9 +63,7 @@ type EventSourcedAggregateStore[E Entity] struct {
 
 	NewEntity          EntityFactory[E]
 	eventDataFactories map[string]func() EventData
-
-	unmarshalEventData func([]byte, EventData) error
-	marshalEventData   func(EventData) ([]byte, error)
+	eventDataSerde     EventDataSerde
 
 	log *slog.Logger
 }
@@ -69,16 +72,28 @@ func NewAggregateStore[E Entity](
 	eventReader EventStreamReader,
 	eventWriter EventStreamWriter,
 	entityFactory EntityFactory[E],
-) *EventSourcedAggregateStore[E] {
-	return &EventSourcedAggregateStore[E]{
+	opts ...AggregateStoreOption[E],
+) (*EventSourcedAggregateStore[E], error) {
+	store := &EventSourcedAggregateStore[E]{
 		EventReader:        eventReader,
 		EventWriter:        eventWriter,
 		NewEntity:          entityFactory,
 		eventDataFactories: make(map[string]func() EventData),
-		unmarshalEventData: func(b []byte, d EventData) error { return json.Unmarshal(b, d) },
-		marshalEventData:   func(d EventData) ([]byte, error) { return json.Marshal(d) },
+		eventDataSerde:     nil,
 		log:                slog.Default().WithGroup("aggregatestore"),
 	}
+
+	for _, opt := range opts {
+		if err := opt(store); err != nil {
+			return nil, fmt.Errorf("applying option: %w", err)
+		}
+	}
+
+	if store.eventDataSerde == nil {
+		store.eventDataSerde = JSONEventDataSerde{}
+	}
+
+	return store, nil
 }
 
 // Allow allows an event type to be used with the aggregate store.
@@ -174,7 +189,7 @@ func (s *EventSourcedAggregateStore[E]) Hydrate(ctx context.Context, aggregate *
 		}
 
 		eventData := newEventData()
-		if err := s.unmarshalEventData(evt.Data(), eventData); err != nil {
+		if err := s.eventDataSerde.Unmarshal(evt.Data(), eventData); err != nil {
 			return fmt.Errorf("deserializing event data: %w", err)
 		}
 
@@ -199,7 +214,7 @@ func (s *EventSourcedAggregateStore[E]) Save(ctx context.Context, aggregate *Agg
 
 	toSave := make([]EventStoreEvent, len(aggregate.unsavedEvents))
 	for i, unsavedEvent := range aggregate.unsavedEvents {
-		data, err := s.marshalEventData(unsavedEvent.Data())
+		data, err := s.eventDataSerde.Marshal(unsavedEvent.Data())
 		if err != nil {
 			return fmt.Errorf("serializing event data: %w", err)
 		}
@@ -230,4 +245,33 @@ func (s *EventSourcedAggregateStore[E]) Save(ctx context.Context, aggregate *Agg
 	}
 
 	return nil
+}
+
+type AggregateStoreOption[E Entity] func(*EventSourcedAggregateStore[E]) error
+
+func WithEventDataSerde[E Entity](serde EventDataSerde) AggregateStoreOption[E] {
+	return func(s *EventSourcedAggregateStore[E]) error {
+		s.eventDataSerde = serde
+		return nil
+	}
+}
+
+type JSONEntitySnapshotSerde[E Entity] struct{}
+
+func (JSONEntitySnapshotSerde[E]) MarshalEntitySnapshot(entity E) ([]byte, error) {
+	return json.Marshal(entity)
+}
+
+func (JSONEntitySnapshotSerde[E]) UnmarshalEntitySnapshot(data []byte, dest *E) error {
+	return json.Unmarshal(data, dest)
+}
+
+type JSONEventDataSerde struct{}
+
+func (s JSONEventDataSerde) Unmarshal(b []byte, d EventData) error {
+	return json.Unmarshal(b, d)
+}
+
+func (s JSONEventDataSerde) Marshal(d EventData) ([]byte, error) {
+	return json.Marshal(d)
 }

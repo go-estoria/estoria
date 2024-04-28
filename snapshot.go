@@ -9,7 +9,7 @@ import (
 type Snapshot interface {
 	AggregateID() typeid.AnyID
 	AggregateVersion() int64
-	EntityData() []byte
+	Data() []byte
 }
 
 type EventCountSnapshotPolicy struct {

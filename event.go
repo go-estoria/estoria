@@ -10,16 +10,18 @@ import (
 type EventStoreEvent interface {
 	ID() typeid.AnyID
 	StreamID() typeid.AnyID
+	StreamVersion() int64
 	Timestamp() time.Time
 	Data() []byte
 }
 
 // The internal representation of an event store event.
 type event struct {
-	id        typeid.AnyID
-	streamID  typeid.AnyID
-	timestamp time.Time
-	data      []byte
+	id            typeid.AnyID
+	streamID      typeid.AnyID
+	streamVersion int64
+	timestamp     time.Time
+	data          []byte
 }
 
 var _ EventStoreEvent = (*event)(nil)
@@ -32,6 +34,11 @@ func (e *event) ID() typeid.AnyID {
 // StreamID returns the ID of the stream that the event applies to.
 func (e *event) StreamID() typeid.AnyID {
 	return e.streamID
+}
+
+// StreamVersion returns the version of the stream that the event represents.
+func (e *event) StreamVersion() int64 {
+	return e.streamVersion
 }
 
 // Timestamp returns the time that the event occurred.

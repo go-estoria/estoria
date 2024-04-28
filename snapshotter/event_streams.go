@@ -26,7 +26,7 @@ func NewEventStreamSnapshotReader(eventReader estoria.EventStreamReader) *EventS
 func (s *EventStreamSnapshotReader) ReadSnapshot(ctx context.Context, aggregateID typeid.AnyID, opts ReadSnapshotOptions) (estoria.Snapshot, error) {
 	slog.Debug("finding snapshot", "aggregate_id", aggregateID)
 
-	snapshotStreamID, err := typeid.From(aggregateID.Prefix()+"snapshots", aggregateID.Suffix())
+	snapshotStreamID, err := typeid.From(aggregateID.Prefix()+"snapshot", aggregateID.Suffix())
 	if err != nil {
 		return nil, fmt.Errorf("deriving snapshot ID: %w", err)
 	}
@@ -46,10 +46,12 @@ func (s *EventStreamSnapshotReader) ReadSnapshot(ctx context.Context, aggregateI
 	} else if err != nil {
 		return nil, fmt.Errorf("reading snapshot event: %w", err)
 	} else if event == nil {
-		return nil, errors.New("snapshot not found")
+		return nil, errors.New("snapshot event not found")
 	}
 
-	slog.Debug("snapshot found", "aggregate_id", aggregateID, "snapshot_event_id", event.ID(), "event_data_length", len(event.Data()))
+	slog.Debug("snapshot event found",
+		"stream_id", snapshotStreamID,
+		"stream_version", event.StreamVersion())
 
 	var snapshot snapshot
 	if err := json.Unmarshal(event.Data(), &snapshot); err != nil {
@@ -76,32 +78,33 @@ func NewEventStreamSnapshotWriter(eventWriter estoria.EventStreamWriter) *EventS
 func (s *EventStreamSnapshotWriter) WriteSnapshot(ctx context.Context, aggregateID typeid.AnyID, aggregateVersion int64, data []byte) error {
 	slog.Debug("writing snapshot", "aggregate_id", aggregateID, "aggregate_version", aggregateVersion, "data_length", len(data))
 
-	snapshotStreamID, err := typeid.From(aggregateID.Prefix()+"snapshots", aggregateID.Suffix())
+	snapshotStreamPrefix := aggregateID.Prefix() + "snapshot"
+
+	snapshotStreamID, err := typeid.From(snapshotStreamPrefix, aggregateID.Suffix())
 	if err != nil {
 		return fmt.Errorf("deriving snapshot ID: %w", err)
 	}
 
-	snap := snapshot{
-		SSAggregateID:      aggregateID,
-		SSAggregateVersion: aggregateVersion,
-		Data:               data,
-	}
-
-	snapshotData, err := json.Marshal(snap)
-	if err != nil {
-		return fmt.Errorf("marshalling snapshot: %w", err)
-	}
-
-	eventID, err := typeid.WithPrefix(aggregateID.Prefix() + "snapshot")
+	eventID, err := typeid.WithPrefix(snapshotStreamPrefix)
 	if err != nil {
 		return fmt.Errorf("generating snapshot event ID: %w", err)
+	}
+
+	// this data wraps the snapshot data with the aggregate ID and version
+	eventData, err := json.Marshal(snapshot{
+		SnapshotAggregateID:      aggregateID,
+		SnapshotAggregateVersion: aggregateVersion,
+		SnapshotData:             data,
+	})
+	if err != nil {
+		return fmt.Errorf("marshalling snapshot data for stream event: %w", err)
 	}
 
 	event := &snapshotEvent{
 		EventID:        eventID,
 		EventStreamID:  snapshotStreamID,
 		EventTimestamp: time.Now(),
-		EventData:      snapshotData,
+		EventData:      eventData,
 	}
 
 	if err := s.eventWriter.AppendStream(ctx, snapshotStreamID, estoria.AppendStreamOptions{}, event); err != nil {
@@ -114,28 +117,29 @@ func (s *EventStreamSnapshotWriter) WriteSnapshot(ctx context.Context, aggregate
 }
 
 type snapshot struct {
-	SSAggregateID      typeid.AnyID
-	SSAggregateVersion int64
-	Data               []byte
+	SnapshotAggregateID      typeid.AnyID `json:"aggregate_id"`
+	SnapshotAggregateVersion int64        `json:"aggregate_version"`
+	SnapshotData             []byte       `json:"data"`
 }
 
 func (s *snapshot) AggregateID() typeid.AnyID {
-	return s.SSAggregateID
+	return s.SnapshotAggregateID
 }
 
 func (s *snapshot) AggregateVersion() int64 {
-	return s.SSAggregateVersion
+	return s.SnapshotAggregateVersion
 }
 
-func (s *snapshot) EntityData() []byte {
-	return s.Data
+func (s *snapshot) Data() []byte {
+	return s.SnapshotData
 }
 
 type snapshotEvent struct {
-	EventID        typeid.AnyID
-	EventStreamID  typeid.AnyID
-	EventTimestamp time.Time
-	EventData      []byte
+	EventID            typeid.AnyID
+	EventStreamID      typeid.AnyID
+	EventStreamVersion int64
+	EventTimestamp     time.Time
+	EventData          json.RawMessage
 }
 
 func (e *snapshotEvent) ID() typeid.AnyID {
@@ -144,6 +148,10 @@ func (e *snapshotEvent) ID() typeid.AnyID {
 
 func (e *snapshotEvent) StreamID() typeid.AnyID {
 	return e.EventStreamID
+}
+
+func (e *snapshotEvent) StreamVersion() int64 {
+	return e.EventStreamVersion
 }
 
 func (e *snapshotEvent) Timestamp() time.Time {
