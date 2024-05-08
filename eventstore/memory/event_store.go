@@ -11,16 +11,21 @@ import (
 )
 
 type EventStore struct {
-	Events map[string][]estoria.EventStoreEvent
+	events map[string][]estoria.EventStoreEvent
+	mu     sync.RWMutex
+}
 
-	mu sync.RWMutex
+func NewEventStore() *EventStore {
+	return &EventStore{
+		events: map[string][]estoria.EventStoreEvent{},
+	}
 }
 
 func (s *EventStore) AppendStream(ctx context.Context, streamID typeid.AnyID, opts estoria.AppendStreamOptions, events ...estoria.EventStoreEvent) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	stream := s.Events[streamID.String()]
+	stream := s.events[streamID.String()]
 	tx := []estoria.EventStoreEvent{}
 	for _, event := range events {
 		if slices.ContainsFunc(stream, func(e estoria.EventStoreEvent) bool {
@@ -32,12 +37,12 @@ func (s *EventStore) AppendStream(ctx context.Context, streamID typeid.AnyID, op
 		tx = append(tx, event)
 	}
 
-	s.Events[streamID.String()] = append(stream, events...)
+	s.events[streamID.String()] = append(stream, events...)
 	return nil
 }
 
 func (s *EventStore) ReadStream(ctx context.Context, streamID typeid.AnyID, opts estoria.ReadStreamOptions) (estoria.EventStreamIterator, error) {
-	stream, ok := s.Events[streamID.String()]
+	stream, ok := s.events[streamID.String()]
 	if !ok || len(stream) == 0 {
 		return nil, estoria.ErrStreamNotFound
 	}
