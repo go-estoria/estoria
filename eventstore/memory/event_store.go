@@ -10,9 +10,15 @@ import (
 	"go.jetpack.io/typeid"
 )
 
+type EventStoreSerde interface {
+	SerializeEvent(event estoria.EventStoreEvent) ([]byte, error)
+	DeserializeEvent(data []byte, dest estoria.EventStoreEvent) error
+}
+
 type EventStore struct {
 	events map[string][]estoria.EventStoreEvent
 	mu     sync.RWMutex
+	serde  EventStoreSerde
 }
 
 func NewEventStore() *EventStore {
@@ -21,7 +27,7 @@ func NewEventStore() *EventStore {
 	}
 }
 
-func (s *EventStore) AppendStream(ctx context.Context, streamID typeid.AnyID, opts estoria.AppendStreamOptions, events ...estoria.EventStoreEvent) error {
+func (s *EventStore) AppendStream(ctx context.Context, streamID typeid.AnyID, opts estoria.AppendStreamOptions, events []estoria.EventStoreEvent) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -37,7 +43,7 @@ func (s *EventStore) AppendStream(ctx context.Context, streamID typeid.AnyID, op
 		tx = append(tx, event)
 	}
 
-	s.events[streamID.String()] = append(stream, events...)
+	s.events[streamID.String()] = append(stream, tx...)
 	return nil
 }
 

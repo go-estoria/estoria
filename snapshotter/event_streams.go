@@ -107,7 +107,7 @@ func (s *EventStreamSnapshotWriter) WriteSnapshot(ctx context.Context, aggregate
 		EventData:      eventData,
 	}
 
-	if err := s.eventWriter.AppendStream(ctx, snapshotStreamID, estoria.AppendStreamOptions{}, event); err != nil {
+	if err := s.eventWriter.AppendStream(ctx, snapshotStreamID, estoria.AppendStreamOptions{}, []estoria.EventStoreEvent{event}); err != nil {
 		return fmt.Errorf("appending snapshot stream: %w", err)
 	}
 
