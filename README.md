@@ -8,7 +8,7 @@ See [Getting Started](#getting-started) to start using Estoria.
 
 ## Features
 
-- Unified event store interface supporting many backends
+- Unified event store interface supporting multiple backends
 - Event store wrappers for caching and lifecycle hooks
 - Transactional outbox with at-least-once processing
 - Event-sourced aggregate store
