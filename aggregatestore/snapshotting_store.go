@@ -2,7 +2,6 @@ package aggregatestore
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -165,14 +164,4 @@ func WithSnapshotSerde[E estoria.Entity](serde EntitySnapshotSerde[E]) Snapshott
 		s.serde = serde
 		return nil
 	}
-}
-
-type JSONEntitySnapshotSerde[E estoria.Entity] struct{}
-
-func (JSONEntitySnapshotSerde[E]) MarshalEntitySnapshot(entity E) ([]byte, error) {
-	return json.Marshal(entity)
-}
-
-func (JSONEntitySnapshotSerde[E]) UnmarshalEntitySnapshot(data []byte, dest *E) error {
-	return json.Unmarshal(data, dest)
 }

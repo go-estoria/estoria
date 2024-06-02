@@ -10,15 +10,26 @@ import (
 	"go.jetpack.io/typeid"
 )
 
+type AggregateEvent[E Entity] interface {
+	ID() typeid.AnyID
+	AggregateID() typeid.AnyID
+	Timestamp() time.Time
+	Data() EventData
+}
+
 // An Aggregate is a reconstructed representation of an event-sourced entity's state.
 type Aggregate[E Entity] struct {
 	id                  typeid.AnyID
 	entity              E
-	unsavedEvents       []AggregateEvent
+	UnsavedEvents       []AggregateEvent[E]
 	firstUnappliedEvent *unappliedEvent
 	lastUnappliedEvent  *unappliedEvent
 	version             int64
 }
+
+// An AggregateBindFunc is, in Haskell terms, a function that takes an aggregate
+// and a function that modifies the entity and returns a new aggregate.
+type AggregateBindFunc[E Entity] func(Aggregate[E], func(E) (E, error)) (Aggregate[E], error)
 
 // ID returns the aggregate's ID.
 // The ID is the ID of the entity that the aggregate represents.
@@ -48,7 +59,7 @@ func (a *Aggregate[E]) Append(events ...EventData) error {
 			return fmt.Errorf("generating event ID: %w", err)
 		}
 
-		a.unsavedEvents = append(a.unsavedEvents, &unsavedEvent{
+		a.UnsavedEvents = append(a.UnsavedEvents, &unsavedEvent{
 			id:          eventID,
 			aggregateID: a.ID(),
 			timestamp:   time.Now(),
@@ -59,7 +70,7 @@ func (a *Aggregate[E]) Append(events ...EventData) error {
 	return nil
 }
 
-func (a *Aggregate[E]) queueEventForApplication(event EventData) {
+func (a *Aggregate[E]) QueueEventForApplication(event EventData) {
 	if a.firstUnappliedEvent == nil {
 		a.firstUnappliedEvent = &unappliedEvent{
 			data: event,
@@ -78,7 +89,7 @@ func (a *Aggregate[E]) SetID(id typeid.AnyID) {
 }
 
 func (a *Aggregate[E]) SetEntity(entity E) {
-	a.unsavedEvents = nil
+	a.UnsavedEvents = nil
 	a.entity = entity
 }
 
@@ -104,7 +115,7 @@ func (a *Aggregate[E]) ApplyNext(ctx context.Context) error {
 	return nil
 }
 
-func (a *Aggregate[E]) applyUnappliedEvents(ctx context.Context) error {
+func (a *Aggregate[E]) ApplyUnappliedEvents(ctx context.Context) error {
 	for {
 		err := a.ApplyNext(ctx)
 		if errors.Is(err, ErrNoUnappliedEvents) {
@@ -116,6 +127,29 @@ func (a *Aggregate[E]) applyUnappliedEvents(ctx context.Context) error {
 }
 
 var ErrNoUnappliedEvents = errors.New("no unapplied events")
+
+type unsavedEvent struct {
+	id          typeid.AnyID
+	aggregateID typeid.AnyID
+	timestamp   time.Time
+	data        EventData
+}
+
+func (e *unsavedEvent) ID() typeid.AnyID {
+	return e.id
+}
+
+func (e *unsavedEvent) AggregateID() typeid.AnyID {
+	return e.aggregateID
+}
+
+func (e *unsavedEvent) Timestamp() time.Time {
+	return e.timestamp
+}
+
+func (e *unsavedEvent) Data() EventData {
+	return e.data
+}
 
 type unappliedEvent struct {
 	data EventData
