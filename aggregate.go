@@ -21,7 +21,7 @@ type AggregateEvent[E Entity] interface {
 type Aggregate[E Entity] struct {
 	id                  typeid.AnyID
 	entity              E
-	UnsavedEvents       []AggregateEvent[E]
+	unsavedEvents       []AggregateEvent[E]
 	firstUnappliedEvent *unappliedEvent
 	lastUnappliedEvent  *unappliedEvent
 	version             int64
@@ -51,6 +51,7 @@ func (a *Aggregate[E]) Version() int64 {
 }
 
 // Append appends the given events to the aggregate's unsaved events.
+// Events are not persisted or applied to the entity until the aggregate is saved.
 func (a *Aggregate[E]) Append(events ...EventData) error {
 	slog.Debug("appending events to aggregate", "aggregate_id", a.ID(), "events", len(events))
 	for _, eventData := range events {
@@ -59,7 +60,7 @@ func (a *Aggregate[E]) Append(events ...EventData) error {
 			return fmt.Errorf("generating event ID: %w", err)
 		}
 
-		a.UnsavedEvents = append(a.UnsavedEvents, &unsavedEvent{
+		a.unsavedEvents = append(a.unsavedEvents, &unsavedEvent{
 			id:          eventID,
 			aggregateID: a.ID(),
 			timestamp:   time.Now(),
@@ -89,12 +90,20 @@ func (a *Aggregate[E]) SetID(id typeid.AnyID) {
 }
 
 func (a *Aggregate[E]) SetEntity(entity E) {
-	a.UnsavedEvents = nil
+	a.unsavedEvents = nil
 	a.entity = entity
 }
 
 func (a *Aggregate[E]) SetVersion(version int64) {
 	a.version = version
+}
+
+func (a *Aggregate[E]) ClearUnsavedEvents() {
+	a.unsavedEvents = nil
+}
+
+func (a *Aggregate[E]) UnsavedEvents() []AggregateEvent[E] {
+	return a.unsavedEvents
 }
 
 func (a *Aggregate[E]) ApplyNext(ctx context.Context) error {

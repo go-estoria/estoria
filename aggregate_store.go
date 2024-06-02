@@ -7,6 +7,8 @@ import (
 	"go.jetpack.io/typeid"
 )
 
+// An AggregateStore is a read/write store for aggregates.
+// See package `aggregatestore` for various implementations.
 type AggregateStore[E Entity] interface {
 	NewAggregate() (*Aggregate[E], error)
 	Allow(prototypes ...EventData)

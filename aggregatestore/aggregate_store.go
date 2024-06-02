@@ -162,15 +162,16 @@ func (s *EventSourcedAggregateStore[E]) Hydrate(ctx context.Context, aggregate *
 
 // Save saves an aggregate.
 func (s *EventSourcedAggregateStore[E]) Save(ctx context.Context, aggregate *estoria.Aggregate[E], opts estoria.SaveAggregateOptions) error {
-	s.log.Debug("saving aggregate to event store", "aggregate_id", aggregate.ID(), "events", len(aggregate.UnsavedEvents))
+	unsavedEvents := aggregate.UnsavedEvents()
+	s.log.Debug("saving aggregate to event store", "aggregate_id", aggregate.ID(), "events", len(unsavedEvents))
 
-	if len(aggregate.UnsavedEvents) == 0 {
+	if len(unsavedEvents) == 0 {
 		s.log.Debug("no events to save")
 		return nil
 	}
 
-	toSave := make([]estoria.EventStoreEvent, len(aggregate.UnsavedEvents))
-	for i, unsavedEvent := range aggregate.UnsavedEvents {
+	toSave := make([]estoria.EventStoreEvent, len(unsavedEvents))
+	for i, unsavedEvent := range unsavedEvents {
 		data, err := s.eventDataSerde.Marshal(unsavedEvent.Data())
 		if err != nil {
 			return fmt.Errorf("serializing event data: %w", err)
@@ -189,11 +190,11 @@ func (s *EventSourcedAggregateStore[E]) Save(ctx context.Context, aggregate *est
 		return fmt.Errorf("saving events: %w", err)
 	}
 
-	for _, unsavedEvent := range aggregate.UnsavedEvents {
+	for _, unsavedEvent := range unsavedEvents {
 		aggregate.QueueEventForApplication(unsavedEvent.Data())
 	}
 
-	aggregate.UnsavedEvents = nil
+	aggregate.ClearUnsavedEvents()
 
 	if !opts.SkipApply {
 		if err := aggregate.ApplyUnappliedEvents(ctx); err != nil {
