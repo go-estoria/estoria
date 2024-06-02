@@ -2,13 +2,13 @@ package aggregatestore
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 
 	"github.com/go-estoria/estoria"
+	"github.com/go-estoria/estoria/serde"
 	"go.jetpack.io/typeid"
 )
 
@@ -46,7 +46,7 @@ func New[E estoria.Entity](
 	}
 
 	if store.eventDataSerde == nil {
-		store.eventDataSerde = JSONEventDataSerde{}
+		store.eventDataSerde = serde.JSONEventData{}
 	}
 
 	return store, nil
@@ -197,8 +197,11 @@ func (s *EventSourcedAggregateStore[E]) Save(ctx context.Context, aggregate *est
 	aggregate.ClearUnsavedEvents()
 
 	if !opts.SkipApply {
-		if err := aggregate.ApplyUnappliedEvents(ctx); err != nil {
-			return fmt.Errorf("applying unapplied events: %w", err)
+		for {
+			err := aggregate.ApplyNext(ctx)
+			if err != nil && !errors.Is(err, estoria.ErrNoUnappliedEvents) {
+				return fmt.Errorf("applying event: %w", err)
+			}
 		}
 	}
 
@@ -212,24 +215,4 @@ func WithEventDataSerde[E estoria.Entity](serde estoria.EventDataSerde) Aggregat
 		s.eventDataSerde = serde
 		return nil
 	}
-}
-
-type JSONEntitySnapshotSerde[E estoria.Entity] struct{}
-
-func (JSONEntitySnapshotSerde[E]) MarshalEntitySnapshot(entity E) ([]byte, error) {
-	return json.Marshal(entity)
-}
-
-func (JSONEntitySnapshotSerde[E]) UnmarshalEntitySnapshot(data []byte, dest *E) error {
-	return json.Unmarshal(data, dest)
-}
-
-type JSONEventDataSerde struct{}
-
-func (s JSONEventDataSerde) Unmarshal(b []byte, d estoria.EventData) error {
-	return json.Unmarshal(b, d)
-}
-
-func (s JSONEventDataSerde) Marshal(d estoria.EventData) ([]byte, error) {
-	return json.Marshal(d)
 }

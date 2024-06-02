@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/go-estoria/estoria"
+	"github.com/go-estoria/estoria/serde"
 	"github.com/go-estoria/estoria/snapshotter"
 	"go.jetpack.io/typeid"
 )
@@ -25,8 +26,8 @@ type SnapshotPolicy interface {
 }
 
 type EntitySnapshotSerde[E estoria.Entity] interface {
-	MarshalEntitySnapshot(entity E) ([]byte, error)
-	UnmarshalEntitySnapshot(data []byte, dest *E) error
+	Marshal(entity E) ([]byte, error)
+	Unmarshal(data []byte, dest *E) error
 }
 
 type SnapshottingAggregateStore[E estoria.Entity] struct {
@@ -51,7 +52,7 @@ func NewSnapshottingAggregateStore[E estoria.Entity](
 		reader: reader,
 		writer: writer,
 		policy: policy,
-		serde:  JSONEntitySnapshotSerde[E]{},
+		serde:  serde.JSONEntity[E]{},
 	}
 
 	for _, opt := range opts {
@@ -108,7 +109,7 @@ func (s *SnapshottingAggregateStore[E]) Hydrate(ctx context.Context, aggregate *
 	}
 
 	entity := aggregate.Entity()
-	if err := s.serde.UnmarshalEntitySnapshot(snapshot.Data(), &entity); err != nil {
+	if err := s.serde.Unmarshal(snapshot.Data(), &entity); err != nil {
 		slog.Warn("failed to unmarshal snapshot", "error", err)
 		return s.inner.Hydrate(ctx, aggregate, opts)
 	}
@@ -141,7 +142,7 @@ func (s *SnapshottingAggregateStore[E]) Save(ctx context.Context, aggregate *est
 
 		if s.policy.ShouldSnapshot(aggregate.ID(), aggregate.Version(), now) {
 			slog.Debug("taking snapshot", "aggregate_id", aggregate.ID(), "version", aggregate.Version())
-			data, err := s.serde.MarshalEntitySnapshot(aggregate.Entity())
+			data, err := s.serde.Marshal(aggregate.Entity())
 			if err != nil {
 				slog.Error("failed to marshal snapshot", "error", err)
 				continue

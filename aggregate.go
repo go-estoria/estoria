@@ -19,12 +19,11 @@ type AggregateEvent[E Entity] interface {
 
 // An Aggregate is a reconstructed representation of an event-sourced entity's state.
 type Aggregate[E Entity] struct {
-	id                  typeid.AnyID
-	entity              E
-	unsavedEvents       []AggregateEvent[E]
-	firstUnappliedEvent *unappliedEvent
-	lastUnappliedEvent  *unappliedEvent
-	version             int64
+	id                 typeid.AnyID
+	entity             E
+	unsavedEvents      []AggregateEvent[E]
+	unappliedEventData []EventData
+	version            int64
 }
 
 // An AggregateBindFunc is, in Haskell terms, a function that takes an aggregate
@@ -72,17 +71,7 @@ func (a *Aggregate[E]) Append(events ...EventData) error {
 }
 
 func (a *Aggregate[E]) QueueEventForApplication(event EventData) {
-	if a.firstUnappliedEvent == nil {
-		a.firstUnappliedEvent = &unappliedEvent{
-			data: event,
-		}
-		a.lastUnappliedEvent = a.firstUnappliedEvent
-	} else {
-		a.lastUnappliedEvent.next = &unappliedEvent{
-			data: event,
-		}
-		a.lastUnappliedEvent = a.lastUnappliedEvent.next
-	}
+	a.unappliedEventData = append(a.unappliedEventData, event)
 }
 
 func (a *Aggregate[E]) SetID(id typeid.AnyID) {
@@ -107,32 +96,18 @@ func (a *Aggregate[E]) UnsavedEvents() []AggregateEvent[E] {
 }
 
 func (a *Aggregate[E]) ApplyNext(ctx context.Context) error {
-	if a.firstUnappliedEvent == nil {
+	if len(a.unappliedEventData) == 0 {
 		return ErrNoUnappliedEvents
 	}
 
-	if err := a.entity.ApplyEvent(ctx, a.firstUnappliedEvent.data); err != nil {
+	if err := a.entity.ApplyEvent(ctx, a.unappliedEventData[0]); err != nil {
 		return fmt.Errorf("applying event: %w", err)
 	}
 
-	a.firstUnappliedEvent = a.firstUnappliedEvent.next
-	if a.firstUnappliedEvent == nil {
-		a.lastUnappliedEvent = nil
-	}
-
+	a.unappliedEventData = a.unappliedEventData[1:]
 	a.version++
-	return nil
-}
 
-func (a *Aggregate[E]) ApplyUnappliedEvents(ctx context.Context) error {
-	for {
-		err := a.ApplyNext(ctx)
-		if errors.Is(err, ErrNoUnappliedEvents) {
-			return ErrNoUnappliedEvents
-		} else if err != nil {
-			return fmt.Errorf("applying next event: %w", err)
-		}
-	}
+	return nil
 }
 
 var ErrNoUnappliedEvents = errors.New("no unapplied events")
@@ -158,9 +133,4 @@ func (e *unsavedEvent) Timestamp() time.Time {
 
 func (e *unsavedEvent) Data() EventData {
 	return e.data
-}
-
-type unappliedEvent struct {
-	data EventData
-	next *unappliedEvent
 }

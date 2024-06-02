@@ -14,7 +14,7 @@ See [Getting Started](#getting-started) to start using Estoria.
 - Event-sourced aggregate store
 - Aggregate store wrappers for caching, snapshotting, and lifecycle hooks
 
-## V1 Roadmap
+## V1 Roadmap (subject to change)
 
 - [ ] Features
   - [ ] Event Store Implementations
@@ -28,6 +28,8 @@ See [Getting Started](#getting-started) to start using Estoria.
   - [ ] Aggregate Store Wrappers
     - [ ] Caching
     - [ ] Snapshotting
+      - [ ] At save-time
+      - [ ] Separate process
     - [ ] Lifecycle Hooks
   - [ ] Commandable Aggregates
     - [ ] Command Handlers
@@ -61,7 +63,7 @@ See the [example project in estoria-contrib](https://github.com/go-estoria/estor
 
 ## Event Store Providers
 
-See [estoria-contrib](https://github.com/go-estoria/estoria.contrib) for officially-supported event store implementations.
+See [estoria-contrib](https://github.com/go-estoria/estoria-contrib) for officially-supported event store implementations.
 
 ## License
 
