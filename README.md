@@ -6,14 +6,6 @@ Estoria is an event sourcing toolkit for Go.
 
 See [Getting Started](#getting-started) to start using Estoria.
 
-## Features
-
-- Unified event store interface supporting multiple backends
-- Event store wrappers for caching and lifecycle hooks
-- Transactional outbox with at-least-once processing
-- Event-sourced aggregate store
-- Aggregate store wrappers for caching, snapshotting, and lifecycle hooks
-
 ## V1 Roadmap (subject to change)
 
 - [ ] Features

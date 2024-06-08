@@ -63,7 +63,7 @@ type EventStreamWriter interface {
 
 // AppendStreamOptions are options for appending events to a stream.
 type AppendStreamOptions struct {
-	// ExpectedVersion specifies the expected latest version of the stream
+	// ExpectVersion specifies the expected latest version of the stream
 	// when appending events.
 	//
 	// Default: 0 (no expectation)
