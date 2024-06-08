@@ -54,11 +54,11 @@ const (
 	Reverse
 )
 
-// An EventStreamWriter can append events to a stream.
+// An EventStreamWriter appends events to an event stream.
 type EventStreamWriter interface {
-	// AppendStream appends events to a stream.
+	// AppendStream appends events to an event stream.
 	// The expected version of the stream can be specified in the options.
-	AppendStream(ctx context.Context, id typeid.AnyID, opts AppendStreamOptions, events []EventStoreEvent) error
+	AppendStream(ctx context.Context, streamID typeid.AnyID, opts AppendStreamOptions, events []EventStoreEvent) error
 }
 
 // AppendStreamOptions are options for appending events to a stream.
