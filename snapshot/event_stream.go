@@ -26,7 +26,7 @@ func NewEventStreamReader(eventReader estoria.EventStreamReader) *EventStreamRea
 func (s *EventStreamReader) ReadSnapshot(ctx context.Context, aggregateID typeid.TypeID, opts ReadOptions) (estoria.Snapshot, error) {
 	slog.Debug("finding snapshot", "aggregate_id", aggregateID)
 
-	snapshotStreamID, err := typeid.From(aggregateID.Prefix()+"snapshot", aggregateID.Suffix())
+	snapshotStreamID, err := typeid.From(aggregateID.TypeName()+"snapshot", aggregateID.Value())
 	if err != nil {
 		return nil, fmt.Errorf("deriving snapshot ID: %w", err)
 	}
@@ -78,9 +78,9 @@ func NewEventStreamWriter(eventWriter estoria.EventStreamWriter) *EventStreamWri
 func (s *EventStreamWriter) WriteSnapshot(ctx context.Context, aggregateID typeid.TypeID, aggregateVersion int64, data []byte) error {
 	slog.Debug("writing snapshot", "aggregate_id", aggregateID, "aggregate_version", aggregateVersion, "data_length", len(data))
 
-	snapshotStreamPrefix := aggregateID.Prefix() + "snapshot"
+	snapshotStreamPrefix := aggregateID.TypeName() + "snapshot"
 
-	snapshotStreamID, err := typeid.From(snapshotStreamPrefix, aggregateID.Suffix())
+	snapshotStreamID, err := typeid.From(snapshotStreamPrefix, aggregateID.Value())
 	if err != nil {
 		return fmt.Errorf("deriving snapshot ID: %w", err)
 	}

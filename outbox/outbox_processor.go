@@ -65,9 +65,9 @@ func (p *Processor) Stop() {
 }
 
 func (p *Processor) Handle(ctx context.Context, entry OutboxEntry) error {
-	handlers, ok := p.handlers[entry.EventID().Prefix()]
+	handlers, ok := p.handlers[entry.EventID().TypeName()]
 	if !ok {
-		slog.Debug("no outbox handlers for event type", "event_type", entry.EventID().Prefix())
+		slog.Debug("no outbox handlers for event type", "event_type", entry.EventID().TypeName())
 		return nil
 	}
 

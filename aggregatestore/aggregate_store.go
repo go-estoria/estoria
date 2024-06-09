@@ -140,9 +140,9 @@ func (s *EventSourcedAggregateStore[E]) Hydrate(ctx context.Context, aggregate *
 			return fmt.Errorf("reading event: %w", err)
 		}
 
-		newEventData, ok := s.eventDataFactories[evt.ID().Prefix()]
+		newEventData, ok := s.eventDataFactories[evt.ID().TypeName()]
 		if !ok {
-			return fmt.Errorf("no event data factory for event type %s", evt.ID().Prefix())
+			return fmt.Errorf("no event data factory for event type %s", evt.ID().TypeName())
 		}
 
 		eventData := newEventData()

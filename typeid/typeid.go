@@ -10,25 +10,25 @@ import (
 const defaultSep = "_"
 
 type TypeID interface {
-	Prefix() string
-	Suffix() string
+	TypeName() string
+	Value() string
 	String() string
 }
 
 type typeID struct {
-	prefix string
-	suffix string
+	typ string
+	val string
 }
 
-func From(prefix, suffix string) (TypeID, error) {
+func From(typ, val string) (TypeID, error) {
 	switch {
-	case prefix == "":
-		return typeID{}, errors.New("prefix is required")
-	case suffix == "":
-		return typeID{}, errors.New("suffix is required")
+	case typ == "":
+		return typeID{}, errors.New("typ is required")
+	case val == "":
+		return typeID{}, errors.New("val is required")
 	}
 
-	return typeID{prefix: prefix, suffix: suffix}, nil
+	return typeID{typ: typ, val: val}, nil
 }
 
 func Must(id TypeID, err error) TypeID {
@@ -40,19 +40,19 @@ func Must(id TypeID, err error) TypeID {
 }
 
 func (t typeID) String() string {
-	return t.prefix + defaultSep + t.suffix
+	return t.typ + defaultSep + t.val
 }
 
-func (t typeID) Prefix() string {
-	return t.prefix
+func (t typeID) TypeName() string {
+	return t.typ
 }
 
-func (t typeID) Suffix() string {
-	return t.suffix
+func (t typeID) Value() string {
+	return t.val
 }
 
-func New(prefix string) (TypeID, error) {
-	return defaultParser.New(prefix)
+func New(typ string) (TypeID, error) {
+	return defaultParser.New(typ)
 }
 
 func ParseString(s string) (TypeID, error) {
@@ -60,7 +60,7 @@ func ParseString(s string) (TypeID, error) {
 }
 
 type Parser interface {
-	New(prefix string) (TypeID, error)
+	New(typ string) (TypeID, error)
 	ParseString(s string) (TypeID, error)
 }
 
@@ -68,13 +68,13 @@ type DefaultParser struct{}
 
 var defaultParser DefaultParser
 
-func (p DefaultParser) New(prefix string) (TypeID, error) {
+func (p DefaultParser) New(typ string) (TypeID, error) {
 	id, err := uuid.NewV4()
 	if err != nil {
 		return typeID{}, err
 	}
 
-	return From(prefix, id.String())
+	return From(typ, id.String())
 }
 
 func (p DefaultParser) ParseString(s string) (TypeID, error) {
