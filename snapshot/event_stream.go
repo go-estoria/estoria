@@ -1,4 +1,4 @@
-package snapshotter
+package snapshot
 
 import (
 	"context"
@@ -13,17 +13,17 @@ import (
 	"go.jetpack.io/typeid"
 )
 
-type EventStreamSnapshotReader struct {
+type EventStreamReader struct {
 	eventReader estoria.EventStreamReader
 }
 
-func NewEventStreamSnapshotReader(eventReader estoria.EventStreamReader) *EventStreamSnapshotReader {
-	return &EventStreamSnapshotReader{
+func NewEventStreamReader(eventReader estoria.EventStreamReader) *EventStreamReader {
+	return &EventStreamReader{
 		eventReader: eventReader,
 	}
 }
 
-func (s *EventStreamSnapshotReader) ReadSnapshot(ctx context.Context, aggregateID typeid.AnyID, opts ReadSnapshotOptions) (estoria.Snapshot, error) {
+func (s *EventStreamReader) ReadSnapshot(ctx context.Context, aggregateID typeid.AnyID, opts ReadOptions) (estoria.Snapshot, error) {
 	slog.Debug("finding snapshot", "aggregate_id", aggregateID)
 
 	snapshotStreamID, err := typeid.From(aggregateID.Prefix()+"snapshot", aggregateID.Suffix())
@@ -61,21 +61,21 @@ func (s *EventStreamSnapshotReader) ReadSnapshot(ctx context.Context, aggregateI
 	return &snapshot, nil
 }
 
-type ReadSnapshotOptions struct {
+type ReadOptions struct {
 	MaxVersion int64
 }
 
-type EventStreamSnapshotWriter struct {
+type EventStreamWriter struct {
 	eventWriter estoria.EventStreamWriter
 }
 
-func NewEventStreamSnapshotWriter(eventWriter estoria.EventStreamWriter) *EventStreamSnapshotWriter {
-	return &EventStreamSnapshotWriter{
+func NewEventStreamWriter(eventWriter estoria.EventStreamWriter) *EventStreamWriter {
+	return &EventStreamWriter{
 		eventWriter: eventWriter,
 	}
 }
 
-func (s *EventStreamSnapshotWriter) WriteSnapshot(ctx context.Context, aggregateID typeid.AnyID, aggregateVersion int64, data []byte) error {
+func (s *EventStreamWriter) WriteSnapshot(ctx context.Context, aggregateID typeid.AnyID, aggregateVersion int64, data []byte) error {
 	slog.Debug("writing snapshot", "aggregate_id", aggregateID, "aggregate_version", aggregateVersion, "data_length", len(data))
 
 	snapshotStreamPrefix := aggregateID.Prefix() + "snapshot"

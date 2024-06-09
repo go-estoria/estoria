@@ -9,12 +9,12 @@ import (
 
 	"github.com/go-estoria/estoria"
 	"github.com/go-estoria/estoria/serde"
-	"github.com/go-estoria/estoria/snapshotter"
+	"github.com/go-estoria/estoria/snapshot"
 	"go.jetpack.io/typeid"
 )
 
 type SnapshotReader interface {
-	ReadSnapshot(ctx context.Context, aggregateID typeid.AnyID, opts snapshotter.ReadSnapshotOptions) (estoria.Snapshot, error)
+	ReadSnapshot(ctx context.Context, aggregateID typeid.AnyID, opts snapshot.ReadOptions) (estoria.Snapshot, error)
 }
 
 type SnapshotWriter interface {
@@ -97,27 +97,27 @@ func (s *SnapshottingAggregateStore[E]) Hydrate(ctx context.Context, aggregate *
 	log := slog.Default().With("aggregate_id", aggregate.ID())
 	log.Debug("hydrating aggregate from snapshot", "from_version", aggregate.Version(), "to_version", opts.ToVersion)
 
-	snapshot, err := s.reader.ReadSnapshot(ctx, aggregate.ID(), snapshotter.ReadSnapshotOptions{
+	snap, err := s.reader.ReadSnapshot(ctx, aggregate.ID(), snapshot.ReadOptions{
 		MaxVersion: opts.ToVersion,
 	})
 	if err != nil {
 		slog.Warn("failed to read snapshot", "error", err)
 		return s.inner.Hydrate(ctx, aggregate, opts)
-	} else if snapshot == nil {
+	} else if snap == nil {
 		slog.Debug("no snapshot found")
 		return s.inner.Hydrate(ctx, aggregate, opts)
 	}
 
 	entity := aggregate.Entity()
-	if err := s.serde.Unmarshal(snapshot.Data(), &entity); err != nil {
+	if err := s.serde.Unmarshal(snap.Data(), &entity); err != nil {
 		slog.Warn("failed to unmarshal snapshot", "error", err)
 		return s.inner.Hydrate(ctx, aggregate, opts)
 	}
 
-	log.Debug("loaded snapshot", "version", snapshot.AggregateVersion())
+	log.Debug("loaded snapshot", "version", snap.AggregateVersion())
 
 	aggregate.SetEntity(entity)
-	aggregate.SetVersion(snapshot.AggregateVersion())
+	aggregate.SetVersion(snap.AggregateVersion())
 
 	return s.inner.Hydrate(ctx, aggregate, opts)
 }
