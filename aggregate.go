@@ -50,7 +50,7 @@ func (a *Aggregate[E]) Version() int64 {
 func (a *Aggregate[E]) Append(events ...EntityEventData) error {
 	slog.Debug("appending events to aggregate", "aggregate_id", a.ID(), "events", len(events))
 	for _, eventData := range events {
-		eventID, err := typeid.NewWithType(eventData.EventType())
+		eventID, err := typeid.New(eventData.EventType())
 		if err != nil {
 			return fmt.Errorf("generating event ID: %w", err)
 		}

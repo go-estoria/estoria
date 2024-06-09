@@ -51,24 +51,24 @@ func (t typeID) Suffix() string {
 	return t.suffix
 }
 
-func NewWithType(prefix string) (TypeID, error) {
-	return defaultParser.NewWithType(prefix)
+func New(prefix string) (TypeID, error) {
+	return defaultParser.New(prefix)
 }
 
-func FromString(s string) (TypeID, error) {
-	return defaultParser.FromString(s)
+func ParseString(s string) (TypeID, error) {
+	return defaultParser.ParseString(s)
 }
 
 type Parser interface {
-	NewWithType(prefix string) (TypeID, error)
-	FromString(s string) (TypeID, error)
+	New(prefix string) (TypeID, error)
+	ParseString(s string) (TypeID, error)
 }
 
 type DefaultParser struct{}
 
 var defaultParser DefaultParser
 
-func (p DefaultParser) NewWithType(prefix string) (TypeID, error) {
+func (p DefaultParser) New(prefix string) (TypeID, error) {
 	id, err := uuid.NewV4()
 	if err != nil {
 		return typeID{}, err
@@ -77,7 +77,7 @@ func (p DefaultParser) NewWithType(prefix string) (TypeID, error) {
 	return From(prefix, id.String())
 }
 
-func (p DefaultParser) FromString(s string) (TypeID, error) {
+func (p DefaultParser) ParseString(s string) (TypeID, error) {
 	return p.parseWithSep(s, defaultSep)
 }
 

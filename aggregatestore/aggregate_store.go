@@ -61,7 +61,7 @@ func (s *EventSourcedAggregateStore[E]) Allow(prototypes ...estoria.EntityEventD
 
 func (s *EventSourcedAggregateStore[E]) NewAggregate() (*estoria.Aggregate[E], error) {
 	entity := s.NewEntity()
-	id, err := typeid.NewWithType(entity.EntityType())
+	id, err := typeid.New(entity.EntityType())
 	if err != nil {
 		return nil, fmt.Errorf("generating aggregate ID: %w", err)
 	}

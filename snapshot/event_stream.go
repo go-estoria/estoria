@@ -85,7 +85,7 @@ func (s *EventStreamWriter) WriteSnapshot(ctx context.Context, aggregateID typei
 		return fmt.Errorf("deriving snapshot ID: %w", err)
 	}
 
-	eventID, err := typeid.NewWithType(snapshotStreamPrefix)
+	eventID, err := typeid.New(snapshotStreamPrefix)
 	if err != nil {
 		return fmt.Errorf("generating snapshot event ID: %w", err)
 	}
