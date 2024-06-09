@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"github.com/go-estoria/estoria"
-	"go.jetpack.io/typeid"
+	"github.com/go-estoria/estoria/typeid"
 )
 
 type Outbox interface {
@@ -20,8 +20,8 @@ type Iterator interface {
 
 type OutboxEntry interface {
 	Timestamp() time.Time
-	StreamID() typeid.AnyID
-	EventID() typeid.AnyID
+	StreamID() typeid.TypeID
+	EventID() typeid.TypeID
 	EventData() []byte
 }
 

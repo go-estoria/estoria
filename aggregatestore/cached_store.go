@@ -5,11 +5,11 @@ import (
 	"log/slog"
 
 	"github.com/go-estoria/estoria"
-	"go.jetpack.io/typeid"
+	"github.com/go-estoria/estoria/typeid"
 )
 
 type AggregateCache[E estoria.Entity] interface {
-	GetAggregate(ctx context.Context, aggregateID typeid.AnyID) (*estoria.Aggregate[E], error)
+	GetAggregate(ctx context.Context, aggregateID typeid.TypeID) (*estoria.Aggregate[E], error)
 	PutAggregate(ctx context.Context, aggregate *estoria.Aggregate[E]) error
 }
 
@@ -38,7 +38,7 @@ func (s *CachedAggregateStore[E]) NewAggregate() (*estoria.Aggregate[E], error) 
 	return s.store.NewAggregate()
 }
 
-func (s *CachedAggregateStore[E]) Load(ctx context.Context, id typeid.AnyID, opts estoria.LoadAggregateOptions) (*estoria.Aggregate[E], error) {
+func (s *CachedAggregateStore[E]) Load(ctx context.Context, id typeid.TypeID, opts estoria.LoadAggregateOptions) (*estoria.Aggregate[E], error) {
 	aggregate, err := s.cache.GetAggregate(ctx, id)
 	if err != nil {
 		slog.Warn("failed to read cache", "error", err)

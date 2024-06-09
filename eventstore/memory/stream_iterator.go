@@ -5,11 +5,11 @@ import (
 	"io"
 
 	"github.com/go-estoria/estoria"
-	"go.jetpack.io/typeid"
+	"github.com/go-estoria/estoria/typeid"
 )
 
 type StreamIterator struct {
-	streamID  typeid.AnyID
+	streamID  typeid.TypeID
 	events    []estoria.EventStoreEvent
 	cursor    int64
 	direction estoria.ReadStreamDirection

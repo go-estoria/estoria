@@ -7,19 +7,19 @@ import (
 	"log/slog"
 	"time"
 
-	"go.jetpack.io/typeid"
+	"github.com/go-estoria/estoria/typeid"
 )
 
 type AggregateEvent[E Entity] interface {
-	ID() typeid.AnyID
-	AggregateID() typeid.AnyID
+	ID() typeid.TypeID
+	AggregateID() typeid.TypeID
 	Timestamp() time.Time
 	Data() EntityEventData
 }
 
 // An Aggregate is a reconstructed representation of an event-sourced entity's state.
 type Aggregate[E Entity] struct {
-	id                 typeid.AnyID
+	id                 typeid.TypeID
 	entity             E
 	unsavedEvents      []AggregateEvent[E]
 	unappliedEventData []EntityEventData
@@ -28,7 +28,7 @@ type Aggregate[E Entity] struct {
 
 // ID returns the aggregate's ID.
 // The ID is the ID of the entity that the aggregate represents.
-func (a *Aggregate[E]) ID() typeid.AnyID {
+func (a *Aggregate[E]) ID() typeid.TypeID {
 	return a.id
 }
 
@@ -70,7 +70,7 @@ func (a *Aggregate[E]) QueueEventForApplication(event EntityEventData) {
 	a.unappliedEventData = append(a.unappliedEventData, event)
 }
 
-func (a *Aggregate[E]) SetID(id typeid.AnyID) {
+func (a *Aggregate[E]) SetID(id typeid.TypeID) {
 	a.id = id
 }
 
@@ -109,17 +109,17 @@ func (a *Aggregate[E]) ApplyNext(ctx context.Context) error {
 var ErrNoUnappliedEvents = errors.New("no unapplied events")
 
 type unsavedEvent struct {
-	id          typeid.AnyID
-	aggregateID typeid.AnyID
+	id          typeid.TypeID
+	aggregateID typeid.TypeID
 	timestamp   time.Time
 	data        EntityEventData
 }
 
-func (e *unsavedEvent) ID() typeid.AnyID {
+func (e *unsavedEvent) ID() typeid.TypeID {
 	return e.id
 }
 
-func (e *unsavedEvent) AggregateID() typeid.AnyID {
+func (e *unsavedEvent) AggregateID() typeid.TypeID {
 	return e.aggregateID
 }
 

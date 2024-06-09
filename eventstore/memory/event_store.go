@@ -7,7 +7,7 @@ import (
 	"sync"
 
 	"github.com/go-estoria/estoria"
-	"go.jetpack.io/typeid"
+	"github.com/go-estoria/estoria/typeid"
 )
 
 type EventSerde interface {
@@ -27,7 +27,7 @@ func NewEventStore() *EventStore {
 	}
 }
 
-func (s *EventStore) AppendStream(ctx context.Context, streamID typeid.AnyID, opts estoria.AppendStreamOptions, events []estoria.EventStoreEvent) error {
+func (s *EventStore) AppendStream(ctx context.Context, streamID typeid.TypeID, opts estoria.AppendStreamOptions, events []estoria.EventStoreEvent) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -47,7 +47,7 @@ func (s *EventStore) AppendStream(ctx context.Context, streamID typeid.AnyID, op
 	return nil
 }
 
-func (s *EventStore) ReadStream(ctx context.Context, streamID typeid.AnyID, opts estoria.ReadStreamOptions) (estoria.EventStreamIterator, error) {
+func (s *EventStore) ReadStream(ctx context.Context, streamID typeid.TypeID, opts estoria.ReadStreamOptions) (estoria.EventStreamIterator, error) {
 	stream, ok := s.events[streamID.String()]
 	if !ok || len(stream) == 0 {
 		return nil, estoria.ErrStreamNotFound
@@ -82,7 +82,7 @@ func (s *EventStore) ReadStream(ctx context.Context, streamID typeid.AnyID, opts
 
 // ErrEventExists is returned when attempting to write an event that already exists.
 type ErrEventExists struct {
-	EventID typeid.AnyID
+	EventID typeid.TypeID
 }
 
 // Error returns the error message.

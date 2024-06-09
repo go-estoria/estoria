@@ -10,19 +10,19 @@ import (
 	"github.com/go-estoria/estoria"
 	"github.com/go-estoria/estoria/serde"
 	"github.com/go-estoria/estoria/snapshot"
-	"go.jetpack.io/typeid"
+	"github.com/go-estoria/estoria/typeid"
 )
 
 type SnapshotReader interface {
-	ReadSnapshot(ctx context.Context, aggregateID typeid.AnyID, opts snapshot.ReadOptions) (estoria.Snapshot, error)
+	ReadSnapshot(ctx context.Context, aggregateID typeid.TypeID, opts snapshot.ReadOptions) (estoria.Snapshot, error)
 }
 
 type SnapshotWriter interface {
-	WriteSnapshot(ctx context.Context, aggregateID typeid.AnyID, aggregateVersion int64, entityData []byte) error
+	WriteSnapshot(ctx context.Context, aggregateID typeid.TypeID, aggregateVersion int64, entityData []byte) error
 }
 
 type SnapshotPolicy interface {
-	ShouldSnapshot(aggregateID typeid.AnyID, aggregateVersion int64, timestamp time.Time) bool
+	ShouldSnapshot(aggregateID typeid.TypeID, aggregateVersion int64, timestamp time.Time) bool
 }
 
 type EntitySnapshotSerde[E estoria.Entity] interface {
@@ -73,7 +73,7 @@ func (s *SnapshottingAggregateStore[E]) NewAggregate() (*estoria.Aggregate[E], e
 }
 
 // Load loads an aggregate by its ID.
-func (s *SnapshottingAggregateStore[E]) Load(ctx context.Context, aggregateID typeid.AnyID, opts estoria.LoadAggregateOptions) (*estoria.Aggregate[E], error) {
+func (s *SnapshottingAggregateStore[E]) Load(ctx context.Context, aggregateID typeid.TypeID, opts estoria.LoadAggregateOptions) (*estoria.Aggregate[E], error) {
 	aggregate, err := s.NewAggregate()
 	if err != nil {
 		slog.Warn("failed to create new aggregate", "error", err)

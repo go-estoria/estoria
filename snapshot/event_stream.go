@@ -10,7 +10,7 @@ import (
 	"time"
 
 	"github.com/go-estoria/estoria"
-	"go.jetpack.io/typeid"
+	"github.com/go-estoria/estoria/typeid"
 )
 
 type EventStreamReader struct {
@@ -23,7 +23,7 @@ func NewEventStreamReader(eventReader estoria.EventStreamReader) *EventStreamRea
 	}
 }
 
-func (s *EventStreamReader) ReadSnapshot(ctx context.Context, aggregateID typeid.AnyID, opts ReadOptions) (estoria.Snapshot, error) {
+func (s *EventStreamReader) ReadSnapshot(ctx context.Context, aggregateID typeid.TypeID, opts ReadOptions) (estoria.Snapshot, error) {
 	slog.Debug("finding snapshot", "aggregate_id", aggregateID)
 
 	snapshotStreamID, err := typeid.From(aggregateID.Prefix()+"snapshot", aggregateID.Suffix())
@@ -75,7 +75,7 @@ func NewEventStreamWriter(eventWriter estoria.EventStreamWriter) *EventStreamWri
 	}
 }
 
-func (s *EventStreamWriter) WriteSnapshot(ctx context.Context, aggregateID typeid.AnyID, aggregateVersion int64, data []byte) error {
+func (s *EventStreamWriter) WriteSnapshot(ctx context.Context, aggregateID typeid.TypeID, aggregateVersion int64, data []byte) error {
 	slog.Debug("writing snapshot", "aggregate_id", aggregateID, "aggregate_version", aggregateVersion, "data_length", len(data))
 
 	snapshotStreamPrefix := aggregateID.Prefix() + "snapshot"
@@ -117,12 +117,12 @@ func (s *EventStreamWriter) WriteSnapshot(ctx context.Context, aggregateID typei
 }
 
 type snapshot struct {
-	SnapshotAggregateID      typeid.AnyID `json:"aggregate_id"`
-	SnapshotAggregateVersion int64        `json:"aggregate_version"`
-	SnapshotData             []byte       `json:"data"`
+	SnapshotAggregateID      typeid.TypeID `json:"aggregate_id"`
+	SnapshotAggregateVersion int64         `json:"aggregate_version"`
+	SnapshotData             []byte        `json:"data"`
 }
 
-func (s *snapshot) AggregateID() typeid.AnyID {
+func (s *snapshot) AggregateID() typeid.TypeID {
 	return s.SnapshotAggregateID
 }
 
@@ -135,18 +135,18 @@ func (s *snapshot) Data() []byte {
 }
 
 type snapshotEvent struct {
-	EventID            typeid.AnyID
-	EventStreamID      typeid.AnyID
+	EventID            typeid.TypeID
+	EventStreamID      typeid.TypeID
 	EventStreamVersion int64
 	EventTimestamp     time.Time
 	EventData          json.RawMessage
 }
 
-func (e *snapshotEvent) ID() typeid.AnyID {
+func (e *snapshotEvent) ID() typeid.TypeID {
 	return e.EventID
 }
 
-func (e *snapshotEvent) StreamID() typeid.AnyID {
+func (e *snapshotEvent) StreamID() typeid.TypeID {
 	return e.EventStreamID
 }
 

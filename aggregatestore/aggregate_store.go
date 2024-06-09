@@ -9,7 +9,7 @@ import (
 
 	"github.com/go-estoria/estoria"
 	"github.com/go-estoria/estoria/serde"
-	"go.jetpack.io/typeid"
+	"github.com/go-estoria/estoria/typeid"
 )
 
 // An EventSourcedAggregateStore loads and saves aggregates using an EventStore.
@@ -74,7 +74,7 @@ func (s *EventSourcedAggregateStore[E]) NewAggregate() (*estoria.Aggregate[E], e
 }
 
 // Load loads an aggregate by its ID.
-func (s *EventSourcedAggregateStore[E]) Load(ctx context.Context, id typeid.AnyID, opts estoria.LoadAggregateOptions) (*estoria.Aggregate[E], error) {
+func (s *EventSourcedAggregateStore[E]) Load(ctx context.Context, id typeid.TypeID, opts estoria.LoadAggregateOptions) (*estoria.Aggregate[E], error) {
 	s.log.Debug("loading aggregate from event store", "aggregate_id", id)
 
 	aggregate, err := s.NewAggregate()

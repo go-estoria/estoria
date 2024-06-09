@@ -3,11 +3,11 @@ package estoria
 import (
 	"time"
 
-	"go.jetpack.io/typeid"
+	"github.com/go-estoria/estoria/typeid"
 )
 
 type Snapshot interface {
-	AggregateID() typeid.AnyID
+	AggregateID() typeid.TypeID
 	AggregateVersion() int64
 	Data() []byte
 }
@@ -16,6 +16,6 @@ type EventCountSnapshotPolicy struct {
 	N int64
 }
 
-func (p EventCountSnapshotPolicy) ShouldSnapshot(_ typeid.AnyID, aggregateVersion int64, _ time.Time) bool {
+func (p EventCountSnapshotPolicy) ShouldSnapshot(_ typeid.TypeID, aggregateVersion int64, _ time.Time) bool {
 	return aggregateVersion%p.N == 0
 }

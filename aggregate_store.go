@@ -4,7 +4,7 @@ import (
 	"context"
 	"errors"
 
-	"go.jetpack.io/typeid"
+	"github.com/go-estoria/estoria/typeid"
 )
 
 // An AggregateStore is a read/write store for aggregates.
@@ -12,7 +12,7 @@ import (
 type AggregateStore[E Entity] interface {
 	NewAggregate() (*Aggregate[E], error)
 	Allow(prototypes ...EntityEventData)
-	Load(ctx context.Context, id typeid.AnyID, opts LoadAggregateOptions) (*Aggregate[E], error)
+	Load(ctx context.Context, id typeid.TypeID, opts LoadAggregateOptions) (*Aggregate[E], error)
 	Hydrate(ctx context.Context, aggregate *Aggregate[E], opts HydrateAggregateOptions) error
 	Save(ctx context.Context, aggregate *Aggregate[E], opts SaveAggregateOptions) error
 }

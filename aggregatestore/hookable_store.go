@@ -5,7 +5,7 @@ import (
 	"fmt"
 
 	"github.com/go-estoria/estoria"
-	"go.jetpack.io/typeid"
+	"github.com/go-estoria/estoria/typeid"
 )
 
 type HookStage int
@@ -21,7 +21,7 @@ const (
 
 type PrecreateHook func() error
 
-type PreloadHook func(ctx context.Context, id typeid.AnyID) error
+type PreloadHook func(ctx context.Context, id typeid.TypeID) error
 
 type Hook[E estoria.Entity] func(ctx context.Context, aggregate *estoria.Aggregate[E]) error
 
@@ -82,7 +82,7 @@ func (s *HookableAggregateStore[E]) NewAggregate() (*estoria.Aggregate[E], error
 	return aggregate, nil
 }
 
-func (s *HookableAggregateStore[E]) Load(ctx context.Context, id typeid.AnyID, opts estoria.LoadAggregateOptions) (*estoria.Aggregate[E], error) {
+func (s *HookableAggregateStore[E]) Load(ctx context.Context, id typeid.TypeID, opts estoria.LoadAggregateOptions) (*estoria.Aggregate[E], error) {
 	for _, hook := range s.preloadHooks {
 		if err := hook(ctx, id); err != nil {
 			return nil, fmt.Errorf("preload hook failed: %w", err)
