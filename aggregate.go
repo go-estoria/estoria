@@ -14,7 +14,7 @@ type AggregateEvent[E Entity] interface {
 	ID() typeid.AnyID
 	AggregateID() typeid.AnyID
 	Timestamp() time.Time
-	Data() EventData
+	Data() EntityEventData
 }
 
 // An Aggregate is a reconstructed representation of an event-sourced entity's state.
@@ -22,13 +22,9 @@ type Aggregate[E Entity] struct {
 	id                 typeid.AnyID
 	entity             E
 	unsavedEvents      []AggregateEvent[E]
-	unappliedEventData []EventData
+	unappliedEventData []EntityEventData
 	version            int64
 }
-
-// An AggregateBindFunc is, in Haskell terms, a function that takes an aggregate
-// and a function that modifies the entity and returns a new aggregate.
-type AggregateBindFunc[E Entity] func(Aggregate[E], func(E) (E, error)) (Aggregate[E], error)
 
 // ID returns the aggregate's ID.
 // The ID is the ID of the entity that the aggregate represents.
@@ -51,7 +47,7 @@ func (a *Aggregate[E]) Version() int64 {
 
 // Append appends the given events to the aggregate's unsaved events.
 // Events are not persisted or applied to the entity until the aggregate is saved.
-func (a *Aggregate[E]) Append(events ...EventData) error {
+func (a *Aggregate[E]) Append(events ...EntityEventData) error {
 	slog.Debug("appending events to aggregate", "aggregate_id", a.ID(), "events", len(events))
 	for _, eventData := range events {
 		eventID, err := typeid.WithPrefix(eventData.EventType())
@@ -70,7 +66,7 @@ func (a *Aggregate[E]) Append(events ...EventData) error {
 	return nil
 }
 
-func (a *Aggregate[E]) QueueEventForApplication(event EventData) {
+func (a *Aggregate[E]) QueueEventForApplication(event EntityEventData) {
 	a.unappliedEventData = append(a.unappliedEventData, event)
 }
 
@@ -116,7 +112,7 @@ type unsavedEvent struct {
 	id          typeid.AnyID
 	aggregateID typeid.AnyID
 	timestamp   time.Time
-	data        EventData
+	data        EntityEventData
 }
 
 func (e *unsavedEvent) ID() typeid.AnyID {
@@ -131,6 +127,6 @@ func (e *unsavedEvent) Timestamp() time.Time {
 	return e.timestamp
 }
 
-func (e *unsavedEvent) Data() EventData {
+func (e *unsavedEvent) Data() EntityEventData {
 	return e.data
 }

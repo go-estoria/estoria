@@ -15,8 +15,8 @@ type EventStoreEvent interface {
 	Data() []byte
 }
 
-// EventData is the data of an event.
-type EventData interface {
+// EntityEventData is the data of an event.
+type EntityEventData interface {
 	EventType() string
-	New() EventData
+	New() EntityEventData
 }

@@ -18,7 +18,7 @@ type EventSourcedAggregateStore[E estoria.Entity] struct {
 	EventWriter estoria.EventStreamWriter
 
 	NewEntity          estoria.EntityFactory[E]
-	eventDataFactories map[string]func() estoria.EventData
+	eventDataFactories map[string]func() estoria.EntityEventData
 	eventDataSerde     estoria.EventDataSerde
 
 	log *slog.Logger
@@ -34,7 +34,7 @@ func New[E estoria.Entity](
 		EventReader:        eventReader,
 		EventWriter:        eventWriter,
 		NewEntity:          entityFactory,
-		eventDataFactories: make(map[string]func() estoria.EventData),
+		eventDataFactories: make(map[string]func() estoria.EntityEventData),
 		eventDataSerde:     nil,
 		log:                slog.Default().WithGroup("aggregatestore"),
 	}
@@ -53,7 +53,7 @@ func New[E estoria.Entity](
 }
 
 // Allow allows an event type to be used with the aggregate store.
-func (s *EventSourcedAggregateStore[E]) Allow(prototypes ...estoria.EventData) {
+func (s *EventSourcedAggregateStore[E]) Allow(prototypes ...estoria.EntityEventData) {
 	for _, prototype := range prototypes {
 		s.eventDataFactories[prototype.EventType()] = prototype.New
 	}

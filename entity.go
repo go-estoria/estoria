@@ -6,7 +6,7 @@ import (
 
 // An Entity is anything whose state can be constructed by applying a series of events.
 type Entity interface {
-	ApplyEvent(ctx context.Context, eventData EventData) error
+	ApplyEvent(ctx context.Context, eventData EntityEventData) error
 	EntityType() string
 }
 

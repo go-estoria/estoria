@@ -11,7 +11,7 @@ import (
 // See package `aggregatestore` for various implementations.
 type AggregateStore[E Entity] interface {
 	NewAggregate() (*Aggregate[E], error)
-	Allow(prototypes ...EventData)
+	Allow(prototypes ...EntityEventData)
 	Load(ctx context.Context, id typeid.AnyID, opts LoadAggregateOptions) (*Aggregate[E], error)
 	Hydrate(ctx context.Context, aggregate *Aggregate[E], opts HydrateAggregateOptions) error
 	Save(ctx context.Context, aggregate *Aggregate[E], opts SaveAggregateOptions) error
@@ -54,8 +54,8 @@ type SaveAggregateOptions struct {
 }
 
 type EventDataSerde interface {
-	Unmarshal(b []byte, d EventData) error
-	Marshal(d EventData) ([]byte, error)
+	Unmarshal(b []byte, d EntityEventData) error
+	Marshal(d EntityEventData) ([]byte, error)
 }
 
 // ErrStreamNotFound is returned when a stream is not found.

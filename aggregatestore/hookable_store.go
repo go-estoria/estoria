@@ -56,7 +56,7 @@ func (s *HookableAggregateStore[E]) AddHook(stage HookStage, hook Hook[E]) {
 }
 
 // Allow allows an event type to be used with the aggregate store.
-func (s *HookableAggregateStore[E]) Allow(prototypes ...estoria.EventData) {
+func (s *HookableAggregateStore[E]) Allow(prototypes ...estoria.EntityEventData) {
 	s.store.Allow(prototypes...)
 }
 

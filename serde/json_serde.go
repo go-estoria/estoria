@@ -18,10 +18,10 @@ func (JSONEntity[E]) Unmarshal(data []byte, dest *E) error {
 
 type JSONEventData struct{}
 
-func (s JSONEventData) Unmarshal(b []byte, d estoria.EventData) error {
+func (s JSONEventData) Unmarshal(b []byte, d estoria.EntityEventData) error {
 	return json.Unmarshal(b, d)
 }
 
-func (s JSONEventData) Marshal(d estoria.EventData) ([]byte, error) {
+func (s JSONEventData) Marshal(d estoria.EntityEventData) ([]byte, error) {
 	return json.Marshal(d)
 }

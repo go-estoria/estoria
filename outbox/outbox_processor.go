@@ -42,7 +42,7 @@ func NewProcessor(outbox Outbox) *Processor {
 	}
 }
 
-func (p *Processor) RegisterHandlers(eventType estoria.EventData, handlers ...Handler) {
+func (p *Processor) RegisterHandlers(eventType estoria.EntityEventData, handlers ...Handler) {
 	p.handlers[eventType.EventType()] = append(p.handlers[eventType.EventType()], handlers...)
 }
 
