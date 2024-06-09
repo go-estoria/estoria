@@ -10,19 +10,28 @@ See [Getting Started](#getting-started) to start using Estoria.
 
 - [ ] Features
   - [ ] Event Store Implementations
-    - [ ] In-memory
-    - [ ] SQL (non-specific, using `database/sql` only) (_maybe_)
-  - [ ] Event Store Wrappers
-    - [ ] Caching
-    - [ ] Lifecycle Hooks
+    - [X] In-memory
+    - [~] Persistent (via [estoria-contrib](https://github.com/go-estoria/estoria-contrib))
+      - [ ] DynamoDB
+      - [X] EventStoreDB
+      - [X] Postgres
+      - [ ] MySQL
+      - [X] MongoDB
+      - [X] Redis Streams
+      - [ ] SQLite
+      - [?] Azure Cosmos DB (uncommitted)
+      - [?] Cassandra (uncommitted)
+      - [?] Google Cloud Firestore (uncommitted)
+      - [?] Kafka (uncommitted)
+      - [?] MSSQL (uncommitted)
+      - [?] NATS (uncommitted)
+      - [?] RabbitMQ (uncommitted)
   - [ ] Outbox Processing
-  - [ ] Event-sourced Aggregate Store
-  - [ ] Aggregate Store Wrappers
-    - [ ] Caching
-    - [ ] Snapshotting
-      - [ ] At save-time
-      - [ ] Separate process
-    - [ ] Lifecycle Hooks
+  - [X] Event-sourced Aggregate Store
+  - [X] Aggregate Store Wrappers
+    - [X] Caching
+    - [X] Snapshotting
+    - [X] Lifecycle Hooks
   - [ ] Commandable Aggregates
     - [ ] Command Handlers
     - [ ] Command Bus
