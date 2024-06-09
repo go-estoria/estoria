@@ -51,6 +51,10 @@ func (t typeID) Value() string {
 	return t.val
 }
 
+func SetDefaultParser(p Parser) {
+	defaultParser = p
+}
+
 func New(typ string) (TypeID, error) {
 	return defaultParser.New(typ)
 }
@@ -59,14 +63,21 @@ func ParseString(s string) (TypeID, error) {
 	return defaultParser.ParseString(s)
 }
 
+// A Parser knows how to create and parse TypeIDs.
 type Parser interface {
+	// New generates a new TypeID with the given type.
 	New(typ string) (TypeID, error)
+
+	// ParseString parses a string representation of a TypeID into a TypeID.
 	ParseString(s string) (TypeID, error)
 }
 
+// DefaultParser is the default TypeID parser.
+//
+// The default parser generates TypeIDs using UUIDv4 and joins the type and value with an underscore in the string representation.
 type DefaultParser struct{}
 
-var defaultParser DefaultParser
+var defaultParser Parser
 
 func (p DefaultParser) New(typ string) (TypeID, error) {
 	id, err := uuid.NewV4()
