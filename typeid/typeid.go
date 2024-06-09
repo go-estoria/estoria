@@ -9,7 +9,13 @@ import (
 
 const defaultSep = "_"
 
-type TypeID struct {
+type TypeID interface {
+	Prefix() string
+	Suffix() string
+	String() string
+}
+
+type typeID struct {
 	prefix string
 	suffix string
 }
@@ -17,12 +23,12 @@ type TypeID struct {
 func From(prefix, suffix string) (TypeID, error) {
 	switch {
 	case prefix == "":
-		return TypeID{}, errors.New("prefix is required")
+		return typeID{}, errors.New("prefix is required")
 	case suffix == "":
-		return TypeID{}, errors.New("suffix is required")
+		return typeID{}, errors.New("suffix is required")
 	}
 
-	return TypeID{prefix: prefix, suffix: suffix}, nil
+	return typeID{prefix: prefix, suffix: suffix}, nil
 }
 
 func Must(id TypeID, err error) TypeID {
@@ -33,15 +39,15 @@ func Must(id TypeID, err error) TypeID {
 	return id
 }
 
-func (t TypeID) String() string {
+func (t typeID) String() string {
 	return t.prefix + defaultSep + t.suffix
 }
 
-func (t TypeID) Prefix() string {
+func (t typeID) Prefix() string {
 	return t.prefix
 }
 
-func (t TypeID) Suffix() string {
+func (t typeID) Suffix() string {
 	return t.suffix
 }
 
@@ -65,7 +71,7 @@ var defaultParser DefaultParser
 func (p DefaultParser) NewWithType(prefix string) (TypeID, error) {
 	id, err := uuid.NewV4()
 	if err != nil {
-		return TypeID{}, err
+		return typeID{}, err
 	}
 
 	return From(prefix, id.String())
@@ -78,7 +84,7 @@ func (p DefaultParser) FromString(s string) (TypeID, error) {
 func (p DefaultParser) parseWithSep(s, sep string) (TypeID, error) {
 	parts := strings.Split(s, sep)
 	if len(parts) != 2 {
-		return TypeID{}, errors.New("invalid type ID")
+		return typeID{}, errors.New("invalid type ID")
 	}
 
 	return From(parts[0], parts[1])
