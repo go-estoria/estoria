@@ -2,6 +2,7 @@ package typeid
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 
 	"github.com/gofrs/uuid/v5"
@@ -18,12 +19,13 @@ type UUID interface {
 type uuidID struct {
 	typ string
 	val uuid.UUID
+	sep string
 }
 
 var _ UUID = (*uuidID)(nil)
 
 func (id uuidID) String() string {
-	return id.typ + defaultSep + id.val.String()
+	return id.typ + id.sep + id.val.String()
 }
 
 func (id uuidID) TypeName() string {
@@ -44,43 +46,44 @@ type UUIDParser struct {
 	separator string
 }
 
-func NewUUIDParser(opts ...UUIDParserOption) UUIDParser {
-	p := UUIDParser{
+func NewUUIDParser(opts ...UUIDParserOption) *UUIDParser {
+	p := &UUIDParser{
 		newUUID:   defaultUUIDCtor,
 		separator: defaultSep,
 	}
 
 	for _, opt := range opts {
-		opt(&p)
+		opt(p)
 	}
 
 	return p
 }
 
-func (p UUIDParser) New(typ string) (TypeID, error) {
-	if p.newUUID == nil {
-		p.newUUID = uuid.NewV4
-	}
-
+func (p *UUIDParser) New(typ string) (TypeID, error) {
 	id, err := p.newUUID()
 	if err != nil {
-		return uuidID{}, err
+		return nil, err
 	}
 
-	return From(typ, id.String())
+	return uuidID{typ: typ, val: id, sep: p.separator}, nil
 }
 
-func (p UUIDParser) ParseString(s string) (TypeID, error) {
-	return p.parseWithSep(s, defaultSep)
+func (p *UUIDParser) ParseString(s string) (TypeID, error) {
+	return p.parseWithSep(s, p.separator)
 }
 
-func (p UUIDParser) parseWithSep(s, sep string) (TypeID, error) {
+func (p *UUIDParser) parseWithSep(s, sep string) (TypeID, error) {
 	parts := strings.Split(s, sep)
 	if len(parts) != 2 {
 		return uuidID{}, errors.New("invalid type ID")
 	}
 
-	return From(parts[0], parts[1])
+	id, err := uuid.FromString(parts[1])
+	if err != nil {
+		return nil, fmt.Errorf("parsing UUID: %w", err)
+	}
+
+	return uuidID{typ: parts[0], val: id, sep: p.separator}, nil
 }
 
 type UUIDParserOption func(*UUIDParser)
