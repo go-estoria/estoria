@@ -48,14 +48,14 @@ func (id integerID[T]) Integer() T {
 	return id.val
 }
 
-// IntegerParser is a TypeID parser that generates and parses TypeIDs with Integers as values.
-type IntegerParser[T ValidInteger] struct {
+// IntegerFactory is a TypeID parser that generates and parses TypeIDs with Integers as values.
+type IntegerFactory[T ValidInteger] struct {
 	newInteger func() (T, error)
 	separator  string
 }
 
-func NewIntegerParser[T ValidInteger](opts ...IntegerParserOption[T]) IntegerParser[T] {
-	p := IntegerParser[T]{
+func NewIntegerFactory[T ValidInteger](opts ...IntegerFactoryOption[T]) IntegerFactory[T] {
+	p := IntegerFactory[T]{
 		newInteger: func() (T, error) {
 			return T(rand.Int()), nil
 		},
@@ -69,21 +69,21 @@ func NewIntegerParser[T ValidInteger](opts ...IntegerParserOption[T]) IntegerPar
 	return p
 }
 
-func (p IntegerParser[T]) New(typ string) (TypeID, error) {
+func (p IntegerFactory[T]) New(typ string) (TypeID, error) {
 	id, err := p.newInteger()
 	if err != nil {
 		return nil, err
 	}
 
-	return integerID[T]{typ: typ, val: id}, nil
+	return p.From(typ, id), nil
 }
 
-func (p IntegerParser[T]) ParseString(s string) (TypeID, error) {
-	return p.parseWithSep(s, defaultSep)
+func (p IntegerFactory[T]) From(typ string, val T) Integer[T] {
+	return integerID[T]{typ: typ, val: val}
 }
 
-func (p IntegerParser[T]) parseWithSep(s, sep string) (TypeID, error) {
-	parts := strings.Split(s, sep)
+func (p IntegerFactory[T]) Parse(tid string) (Integer[T], error) {
+	parts := strings.Split(tid, p.separator)
 	if len(parts) != 2 {
 		return nil, errors.New("invalid type ID")
 	}
@@ -93,19 +93,19 @@ func (p IntegerParser[T]) parseWithSep(s, sep string) (TypeID, error) {
 		return nil, fmt.Errorf("parsing integer: %w", err)
 	}
 
-	return integerID[T]{typ: parts[0], val: T(val)}, nil
+	return p.From(parts[0], T(val)), nil
 }
 
-type IntegerParserOption[T ValidInteger] func(*IntegerParser[T])
+type IntegerFactoryOption[T ValidInteger] func(*IntegerFactory[T])
 
-func WithIntegerCtor[T ValidInteger](fn func() (T, error)) IntegerParserOption[T] {
-	return func(p *IntegerParser[T]) {
+func WithIntegerCtor[T ValidInteger](fn func() (T, error)) IntegerFactoryOption[T] {
+	return func(p *IntegerFactory[T]) {
 		p.newInteger = fn
 	}
 }
 
-func WithSeparatorInteger[T ValidInteger](chars string) IntegerParserOption[T] {
-	return func(p *IntegerParser[T]) {
+func WithIntegerSeparator[T ValidInteger](chars string) IntegerFactoryOption[T] {
+	return func(p *IntegerFactory[T]) {
 		p.separator = chars
 	}
 }

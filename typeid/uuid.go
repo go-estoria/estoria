@@ -8,7 +8,10 @@ import (
 	"github.com/gofrs/uuid/v5"
 )
 
-var defaultUUIDCtor = uuid.NewV4
+var (
+	defaultUUIDCtor   = uuid.NewV4
+	defaultUUIDParser = uuid.FromString
+)
 
 // A UUID is a TypeID with a UUID value.
 type UUID interface {
@@ -40,15 +43,17 @@ func (id uuidID) UUID() uuid.UUID {
 	return id.val
 }
 
-// UUIDParser is a TypeID parser that generates and parses TypeIDs with UUIDs as values.
-type UUIDParser struct {
+// UUIDFactory is a TypeID parser that generates and parses TypeIDs with UUIDs as values.
+type UUIDFactory struct {
 	newUUID   func() (uuid.UUID, error)
+	parseUUID func(string) (uuid.UUID, error)
 	separator string
 }
 
-func NewUUIDParser(opts ...UUIDParserOption) *UUIDParser {
-	p := &UUIDParser{
+func NewUUIDFactory(opts ...UUIDParserOption) *UUIDFactory {
+	p := &UUIDFactory{
 		newUUID:   defaultUUIDCtor,
+		parseUUID: defaultUUIDParser,
 		separator: defaultSep,
 	}
 
@@ -59,21 +64,21 @@ func NewUUIDParser(opts ...UUIDParserOption) *UUIDParser {
 	return p
 }
 
-func (p *UUIDParser) New(typ string) (TypeID, error) {
+func (p *UUIDFactory) New(typ string) (UUID, error) {
 	id, err := p.newUUID()
 	if err != nil {
 		return nil, err
 	}
 
-	return uuidID{typ: typ, val: id, sep: p.separator}, nil
+	return FromUUID(typ, id), nil
 }
 
-func (p *UUIDParser) ParseString(s string) (TypeID, error) {
-	return p.parseWithSep(s, p.separator)
+func (p *UUIDFactory) From(typ string, id uuid.UUID) UUID {
+	return uuidID{typ: typ, val: id, sep: p.separator}
 }
 
-func (p *UUIDParser) parseWithSep(s, sep string) (TypeID, error) {
-	parts := strings.Split(s, sep)
+func (p *UUIDFactory) Parse(tid string) (UUID, error) {
+	parts := strings.Split(tid, p.separator)
 	if len(parts) != 2 {
 		return uuidID{}, errors.New("invalid type ID")
 	}
@@ -83,19 +88,25 @@ func (p *UUIDParser) parseWithSep(s, sep string) (TypeID, error) {
 		return nil, fmt.Errorf("parsing UUID: %w", err)
 	}
 
-	return uuidID{typ: parts[0], val: id, sep: p.separator}, nil
+	return FromUUID(parts[0], id), nil
 }
 
-type UUIDParserOption func(*UUIDParser)
+type UUIDParserOption func(*UUIDFactory)
 
-func WithUUIDCtor(fn func() (uuid.UUID, error)) UUIDParserOption {
-	return func(p *UUIDParser) {
+func WithUUIDGenerator(fn func() (uuid.UUID, error)) UUIDParserOption {
+	return func(p *UUIDFactory) {
 		p.newUUID = fn
 	}
 }
 
-func WithSeparatorUUID(chars string) UUIDParserOption {
-	return func(p *UUIDParser) {
+func WithUUIDParser(fn func(string) (uuid.UUID, error)) UUIDParserOption {
+	return func(p *UUIDFactory) {
+		p.parseUUID = fn
+	}
+}
+
+func WithUUIDSeparator(chars string) UUIDParserOption {
+	return func(p *UUIDFactory) {
 		p.separator = chars
 	}
 }

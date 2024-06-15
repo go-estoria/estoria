@@ -11,7 +11,7 @@ import (
 )
 
 type AggregateEvent[E Entity] interface {
-	ID() typeid.TypeID
+	ID() typeid.UUID
 	AggregateID() typeid.TypeID
 	Timestamp() time.Time
 	Data() EntityEventData
@@ -50,7 +50,7 @@ func (a *Aggregate[E]) Version() int64 {
 func (a *Aggregate[E]) Append(events ...EntityEventData) error {
 	slog.Debug("appending events to aggregate", "aggregate_id", a.ID(), "events", len(events))
 	for _, eventData := range events {
-		eventID, err := typeid.New(eventData.EventType())
+		eventID, err := typeid.NewUUID(eventData.EventType())
 		if err != nil {
 			return fmt.Errorf("generating event ID: %w", err)
 		}
@@ -109,13 +109,13 @@ func (a *Aggregate[E]) ApplyNext(ctx context.Context) error {
 var ErrNoUnappliedEvents = errors.New("no unapplied events")
 
 type unsavedEvent struct {
-	id          typeid.TypeID
+	id          typeid.UUID
 	aggregateID typeid.TypeID
 	timestamp   time.Time
 	data        EntityEventData
 }
 
-func (e *unsavedEvent) ID() typeid.TypeID {
+func (e *unsavedEvent) ID() typeid.UUID {
 	return e.id
 }
 

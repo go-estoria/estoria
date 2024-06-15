@@ -9,7 +9,7 @@ import (
 
 // The internal representation of an event store event.
 type event struct {
-	id            typeid.TypeID
+	id            typeid.UUID
 	streamID      typeid.TypeID
 	streamVersion int64
 	timestamp     time.Time
@@ -19,7 +19,7 @@ type event struct {
 var _ estoria.EventStoreEvent = (*event)(nil)
 
 // EventID returns the ID of the event.
-func (e *event) ID() typeid.TypeID {
+func (e *event) ID() typeid.UUID {
 	return e.id
 }
 
