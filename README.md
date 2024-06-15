@@ -17,7 +17,6 @@ See [Getting Started](#getting-started) to start using Estoria.
       - [X] Postgres
       - [ ] MySQL
       - [X] MongoDB
-      - [X] Redis Streams
       - [ ] SQLite
       - [?] Azure Cosmos DB (uncommitted)
       - [?] Cassandra (uncommitted)
