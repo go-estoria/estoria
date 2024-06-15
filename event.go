@@ -14,9 +14,3 @@ type EventStoreEvent interface {
 	Timestamp() time.Time
 	Data() []byte
 }
-
-// EntityEventData is the data of an event.
-type EntityEventData interface {
-	EventType() string
-	New() EntityEventData
-}
