@@ -12,11 +12,11 @@ See [Getting Started](#getting-started) to start using Estoria.
   - [ ] Event Store Implementations
     - [X] In-memory
     - [~] Persistent (via [estoria-contrib](https://github.com/go-estoria/estoria-contrib))
-      - [ ] DynamoDB
       - [X] EventStoreDB
       - [X] Postgres
-      - [ ] MySQL
       - [X] MongoDB
+      - [ ] DynamoDB
+      - [ ] MySQL
       - [ ] SQLite
       - [?] Azure Cosmos DB (uncommitted)
       - [?] Cassandra (uncommitted)
@@ -24,19 +24,12 @@ See [Getting Started](#getting-started) to start using Estoria.
       - [?] Kafka (uncommitted)
       - [?] MSSQL (uncommitted)
       - [?] NATS (uncommitted)
-      - [?] RabbitMQ (uncommitted)
   - [ ] Outbox Processing
   - [X] Event-sourced Aggregate Store
   - [X] Aggregate Store Wrappers
     - [X] Caching
     - [X] Snapshotting
     - [X] Lifecycle Hooks
-  - [ ] Commandable Aggregates
-    - [ ] Command Handlers
-    - [ ] Command Bus
-  - [ ] Projections
-    - [ ] In-memory
-    - [ ] Persistent
 - [ ] Tests
   - [ ] Unit Tests
   - [ ] Integration Tests
