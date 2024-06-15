@@ -69,7 +69,7 @@ func NewIntegerFactory[T ValidInteger](opts ...IntegerFactoryOption[T]) IntegerF
 	return p
 }
 
-func (p IntegerFactory[T]) New(typ string) (TypeID, error) {
+func (p IntegerFactory[T]) New(typ string) (Integer[T], error) {
 	id, err := p.newInteger()
 	if err != nil {
 		return nil, err

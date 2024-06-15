@@ -3,6 +3,7 @@ package aggregatestore
 import (
 	"context"
 	"fmt"
+	"log/slog"
 
 	"github.com/go-estoria/estoria"
 	"github.com/go-estoria/estoria/typeid"
@@ -30,6 +31,7 @@ type HookableAggregateStore[E estoria.Entity] struct {
 	precreateHooks []PrecreateHook
 	preloadHooks   []PreloadHook
 	hooks          map[HookStage][]Hook[E]
+	log            *slog.Logger
 }
 
 func NewHookableAggregateStore[E estoria.Entity](
@@ -40,6 +42,7 @@ func NewHookableAggregateStore[E estoria.Entity](
 		precreateHooks: make([]PrecreateHook, 0),
 		preloadHooks:   make([]PreloadHook, 0),
 		hooks:          make(map[HookStage][]Hook[E]),
+		log:            slog.Default().WithGroup("hookableaggregatestore"),
 	}
 }
 
@@ -62,6 +65,7 @@ func (s *HookableAggregateStore[E]) Allow(prototypes ...estoria.EntityEventData)
 
 // NewAggregate creates a new aggregate.
 func (s *HookableAggregateStore[E]) NewAggregate() (*estoria.Aggregate[E], error) {
+	s.log.Debug("creating new aggregate")
 	for _, hook := range s.precreateHooks {
 		if err := hook(); err != nil {
 			return nil, fmt.Errorf("precreate hook failed: %w", err)
@@ -83,6 +87,7 @@ func (s *HookableAggregateStore[E]) NewAggregate() (*estoria.Aggregate[E], error
 }
 
 func (s *HookableAggregateStore[E]) Load(ctx context.Context, id typeid.TypeID, opts estoria.LoadAggregateOptions) (*estoria.Aggregate[E], error) {
+	s.log.Debug("loading aggregate", "aggregate_id", id)
 	for _, hook := range s.preloadHooks {
 		if err := hook(ctx, id); err != nil {
 			return nil, fmt.Errorf("preload hook failed: %w", err)
@@ -105,6 +110,7 @@ func (s *HookableAggregateStore[E]) Load(ctx context.Context, id typeid.TypeID, 
 
 // Hydrate hydrates an aggregate.
 func (s *HookableAggregateStore[E]) Hydrate(ctx context.Context, aggregate *estoria.Aggregate[E], opts estoria.HydrateAggregateOptions) error {
+	s.log.Debug("hydrating aggregate", "aggregate_id", aggregate.ID(), "from_version", aggregate.Version(), "to_version", opts.ToVersion)
 	for _, hook := range s.hooks[BeforeHydrate] {
 		if err := hook(ctx, aggregate); err != nil {
 			return fmt.Errorf("pre-hydrate hook failed: %w", err)
@@ -127,6 +133,7 @@ func (s *HookableAggregateStore[E]) Hydrate(ctx context.Context, aggregate *esto
 
 // Save saves an aggregate.
 func (s *HookableAggregateStore[E]) Save(ctx context.Context, aggregate *estoria.Aggregate[E], opts estoria.SaveAggregateOptions) error {
+	s.log.Debug("saving aggregate", "aggregate_id", aggregate.ID())
 	for _, hook := range s.hooks[BeforeSave] {
 		if err := hook(ctx, aggregate); err != nil {
 			return fmt.Errorf("pre-save hook failed: %w", err)

@@ -50,11 +50,11 @@ func NewUUID(typ string) (UUID, error) {
 	return uuidFactory.New(typ)
 }
 
-func NewString(typ string) (TypeID, error) {
+func NewString(typ string) (String, error) {
 	return stringFactory.New(typ)
 }
 
-func NewInt(typ string) (TypeID, error) {
+func NewInt[T ValidInteger](typ string) (Integer[uint64], error) {
 	return intFactory.New(typ)
 }
 

@@ -61,15 +61,11 @@ func (s *EventSourcedAggregateStore[E]) Allow(prototypes ...estoria.EntityEventD
 
 func (s *EventSourcedAggregateStore[E]) NewAggregate() (*estoria.Aggregate[E], error) {
 	entity := s.NewEntity()
-	id, err := typeid.NewUUID(entity.EntityType()) // default to using UUID for now, make this configurable later
-	if err != nil {
-		return nil, fmt.Errorf("generating aggregate ID: %w", err)
-	}
-
 	aggregate := &estoria.Aggregate[E]{}
-	aggregate.SetID(id)
+	aggregate.SetID(entity.EntityID())
 	aggregate.SetEntity(entity)
 
+	s.log.Debug("created new aggregate", "aggregate_id", aggregate.ID())
 	return aggregate, nil
 }
 
@@ -104,6 +100,10 @@ func (s *EventSourcedAggregateStore[E]) Hydrate(ctx context.Context, aggregate *
 		return fmt.Errorf("aggregate is nil")
 	} else if opts.ToVersion < 0 {
 		return fmt.Errorf("invalid target version")
+	}
+
+	if aggregate.Version() == 0 {
+		aggregate.Entity().SetEntityID(aggregate.ID())
 	}
 
 	readOpts := estoria.ReadStreamOptions{
@@ -156,6 +156,8 @@ func (s *EventSourcedAggregateStore[E]) Hydrate(ctx context.Context, aggregate *
 
 		aggregate.SetVersion(aggregate.Version() + 1)
 	}
+
+	s.log.Debug("hydrated aggregate", "aggregate_id", aggregate.ID(), "entity_id", aggregate.Entity().EntityID(), "version", aggregate.Version())
 
 	return nil
 }

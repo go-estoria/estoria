@@ -2,12 +2,15 @@ package estoria
 
 import (
 	"context"
+
+	"github.com/go-estoria/estoria/typeid"
 )
 
 // An Entity is anything whose state can be constructed by applying a series of events.
 type Entity interface {
+	EntityID() typeid.TypeID
+	SetEntityID(id typeid.TypeID)
 	ApplyEvent(ctx context.Context, eventData EntityEventData) error
-	EntityType() string
 }
 
 // A DiffableEntity is aggregate data that can be diffed against another aggregate data

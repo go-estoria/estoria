@@ -16,6 +16,7 @@ type AggregateCache[E estoria.Entity] interface {
 type CachedAggregateStore[E estoria.Entity] struct {
 	store estoria.AggregateStore[E]
 	cache AggregateCache[E]
+	log   *slog.Logger
 }
 
 func NewCachedAggregateStore[E estoria.Entity](
@@ -25,6 +26,7 @@ func NewCachedAggregateStore[E estoria.Entity](
 	return &CachedAggregateStore[E]{
 		store: inner,
 		cache: cacher,
+		log:   slog.Default().WithGroup("cachedaggregatestore"),
 	}
 }
 
@@ -41,10 +43,10 @@ func (s *CachedAggregateStore[E]) NewAggregate() (*estoria.Aggregate[E], error) 
 func (s *CachedAggregateStore[E]) Load(ctx context.Context, id typeid.TypeID, opts estoria.LoadAggregateOptions) (*estoria.Aggregate[E], error) {
 	aggregate, err := s.cache.GetAggregate(ctx, id)
 	if err != nil {
-		slog.Warn("failed to read cache", "error", err)
+		s.log.Warn("failed to read cache", "error", err)
 		return s.store.Load(ctx, id, opts)
 	} else if aggregate == nil {
-		slog.Debug("aggregate not in cache", "aggregate_id", id)
+		s.log.Debug("aggregate not in cache", "aggregate_id", id)
 		return s.store.Load(ctx, id, opts)
 	}
 
@@ -63,7 +65,7 @@ func (s *CachedAggregateStore[E]) Save(ctx context.Context, aggregate *estoria.A
 	}
 
 	if err := s.cache.PutAggregate(ctx, aggregate); err != nil {
-		slog.Warn("failed to write cache", "error", err)
+		s.log.Warn("failed to write cache", "error", err)
 	}
 
 	return nil
