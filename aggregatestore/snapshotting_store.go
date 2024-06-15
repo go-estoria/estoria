@@ -2,13 +2,13 @@ package aggregatestore
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
 	"time"
 
 	"github.com/go-estoria/estoria"
-	"github.com/go-estoria/estoria/serde"
 	"github.com/go-estoria/estoria/snapshot"
 	"github.com/go-estoria/estoria/typeid"
 )
@@ -28,6 +28,16 @@ type SnapshotPolicy interface {
 type EntitySnapshotSerde[E estoria.Entity] interface {
 	Marshal(entity E) ([]byte, error)
 	Unmarshal(data []byte, dest *E) error
+}
+
+type JSONEntitySnapshotSerde[E estoria.Entity] struct{}
+
+func (JSONEntitySnapshotSerde[E]) Marshal(entity E) ([]byte, error) {
+	return json.Marshal(entity)
+}
+
+func (JSONEntitySnapshotSerde[E]) Unmarshal(data []byte, dest *E) error {
+	return json.Unmarshal(data, dest)
 }
 
 type SnapshottingAggregateStore[E estoria.Entity] struct {
@@ -53,7 +63,7 @@ func NewSnapshottingAggregateStore[E estoria.Entity](
 		reader: reader,
 		writer: writer,
 		policy: policy,
-		serde:  serde.JSONEntity[E]{},
+		serde:  JSONEntitySnapshotSerde[E]{},
 		log:    slog.Default().WithGroup("snapshottingaggregatestore"),
 	}
 

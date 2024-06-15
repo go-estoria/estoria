@@ -2,15 +2,30 @@ package aggregatestore
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 
 	"github.com/go-estoria/estoria"
-	"github.com/go-estoria/estoria/serde"
 	"github.com/go-estoria/estoria/typeid"
 )
+
+type EventDataSerde interface {
+	Unmarshal(b []byte, d estoria.EntityEventData) error
+	Marshal(d estoria.EntityEventData) ([]byte, error)
+}
+
+type JSONEventDataSerde struct{}
+
+func (s JSONEventDataSerde) Unmarshal(b []byte, d estoria.EntityEventData) error {
+	return json.Unmarshal(b, d)
+}
+
+func (s JSONEventDataSerde) Marshal(d estoria.EntityEventData) ([]byte, error) {
+	return json.Marshal(d)
+}
 
 // An EventSourcedAggregateStore loads and saves aggregates using an EventStore.
 type EventSourcedAggregateStore[E estoria.Entity] struct {
@@ -35,7 +50,7 @@ func New[E estoria.Entity](
 		EventWriter:        eventWriter,
 		NewEntity:          entityFactory,
 		eventDataFactories: make(map[string]func() estoria.EntityEventData),
-		eventDataSerde:     nil,
+		eventDataSerde:     JSONEventDataSerde{},
 		log:                slog.Default().WithGroup("aggregatestore"),
 	}
 
@@ -43,10 +58,6 @@ func New[E estoria.Entity](
 		if err := opt(store); err != nil {
 			return nil, fmt.Errorf("applying option: %w", err)
 		}
-	}
-
-	if store.eventDataSerde == nil {
-		store.eventDataSerde = serde.JSONEventData{}
 	}
 
 	return store, nil
