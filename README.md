@@ -8,8 +8,13 @@ See [Getting Started](#getting-started) to start using Estoria.
 
 ## V1 Roadmap (subject to change)
 
-- [ ] Features
-  - [ ] Event Store Implementations
+- [~] Features
+  - [X] Aggregate Store
+    - [X] Event-Sourced (Core)
+    - [X] Cached
+    - [X] Snapshotting
+    - [X] Hookable
+  - [~] Event Store Implementations
     - [X] In-memory
     - [~] Persistent (via [estoria-contrib](https://github.com/go-estoria/estoria-contrib))
       - [X] EventStoreDB
@@ -17,23 +22,17 @@ See [Getting Started](#getting-started) to start using Estoria.
       - [X] MongoDB
       - [ ] DynamoDB
       - [ ] MySQL
+      - [ ] Azure Cosmos DB
+      - [ ] Google Cloud Spanner
       - [ ] SQLite
-      - [?] Azure Cosmos DB (uncommitted)
       - [?] Cassandra (uncommitted)
       - [?] Google Cloud Firestore (uncommitted)
-      - [?] Kafka (uncommitted)
       - [?] MSSQL (uncommitted)
-      - [?] NATS (uncommitted)
   - [ ] Outbox Processing
   - [X] Event-sourced Aggregate Store
-  - [X] Aggregate Store Wrappers
-    - [X] Caching
-    - [X] Snapshotting
-    - [X] Lifecycle Hooks
 - [ ] Tests
   - [ ] Unit Tests
   - [ ] Integration Tests
-  - [ ] E2E Tests
 - [ ] Documentation
   - [ ] README
   - [ ] GoDoc
