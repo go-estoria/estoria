@@ -43,8 +43,6 @@ See [Getting Started](#getting-started) to start using Estoria.
   - [ ] Caching
   - [ ] Lifecycle Hooks
   - [ ] Outbox Processing
-  - [ ] Commandable Aggregates
-  - [ ] Projections
 
 ## Getting Started
 

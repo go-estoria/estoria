@@ -28,6 +28,7 @@ func (s JSONEventDataSerde) Marshal(d estoria.EntityEventData) ([]byte, error) {
 }
 
 // An EventSourcedAggregateStore loads and saves aggregates using an EventStore.
+// It hydrates aggregates by reading events from the event store and applying them to the aggregate.
 type EventSourcedAggregateStore[E estoria.Entity] struct {
 	EventReader estoria.EventStreamReader
 	EventWriter estoria.EventStreamWriter
