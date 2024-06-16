@@ -53,14 +53,14 @@ func (o *Outbox) HandleEvents(ctx context.Context, events []estoria.EventStoreEv
 			streamID:  event.StreamID(),
 			eventID:   event.ID(),
 			eventData: event.Data(),
-			handlers:  make(map[string]outbox.HandlerResult),
+			handlers:  make(outbox.HandlerResultMap),
 			createdAt: time.Now(),
 			updatedAt: time.Now(),
 		}
 
 		// for each handler name for this event type, add a handler result to track processing
 		for _, handler := range o.handlers[event.ID().TypeName()] {
-			item.handlers[handler] = outbox.HandlerResult{}
+			item.handlers[handler] = &outbox.HandlerResult{}
 		}
 
 		o.items = append(o.items, item)
@@ -70,65 +70,32 @@ func (o *Outbox) HandleEvents(ctx context.Context, events []estoria.EventStoreEv
 }
 
 // Iterator returns an iterator for the outbox.
-func (o *Outbox) Iterator(matchEventTypes []string) (outbox.Iterator, error) {
+func (o *Outbox) Iterator() (outbox.Iterator, error) {
 	return &OutboxIterator{
-		outbox:          o,
-		cursor:          0,
-		matchEventTypes: matchEventTypes,
+		outbox: o,
+		cursor: 0,
 	}, nil
 }
 
 // An OutboxIterator is an iterator for the outbox.
 type OutboxIterator struct {
-	outbox          *Outbox
-	cursor          int
-	matchEventTypes []string
+	outbox *Outbox
+	cursor int
 }
 
 // Next returns the next outbox entry.
 func (i *OutboxIterator) Next(ctx context.Context) (outbox.OutboxItem, error) {
 	i.outbox.mu.Lock()
 	defer i.outbox.mu.Unlock()
-	slog.Info("iterating outbox", "cursor", i.cursor, "items", len(i.outbox.items))
 
 	if i.cursor >= len(i.outbox.items) {
-		slog.Info("cursor is at end of outbox")
 		return nil, nil
 	}
 
-	var next outbox.OutboxItem
-	for _, item := range i.outbox.items[i.cursor:] {
-		item.Lock()
-		handlers := item.Handlers()
-		for _, result := range handlers {
-			if !result.CompletedAt.IsZero() {
-				slog.Info("skipping completed outbox item", "event_id", item.EventID(), "handlers", item.Handlers())
-				continue
-			}
+	item := i.outbox.items[i.cursor]
 
-			for _, match := range i.matchEventTypes {
-				if _, ok := handlers[match]; ok {
-					slog.Info("matched outbox item", "event_id", item.EventID(), "handlers", item.Handlers())
-					next = item
-					break
-				}
-			}
-
-			if next != nil {
-				// we didn't match any event types, so skip this item
-				break
-			}
-		}
-
-		item.Unlock()
-
-		i.cursor++
-		if next != nil {
-			break
-		}
-	}
-
-	return next, nil
+	i.cursor++
+	return item, nil
 }
 
 type outboxItem struct {
@@ -136,7 +103,7 @@ type outboxItem struct {
 	streamID  typeid.TypeID
 	eventID   typeid.UUID
 	eventData []byte
-	handlers  map[string]outbox.HandlerResult
+	handlers  outbox.HandlerResultMap
 	createdAt time.Time
 	updatedAt time.Time
 	mu        sync.RWMutex
@@ -154,7 +121,7 @@ func (e *outboxItem) EventData() []byte {
 	return e.eventData
 }
 
-func (e *outboxItem) Handlers() map[string]outbox.HandlerResult {
+func (e *outboxItem) Handlers() outbox.HandlerResultMap {
 	return e.handlers
 }
 
@@ -167,15 +134,11 @@ func (e *outboxItem) Unlock() {
 }
 
 func (e *outboxItem) SetHandlerError(handlerName string, err error) {
-	e.handlers[handlerName] = outbox.HandlerResult{
-		Error: err,
-	}
+	e.handlers[handlerName].Error = err
 }
 
 func (e *outboxItem) SetCompletedAt(handlerName string, at time.Time) {
-	e.handlers[handlerName] = outbox.HandlerResult{
-		CompletedAt: at,
-	}
+	e.handlers[handlerName].CompletedAt = at
 }
 
 func (e *outboxItem) String() string {

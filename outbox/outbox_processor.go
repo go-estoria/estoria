@@ -10,7 +10,7 @@ import (
 )
 
 type Outbox interface {
-	Iterator(matchEventTypes []string) (Iterator, error)
+	Iterator() (Iterator, error)
 }
 
 type Iterator interface {
@@ -21,7 +21,7 @@ type OutboxItem interface {
 	StreamID() typeid.TypeID
 	EventID() typeid.UUID
 	EventData() []byte
-	Handlers() map[string]HandlerResult
+	Handlers() HandlerResultMap
 	Lock()
 	Unlock()
 	SetHandlerError(handlerName string, err error)
@@ -31,6 +31,22 @@ type OutboxItem interface {
 type HandlerResult struct {
 	CompletedAt time.Time
 	Error       error
+}
+
+type HandlerResultMap map[string]*HandlerResult
+
+func (m HandlerResultMap) FullyProcessed() bool {
+	if len(m) == 0 {
+		return true
+	}
+
+	for _, result := range m {
+		if result.Error != nil || result.CompletedAt.IsZero() {
+			return false
+		}
+	}
+
+	return true
 }
 
 func (r HandlerResult) String() string {
@@ -66,12 +82,7 @@ func (p *Processor) RegisterHandlers(handlers ...ItemHandler) {
 }
 
 func (p *Processor) Start(ctx context.Context) error {
-	eventTypes := make([]string, 0, len(p.handlers))
-	for eventType := range p.handlers {
-		eventTypes = append(eventTypes, eventType)
-	}
-
-	iterator, err := p.outbox.Iterator(eventTypes)
+	iterator, err := p.outbox.Iterator()
 	if err != nil {
 		return fmt.Errorf("creating outbox iterator: %w", err)
 	}
@@ -92,9 +103,14 @@ func (p *Processor) Handle(ctx context.Context, entry OutboxItem) error {
 	entry.Lock()
 	defer entry.Unlock()
 
-	itemHandlers := entry.Handlers()
+	if entry.Handlers().FullyProcessed() {
+		slog.Info("nothing to process", "event_id", entry.EventID())
+		return nil
+	}
+
+	handlers := entry.Handlers()
 	errorCount := 0
-	for handlerName, handlerResult := range itemHandlers {
+	for handlerName, handlerResult := range handlers {
 		if !handlerResult.CompletedAt.IsZero() {
 			continue
 		}
@@ -106,15 +122,12 @@ func (p *Processor) Handle(ctx context.Context, entry OutboxItem) error {
 				entry.SetHandlerError(handler.Name(), err)
 				errorCount++
 			} else {
-				slog.Info("handled outbox item", "handler", handler.Name(), "event_type", entry.EventID().TypeName())
 				entry.SetCompletedAt(handler.Name(), time.Now())
 			}
 		} else {
-			slog.Info("no handler found for outbox item", "handler", handlerName, "event_id", entry.EventID())
+			slog.Warn("no handler found for outbox item", "handler", handlerName, "event_id", entry.EventID())
 		}
 	}
-
-	slog.Info("entry handled", "event_id", entry.EventID(), "errors", errorCount)
 
 	return nil
 }
@@ -128,7 +141,6 @@ func (p *Processor) run(ctx context.Context, iterator Iterator) {
 		default:
 		}
 
-		slog.Info("polling for next outbox entry")
 		entry, err := iterator.Next(ctx)
 		if err != nil {
 			slog.Error("reading outbox entry", "error", err)
@@ -136,11 +148,8 @@ func (p *Processor) run(ctx context.Context, iterator Iterator) {
 		}
 
 		if entry != nil {
-			slog.Info("found outbox entry", "event_id", entry.EventID())
 			if err := p.Handle(ctx, entry); err != nil {
 				slog.Error("handling outbox entry", "error", err)
-			} else {
-				slog.Info("handled outbox entry", "event_id", entry.EventID())
 			}
 		} else {
 			<-time.After(time.Second)
