@@ -136,7 +136,7 @@ func (p *Processor) run(ctx context.Context, iterator Iterator) {
 	for {
 		select {
 		case <-ctx.Done():
-			slog.Info("stopping outbox processor")
+			slog.Info("stopping outbox processor", "reason", ctx.Err())
 			return
 		default:
 		}

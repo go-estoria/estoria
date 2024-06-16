@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"math/rand/v2"
 	"strings"
 	"sync"
 	"time"
@@ -48,6 +49,7 @@ func (o *Outbox) HandleEvents(ctx context.Context, events []estoria.EventStoreEv
 	slog.Info("inserting events into outbox", "tx", "inherited", "events", len(events))
 
 	for _, event := range events {
+		<-time.After(time.Duration(rand.IntN(200)) * time.Millisecond)
 		item := &outboxItem{
 			id:        uuid.Must(uuid.NewV7()),
 			streamID:  event.StreamID(),
@@ -87,6 +89,11 @@ type OutboxIterator struct {
 func (i *OutboxIterator) Next(ctx context.Context) (outbox.OutboxItem, error) {
 	i.outbox.mu.Lock()
 	defer i.outbox.mu.Unlock()
+
+	for ; i.cursor < len(i.outbox.items) && i.outbox.items[i.cursor].Handlers().FullyProcessed(); i.cursor++ {
+		// skip items that have been fully processed
+		slog.Info("skipping fully processed outbox item", "event_id", i.outbox.items[i.cursor].EventID())
+	}
 
 	if i.cursor >= len(i.outbox.items) {
 		return nil, nil
