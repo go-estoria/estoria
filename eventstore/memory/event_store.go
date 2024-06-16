@@ -3,6 +3,7 @@ package memory
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"slices"
 	"sync"
 
@@ -19,12 +20,19 @@ type EventStore struct {
 	events map[string][]estoria.EventStoreEvent
 	mu     sync.RWMutex
 	serde  EventSerde
+	outbox *Outbox
 }
 
-func NewEventStore() *EventStore {
-	return &EventStore{
+func NewEventStore(opts ...EventStoreOption) *EventStore {
+	eventStore := &EventStore{
 		events: map[string][]estoria.EventStoreEvent{},
 	}
+
+	for _, opt := range opts {
+		opt(eventStore)
+	}
+
+	return eventStore
 }
 
 func (s *EventStore) AppendStream(ctx context.Context, streamID typeid.TypeID, opts estoria.AppendStreamOptions, events []estoria.EventStoreEvent) error {
@@ -41,6 +49,13 @@ func (s *EventStore) AppendStream(ctx context.Context, streamID typeid.TypeID, o
 		}
 
 		tx = append(tx, event)
+	}
+
+	if s.outbox != nil {
+		slog.Debug("handling events with outbox", "tx", "inherited", "events", len(tx))
+		if err := s.outbox.HandleEvents(ctx, tx); err != nil {
+			return fmt.Errorf("handling events: %w", err)
+		}
 	}
 
 	s.events[streamID.String()] = append(stream, tx...)
@@ -78,6 +93,14 @@ func (s *EventStore) ReadStream(ctx context.Context, streamID typeid.TypeID, opt
 		direction: opts.Direction,
 		limit:     limit,
 	}, nil
+}
+
+type EventStoreOption func(*EventStore)
+
+func WithOutbox(outbox *Outbox) EventStoreOption {
+	return func(s *EventStore) {
+		s.outbox = outbox
+	}
 }
 
 // ErrEventExists is returned when attempting to write an event that already exists.
