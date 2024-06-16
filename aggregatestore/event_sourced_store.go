@@ -40,6 +40,8 @@ type EventSourcedAggregateStore[E estoria.Entity] struct {
 	log *slog.Logger
 }
 
+var _ estoria.AggregateStore[estoria.Entity] = (*EventSourcedAggregateStore[estoria.Entity])(nil)
+
 func New[E estoria.Entity](
 	eventReader estoria.EventStreamReader,
 	eventWriter estoria.EventStreamWriter,
@@ -65,7 +67,7 @@ func New[E estoria.Entity](
 }
 
 // Allow allows an event type to be used with the aggregate store.
-func (s *EventSourcedAggregateStore[E]) Allow(prototypes ...estoria.EntityEventData) {
+func (s *EventSourcedAggregateStore[E]) AllowEvents(prototypes ...estoria.EntityEventData) {
 	for _, prototype := range prototypes {
 		s.eventDataFactories[prototype.EventType()] = prototype.New
 	}

@@ -34,6 +34,8 @@ type HookableAggregateStore[E estoria.Entity] struct {
 	log            *slog.Logger
 }
 
+var _ estoria.AggregateStore[estoria.Entity] = (*HookableAggregateStore[estoria.Entity])(nil)
+
 func NewHookableAggregateStore[E estoria.Entity](
 	inner estoria.AggregateStore[E],
 ) *HookableAggregateStore[E] {
@@ -59,8 +61,8 @@ func (s *HookableAggregateStore[E]) AddHook(stage HookStage, hook Hook[E]) {
 }
 
 // Allow allows an event type to be used with the aggregate store.
-func (s *HookableAggregateStore[E]) Allow(prototypes ...estoria.EntityEventData) {
-	s.store.Allow(prototypes...)
+func (s *HookableAggregateStore[E]) AllowEvents(prototypes ...estoria.EntityEventData) {
+	s.store.AllowEvents(prototypes...)
 }
 
 // NewAggregate creates a new aggregate.
