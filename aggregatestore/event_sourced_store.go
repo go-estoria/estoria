@@ -50,7 +50,7 @@ func New[E estoria.Entity](
 	return store, nil
 }
 
-// Allow allows an event type to be used with the aggregate store.
+// AllowEvents allows event types to be used with the aggregate store.
 func (s *EventSourcedAggregateStore[E]) AllowEvents(prototypes ...estoria.EntityEventData) {
 	for _, prototype := range prototypes {
 		s.eventDataFactories[prototype.EventType()] = prototype.New

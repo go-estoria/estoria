@@ -32,7 +32,7 @@ func NewCachedAggregateStore[E estoria.Entity](
 
 var _ estoria.AggregateStore[estoria.Entity] = (*CachedAggregateStore[estoria.Entity])(nil)
 
-// Allow allows an event type to be used with the aggregate store.
+// AllowEvents allows event types to be used with the aggregate store.
 func (s *CachedAggregateStore[E]) AllowEvents(prototypes ...estoria.EntityEventData) {
 	s.store.AllowEvents(prototypes...)
 }
