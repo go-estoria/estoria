@@ -2,7 +2,6 @@ package aggregatestore
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -11,21 +10,6 @@ import (
 	"github.com/go-estoria/estoria"
 	"github.com/go-estoria/estoria/typeid"
 )
-
-type EventDataSerde interface {
-	Unmarshal(b []byte, d estoria.EntityEventData) error
-	Marshal(d estoria.EntityEventData) ([]byte, error)
-}
-
-type JSONEventDataSerde struct{}
-
-func (s JSONEventDataSerde) Unmarshal(b []byte, d estoria.EntityEventData) error {
-	return json.Unmarshal(b, d)
-}
-
-func (s JSONEventDataSerde) Marshal(d estoria.EntityEventData) ([]byte, error) {
-	return json.Marshal(d)
-}
 
 // An EventSourcedAggregateStore loads and saves aggregates using an EventStore.
 // It hydrates aggregates by reading events from the event store and applying them to the aggregate.
