@@ -60,11 +60,6 @@ func (s *HookableAggregateStore[E]) AddHook(stage HookStage, hook Hook[E]) {
 	s.hooks[stage] = append(s.hooks[stage], hook)
 }
 
-// AllowEvents allows event types to be used with the aggregate store.
-func (s *HookableAggregateStore[E]) AllowEvents(prototypes ...estoria.EntityEventData) {
-	s.store.AllowEvents(prototypes...)
-}
-
 // NewAggregate creates a new aggregate.
 func (s *HookableAggregateStore[E]) NewAggregate() (*estoria.Aggregate[E], error) {
 	s.log.Debug("creating new aggregate")

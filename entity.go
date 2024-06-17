@@ -10,6 +10,7 @@ import (
 type Entity interface {
 	EntityID() typeid.TypeID
 	SetEntityID(id typeid.TypeID)
+	EventTypes() []EntityEventData
 	ApplyEvent(ctx context.Context, eventData EntityEventData) error
 }
 

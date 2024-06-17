@@ -4,10 +4,8 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"math/rand/v2"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/go-estoria/estoria"
 	"github.com/go-estoria/estoria/outbox"
@@ -49,7 +47,6 @@ func (o *Outbox) HandleEvents(ctx context.Context, events []estoria.EventStoreEv
 	slog.Info("inserting events into outbox", "tx", "inherited", "events", len(events))
 
 	for _, event := range events {
-		<-time.After(time.Duration(rand.IntN(200)) * time.Millisecond)
 		item := &outboxItem{
 			id:        uuid.Must(uuid.NewV7()),
 			streamID:  event.StreamID(),

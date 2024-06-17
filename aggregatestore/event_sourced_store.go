@@ -41,6 +41,10 @@ func New[E estoria.Entity](
 		log:                slog.Default().WithGroup("aggregatestore"),
 	}
 
+	for _, prototype := range store.NewEntity().EventTypes() {
+		store.eventDataFactories[prototype.EventType()] = prototype.New
+	}
+
 	for _, opt := range opts {
 		if err := opt(store); err != nil {
 			return nil, fmt.Errorf("applying option: %w", err)
@@ -48,13 +52,6 @@ func New[E estoria.Entity](
 	}
 
 	return store, nil
-}
-
-// AllowEvents allows event types to be used with the aggregate store.
-func (s *EventSourcedAggregateStore[E]) AllowEvents(prototypes ...estoria.EntityEventData) {
-	for _, prototype := range prototypes {
-		s.eventDataFactories[prototype.EventType()] = prototype.New
-	}
 }
 
 func (s *EventSourcedAggregateStore[E]) NewAggregate() (*estoria.Aggregate[E], error) {

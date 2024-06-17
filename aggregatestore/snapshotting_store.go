@@ -74,11 +74,6 @@ func NewSnapshottingAggregateStore[E estoria.Entity](
 	return store
 }
 
-// AllowEvents allows event types to be used with the aggregate store.
-func (s *SnapshottingAggregateStore[E]) AllowEvents(prototypes ...estoria.EntityEventData) {
-	s.inner.AllowEvents(prototypes...)
-}
-
 // NewAggregate creates a new aggregate.
 func (s *SnapshottingAggregateStore[E]) NewAggregate() (*estoria.Aggregate[E], error) {
 	return s.inner.NewAggregate()

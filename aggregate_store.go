@@ -11,7 +11,6 @@ import (
 // See package `aggregatestore` for various implementations.
 type AggregateStore[E Entity] interface {
 	NewAggregate() (*Aggregate[E], error)
-	AllowEvents(prototypes ...EntityEventData)
 	Load(ctx context.Context, id typeid.TypeID, opts LoadAggregateOptions) (*Aggregate[E], error)
 	Hydrate(ctx context.Context, aggregate *Aggregate[E], opts HydrateAggregateOptions) error
 	Save(ctx context.Context, aggregate *Aggregate[E], opts SaveAggregateOptions) error

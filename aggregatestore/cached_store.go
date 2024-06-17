@@ -32,11 +32,6 @@ func NewCachedAggregateStore[E estoria.Entity](
 
 var _ estoria.AggregateStore[estoria.Entity] = (*CachedAggregateStore[estoria.Entity])(nil)
 
-// AllowEvents allows event types to be used with the aggregate store.
-func (s *CachedAggregateStore[E]) AllowEvents(prototypes ...estoria.EntityEventData) {
-	s.store.AllowEvents(prototypes...)
-}
-
 // NewAggregate creates a new aggregate.
 func (s *CachedAggregateStore[E]) NewAggregate() (*estoria.Aggregate[E], error) {
 	return s.store.NewAggregate()
