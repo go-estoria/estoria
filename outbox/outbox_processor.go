@@ -7,10 +7,12 @@ import (
 	"time"
 
 	"github.com/go-estoria/estoria/typeid"
+	"github.com/gofrs/uuid/v5"
 )
 
 type Outbox interface {
 	Iterator() (Iterator, error)
+	MarkHandled(ctx context.Context, itemID uuid.UUID, result HandlerResult) error
 }
 
 type Iterator interface {
@@ -18,35 +20,31 @@ type Iterator interface {
 }
 
 type OutboxItem interface {
+	ID() uuid.UUID
 	StreamID() typeid.TypeID
 	EventID() typeid.UUID
 	EventData() []byte
 	Handlers() HandlerResultMap
-	Lock()
-	Unlock()
-	SetHandlerError(handlerName string, err error)
-	SetCompletedAt(handlerName string, at time.Time)
+	FullyProcessed() bool
 }
 
 type HandlerResult struct {
+	HandlerName string
 	CompletedAt time.Time
 	Error       error
 }
 
 type HandlerResultMap map[string]*HandlerResult
 
-func (m HandlerResultMap) FullyProcessed() bool {
-	if len(m) == 0 {
-		return true
-	}
-
-	for _, result := range m {
+func (m HandlerResultMap) IncompleteHandlers() []string {
+	var handlers []string
+	for handlerName, result := range m {
 		if result.Error != nil || result.CompletedAt.IsZero() {
-			return false
+			handlers = append(handlers, handlerName)
 		}
 	}
 
-	return true
+	return handlers
 }
 
 func (r HandlerResult) String() string {
@@ -100,32 +98,35 @@ func (p *Processor) Stop() {
 }
 
 func (p *Processor) Handle(ctx context.Context, entry OutboxItem) error {
-	entry.Lock()
-	defer entry.Unlock()
-
-	if entry.Handlers().FullyProcessed() {
+	if entry.FullyProcessed() {
 		slog.Info("nothing to process", "event_id", entry.EventID())
 		return nil
 	}
 
 	handlers := entry.Handlers()
-	errorCount := 0
-	for handlerName, handlerResult := range handlers {
-		if !handlerResult.CompletedAt.IsZero() {
+	remainingHandlerNames := handlers.IncompleteHandlers()
+	for _, handlerName := range remainingHandlerNames {
+		if !handlers[handlerName].CompletedAt.IsZero() {
 			continue
 		}
 
 		handler, ok := p.handlers[handlerName]
-		if ok {
-			if err := handler.Handle(ctx, entry); err != nil {
-				slog.Error("handling outbox item", "handler", handler.Name(), "error", err)
-				entry.SetHandlerError(handler.Name(), err)
-				errorCount++
-			} else {
-				entry.SetCompletedAt(handler.Name(), time.Now())
-			}
-		} else {
+		if !ok {
 			slog.Warn("no handler found for outbox item", "handler", handlerName, "event_id", entry.EventID())
+			continue
+		}
+
+		if err := handler.Handle(ctx, entry); err != nil {
+			slog.Error("handling outbox item", "handler", handler.Name(), "error", err)
+			p.outbox.MarkHandled(ctx, entry.ID(), HandlerResult{
+				HandlerName: handler.Name(),
+				Error:       err,
+			})
+		} else {
+			p.outbox.MarkHandled(ctx, entry.ID(), HandlerResult{
+				HandlerName: handler.Name(),
+				CompletedAt: time.Now(),
+			})
 		}
 	}
 
