@@ -39,7 +39,16 @@ func (s *EventStore) AppendStream(ctx context.Context, streamID typeid.TypeID, o
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	stream := s.events[streamID.String()]
+	stream, ok := s.events[streamID.String()]
+	if !ok {
+		s.events[streamID.String()] = []estoria.EventStoreEvent{}
+		stream = s.events[streamID.String()]
+	}
+
+	if opts.ExpectVersion > 0 && opts.ExpectVersion != int64(len(stream)) {
+		return estoria.ErrStreamVersionMismatch
+	}
+
 	tx := []estoria.EventStoreEvent{}
 	for _, event := range events {
 		if slices.ContainsFunc(stream, func(e estoria.EventStoreEvent) bool {

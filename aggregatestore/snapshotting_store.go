@@ -9,12 +9,12 @@ import (
 	"time"
 
 	"github.com/go-estoria/estoria"
-	"github.com/go-estoria/estoria/snapshot"
+	"github.com/go-estoria/estoria/snapshotstore"
 	"github.com/go-estoria/estoria/typeid"
 )
 
 type SnapshotReader interface {
-	ReadSnapshot(ctx context.Context, aggregateID typeid.TypeID, opts snapshot.ReadOptions) (estoria.Snapshot, error)
+	ReadSnapshot(ctx context.Context, aggregateID typeid.TypeID, opts snapshotstore.ReadOptions) (estoria.AggregateSnapshot, error)
 }
 
 type SnapshotWriter interface {
@@ -105,7 +105,7 @@ func (s *SnapshottingAggregateStore[E]) Hydrate(ctx context.Context, aggregate *
 	log := s.log.With("aggregate_id", aggregate.ID())
 	log.Debug("hydrating aggregate from snapshot", "from_version", aggregate.Version(), "to_version", opts.ToVersion)
 
-	snap, err := s.reader.ReadSnapshot(ctx, aggregate.ID(), snapshot.ReadOptions{
+	snap, err := s.reader.ReadSnapshot(ctx, aggregate.ID(), snapshotstore.ReadOptions{
 		MaxVersion: opts.ToVersion,
 	})
 	if err != nil {

@@ -1,4 +1,4 @@
-package snapshot
+package snapshotstore
 
 import (
 	"context"
@@ -23,7 +23,7 @@ func NewEventStreamReader(eventReader estoria.EventStreamReader) *EventStreamRea
 	}
 }
 
-func (s *EventStreamReader) ReadSnapshot(ctx context.Context, aggregateID typeid.TypeID, opts ReadOptions) (estoria.Snapshot, error) {
+func (s *EventStreamReader) ReadSnapshot(ctx context.Context, aggregateID typeid.TypeID, opts ReadOptions) (estoria.AggregateSnapshot, error) {
 	slog.Debug("finding snapshot", "aggregate_id", aggregateID)
 
 	snapshotStreamID := typeid.FromString(aggregateID.TypeName()+"snapshot", aggregateID.Value())

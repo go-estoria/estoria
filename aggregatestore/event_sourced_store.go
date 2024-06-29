@@ -183,7 +183,9 @@ func (s *EventSourcedAggregateStore[E]) Save(ctx context.Context, aggregate *est
 	}
 
 	// assume to be atomic, for now (it's not)
-	if err := s.EventWriter.AppendStream(ctx, aggregate.ID(), estoria.AppendStreamOptions{}, toSave); err != nil {
+	if err := s.EventWriter.AppendStream(ctx, aggregate.ID(), estoria.AppendStreamOptions{
+		ExpectVersion: aggregate.Version(),
+	}, toSave); err != nil {
 		return fmt.Errorf("saving events: %w", err)
 	}
 

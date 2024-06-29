@@ -6,7 +6,7 @@ import (
 	"github.com/go-estoria/estoria/typeid"
 )
 
-type Snapshot interface {
+type AggregateSnapshot interface {
 	AggregateID() typeid.TypeID
 	AggregateVersion() int64
 	Data() []byte

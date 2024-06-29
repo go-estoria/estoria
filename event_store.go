@@ -2,6 +2,7 @@ package estoria
 
 import (
 	"context"
+	"errors"
 
 	"github.com/go-estoria/estoria/typeid"
 )
@@ -69,3 +70,6 @@ type AppendStreamOptions struct {
 	// Default: 0 (no expectation)
 	ExpectVersion int64
 }
+
+// ErrStreamVersionMismatch is returned when the expected stream version does not match the actual stream version.
+var ErrStreamVersionMismatch = errors.New("stream version mismatch")
