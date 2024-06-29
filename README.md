@@ -9,7 +9,7 @@ See [Getting Started](#getting-started) to start using Estoria.
 ## V1 Roadmap (subject to change)
 
 - [~] Features
-  - [X] Aggregate Store
+  - [X] Aggregate Store Implementations
     - [X] Event-Sourced (Core)
     - [X] Cached
     - [X] Snapshotting
@@ -28,8 +28,16 @@ See [Getting Started](#getting-started) to start using Estoria.
       - [?] Cassandra (uncommitted)
       - [?] Google Cloud Firestore (uncommitted)
       - [?] MSSQL (uncommitted)
-  - [ ] Outbox Processing
-  - [X] Event-sourced Aggregate Store
+  - [~] Snapshot Store Implementations
+    - [X] In-memory
+    - [~] Persistent
+      - [X] Event Store
+      - [ ] Event-Sourced (uncommitted) (incremental snapshot diffing)
+      - [ ] 3rd Party (via [estoria-contrib](https://github.com/go-estoria/estoria-contrib))
+        - [ ] EventStoreDB
+        - [ ] Postgres
+        - [ ] MongoDB
+  - [X] Outbox Processing
 - [ ] Tests
   - [ ] Unit Tests
   - [ ] Integration Tests
