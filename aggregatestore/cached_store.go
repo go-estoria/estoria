@@ -33,8 +33,8 @@ func NewCachedAggregateStore[E estoria.Entity](
 var _ estoria.AggregateStore[estoria.Entity] = (*CachedAggregateStore[estoria.Entity])(nil)
 
 // NewAggregate creates a new aggregate.
-func (s *CachedAggregateStore[E]) NewAggregate() (*estoria.Aggregate[E], error) {
-	return s.store.NewAggregate()
+func (s *CachedAggregateStore[E]) NewAggregate(id typeid.TypeID) (*estoria.Aggregate[E], error) {
+	return s.store.NewAggregate(id)
 }
 
 func (s *CachedAggregateStore[E]) Load(ctx context.Context, id typeid.TypeID, opts estoria.LoadAggregateOptions) (*estoria.Aggregate[E], error) {

@@ -61,7 +61,7 @@ func (s *HookableAggregateStore[E]) AddHook(stage HookStage, hook Hook[E]) {
 }
 
 // NewAggregate creates a new aggregate.
-func (s *HookableAggregateStore[E]) NewAggregate() (*estoria.Aggregate[E], error) {
+func (s *HookableAggregateStore[E]) NewAggregate(id typeid.TypeID) (*estoria.Aggregate[E], error) {
 	s.log.Debug("creating new aggregate")
 	for _, hook := range s.precreateHooks {
 		if err := hook(); err != nil {
@@ -69,7 +69,7 @@ func (s *HookableAggregateStore[E]) NewAggregate() (*estoria.Aggregate[E], error
 		}
 	}
 
-	aggregate, err := s.store.NewAggregate()
+	aggregate, err := s.store.NewAggregate(id)
 	if err != nil {
 		return nil, err
 	}

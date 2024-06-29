@@ -76,10 +76,6 @@ func (a *Aggregate[E]) QueueEventForApplication(event EntityEvent) {
 	a.unappliedEvents = append(a.unappliedEvents, event)
 }
 
-func (a *Aggregate[E]) SetID(id typeid.TypeID) {
-	a.entity.SetEntityID(id)
-}
-
 func (a *Aggregate[E]) SetEntity(entity E) {
 	a.unsavedEvents = nil
 	a.entity = entity

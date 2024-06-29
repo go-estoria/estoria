@@ -75,20 +75,18 @@ func NewSnapshottingAggregateStore[E estoria.Entity](
 }
 
 // NewAggregate creates a new aggregate.
-func (s *SnapshottingAggregateStore[E]) NewAggregate() (*estoria.Aggregate[E], error) {
-	return s.inner.NewAggregate()
+func (s *SnapshottingAggregateStore[E]) NewAggregate(id typeid.TypeID) (*estoria.Aggregate[E], error) {
+	return s.inner.NewAggregate(id)
 }
 
 // Load loads an aggregate by its ID.
 func (s *SnapshottingAggregateStore[E]) Load(ctx context.Context, aggregateID typeid.TypeID, opts estoria.LoadAggregateOptions) (*estoria.Aggregate[E], error) {
 	s.log.Debug("loading aggregate", "aggregate_id", aggregateID)
-	aggregate, err := s.NewAggregate()
+	aggregate, err := s.NewAggregate(aggregateID)
 	if err != nil {
 		slog.Warn("failed to create new aggregate", "error", err)
 		return s.inner.Load(ctx, aggregateID, opts)
 	}
-
-	aggregate.SetID(aggregateID)
 
 	if err := s.Hydrate(ctx, aggregate, estoria.HydrateAggregateOptions{
 		ToVersion: opts.ToVersion,
