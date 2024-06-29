@@ -18,7 +18,7 @@ type EventSourcedAggregateStore[E estoria.Entity] struct {
 	EventWriter estoria.EventStreamWriter
 
 	NewEntity          estoria.EntityFactory[E]
-	eventDataFactories map[string]func() estoria.EntityEventData
+	eventDataFactories map[string]func() estoria.EntityEvent
 	eventDataSerde     estoria.EventDataSerde
 
 	log *slog.Logger
@@ -36,7 +36,7 @@ func New[E estoria.Entity](
 		EventReader:        eventReader,
 		EventWriter:        eventWriter,
 		NewEntity:          entityFactory,
-		eventDataFactories: make(map[string]func() estoria.EntityEventData),
+		eventDataFactories: make(map[string]func() estoria.EntityEvent),
 		eventDataSerde:     JSONEventDataSerde{},
 		log:                slog.Default().WithGroup("aggregatestore"),
 	}
@@ -57,7 +57,6 @@ func New[E estoria.Entity](
 func (s *EventSourcedAggregateStore[E]) NewAggregate() (*estoria.Aggregate[E], error) {
 	entity := s.NewEntity()
 	aggregate := &estoria.Aggregate[E]{}
-	aggregate.SetID(entity.EntityID())
 	aggregate.SetEntity(entity)
 
 	s.log.Debug("created new aggregate", "aggregate_id", aggregate.ID())
@@ -182,7 +181,6 @@ func (s *EventSourcedAggregateStore[E]) Save(ctx context.Context, aggregate *est
 		}
 	}
 
-	// assume to be atomic, for now (it's not)
 	if err := s.EventWriter.AppendStream(ctx, aggregate.ID(), estoria.AppendStreamOptions{
 		ExpectVersion: aggregate.Version(),
 	}, toSave); err != nil {

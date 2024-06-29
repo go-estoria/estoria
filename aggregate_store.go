@@ -53,8 +53,8 @@ type SaveAggregateOptions struct {
 }
 
 type EventDataSerde interface {
-	Unmarshal(b []byte, d EntityEventData) error
-	Marshal(d EntityEventData) ([]byte, error)
+	Unmarshal(b []byte, d EntityEvent) error
+	Marshal(d EntityEvent) ([]byte, error)
 }
 
 // ErrStreamNotFound is returned when a stream is not found.

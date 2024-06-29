@@ -31,7 +31,7 @@ func NewOutbox() *Outbox {
 // RegisterHandlers registers handlers for a specific event type.
 // The handlers names are associated with the event type and added to the outbox items,
 // so that one or more outbox processors can track and process the items.
-func (o *Outbox) RegisterHandlers(eventType estoria.EntityEventData, handlers ...outbox.ItemHandler) {
+func (o *Outbox) RegisterHandlers(eventType estoria.EntityEvent, handlers ...outbox.ItemHandler) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 

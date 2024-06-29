@@ -14,22 +14,28 @@ type AggregateEvent[E Entity] interface {
 	ID() typeid.UUID
 	AggregateID() typeid.TypeID
 	Timestamp() time.Time
-	Data() EntityEventData
+	Data() EntityEvent
 }
 
 // An Aggregate is a reconstructed representation of an event-sourced entity's state.
 type Aggregate[E Entity] struct {
-	id                 typeid.TypeID
-	entity             E
-	unsavedEvents      []AggregateEvent[E]
-	unappliedEventData []EntityEventData
-	version            int64
+	// the entity that the aggregate represents
+	entity E
+
+	// appended to the aggregate but not yet persisted
+	unsavedEvents []AggregateEvent[E]
+
+	// events loaded from persistence or newly saved but not yet applied to the entity
+	unappliedEvents []EntityEvent
+
+	// the number of events that have been applied to the aggregate
+	version int64
 }
 
 // ID returns the aggregate's ID.
 // The ID is the ID of the entity that the aggregate represents.
 func (a *Aggregate[E]) ID() typeid.TypeID {
-	return a.id
+	return a.entity.EntityID()
 }
 
 // Entity returns the aggregate's underlying entity.
@@ -47,7 +53,7 @@ func (a *Aggregate[E]) Version() int64 {
 
 // Append appends the given events to the aggregate's unsaved events.
 // Events are not persisted or applied to the entity until the aggregate is saved.
-func (a *Aggregate[E]) Append(events ...EntityEventData) error {
+func (a *Aggregate[E]) Append(events ...EntityEvent) error {
 	slog.Debug("appending events to aggregate", "aggregate_id", a.ID(), "events", len(events))
 	for _, eventData := range events {
 		eventID, err := typeid.NewUUID(eventData.EventType())
@@ -66,12 +72,12 @@ func (a *Aggregate[E]) Append(events ...EntityEventData) error {
 	return nil
 }
 
-func (a *Aggregate[E]) QueueEventForApplication(event EntityEventData) {
-	a.unappliedEventData = append(a.unappliedEventData, event)
+func (a *Aggregate[E]) QueueEventForApplication(event EntityEvent) {
+	a.unappliedEvents = append(a.unappliedEvents, event)
 }
 
 func (a *Aggregate[E]) SetID(id typeid.TypeID) {
-	a.id = id
+	a.entity.SetEntityID(id)
 }
 
 func (a *Aggregate[E]) SetEntity(entity E) {
@@ -92,15 +98,15 @@ func (a *Aggregate[E]) UnsavedEvents() []AggregateEvent[E] {
 }
 
 func (a *Aggregate[E]) ApplyNext(ctx context.Context) error {
-	if len(a.unappliedEventData) == 0 {
+	if len(a.unappliedEvents) == 0 {
 		return ErrNoUnappliedEvents
 	}
 
-	if err := a.entity.ApplyEvent(ctx, a.unappliedEventData[0]); err != nil {
+	if err := a.entity.ApplyEvent(ctx, a.unappliedEvents[0]); err != nil {
 		return fmt.Errorf("applying event: %w", err)
 	}
 
-	a.unappliedEventData = a.unappliedEventData[1:]
+	a.unappliedEvents = a.unappliedEvents[1:]
 	a.version++
 
 	return nil
@@ -112,7 +118,7 @@ type unsavedEvent struct {
 	id          typeid.UUID
 	aggregateID typeid.TypeID
 	timestamp   time.Time
-	data        EntityEventData
+	data        EntityEvent
 }
 
 func (e *unsavedEvent) ID() typeid.UUID {
@@ -127,6 +133,6 @@ func (e *unsavedEvent) Timestamp() time.Time {
 	return e.timestamp
 }
 
-func (e *unsavedEvent) Data() EntityEventData {
+func (e *unsavedEvent) Data() EntityEvent {
 	return e.data
 }

@@ -45,16 +45,16 @@ func (e *event) Data() []byte {
 }
 
 type EventDataSerde interface {
-	Unmarshal(b []byte, d estoria.EntityEventData) error
-	Marshal(d estoria.EntityEventData) ([]byte, error)
+	Unmarshal(b []byte, d estoria.EntityEvent) error
+	Marshal(d estoria.EntityEvent) ([]byte, error)
 }
 
 type JSONEventDataSerde struct{}
 
-func (s JSONEventDataSerde) Unmarshal(b []byte, d estoria.EntityEventData) error {
+func (s JSONEventDataSerde) Unmarshal(b []byte, d estoria.EntityEvent) error {
 	return json.Unmarshal(b, d)
 }
 
-func (s JSONEventDataSerde) Marshal(d estoria.EntityEventData) ([]byte, error) {
+func (s JSONEventDataSerde) Marshal(d estoria.EntityEvent) ([]byte, error) {
 	return json.Marshal(d)
 }

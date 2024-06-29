@@ -10,14 +10,14 @@ import (
 type Entity interface {
 	EntityID() typeid.TypeID
 	SetEntityID(id typeid.TypeID)
-	EventTypes() []EntityEventData
-	ApplyEvent(ctx context.Context, eventData EntityEventData) error
+	EventTypes() []EntityEvent
+	ApplyEvent(ctx context.Context, eventData EntityEvent) error
 }
 
-// EntityEventData is the data of an event.
-type EntityEventData interface {
+// EntityEvent is the data of an event.
+type EntityEvent interface {
 	EventType() string
-	New() EntityEventData
+	New() EntityEvent
 }
 
 // A DiffableEntity is aggregate data that can be diffed against another aggregate data
