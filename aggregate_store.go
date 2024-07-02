@@ -52,7 +52,7 @@ type SaveAggregateOptions struct {
 	SkipApply bool
 }
 
-type EventDataSerde interface {
+type EntityEventMarshaler interface {
 	Unmarshal(b []byte, d EntityEvent) error
 	Marshal(d EntityEvent) ([]byte, error)
 }

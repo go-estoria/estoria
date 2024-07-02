@@ -11,16 +11,16 @@ import (
 	"github.com/go-estoria/estoria/typeid"
 )
 
-type EventSerde interface {
+type EventMarshaler interface {
 	Marshal(event estoria.EventStoreEvent) ([]byte, error)
 	Unmarshal(data []byte, dest estoria.EventStoreEvent) error
 }
 
 type EventStore struct {
-	events map[string][]estoria.EventStoreEvent
-	mu     sync.RWMutex
-	serde  EventSerde
-	outbox *Outbox
+	events    map[string][]estoria.EventStoreEvent
+	mu        sync.RWMutex
+	marshaler EventMarshaler
+	outbox    *Outbox
 }
 
 func NewEventStore(opts ...EventStoreOption) *EventStore {

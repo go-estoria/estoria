@@ -17,9 +17,9 @@ type EventSourcedAggregateStore[E estoria.Entity] struct {
 	EventReader estoria.EventStreamReader
 	EventWriter estoria.EventStreamWriter
 
-	NewEntity          estoria.EntityFactory[E]
-	eventDataFactories map[string]func() estoria.EntityEvent
-	eventDataSerde     estoria.EventDataSerde
+	NewEntity            estoria.EntityFactory[E]
+	eventDataFactories   map[string]func() estoria.EntityEvent
+	entityEventMarshaler estoria.EntityEventMarshaler
 
 	log *slog.Logger
 }
@@ -33,12 +33,12 @@ func NewEventSourcedAggregateStore[E estoria.Entity](
 	opts ...AggregateStoreOption[E],
 ) (*EventSourcedAggregateStore[E], error) {
 	store := &EventSourcedAggregateStore[E]{
-		EventReader:        eventReader,
-		EventWriter:        eventWriter,
-		NewEntity:          entityFactory,
-		eventDataFactories: make(map[string]func() estoria.EntityEvent),
-		eventDataSerde:     JSONEventDataSerde{},
-		log:                slog.Default().WithGroup("aggregatestore"),
+		EventReader:          eventReader,
+		EventWriter:          eventWriter,
+		NewEntity:            entityFactory,
+		eventDataFactories:   make(map[string]func() estoria.EntityEvent),
+		entityEventMarshaler: JSONEventDataSerde{},
+		log:                  slog.Default().WithGroup("aggregatestore"),
 	}
 
 	for _, prototype := range store.NewEntity().EventTypes() {
@@ -142,7 +142,7 @@ func (s *EventSourcedAggregateStore[E]) Hydrate(ctx context.Context, aggregate *
 		}
 
 		entityEvent := newEntityEvent()
-		if err := s.eventDataSerde.Unmarshal(evt.Data(), entityEvent); err != nil {
+		if err := s.entityEventMarshaler.Unmarshal(evt.Data(), entityEvent); err != nil {
 			return fmt.Errorf("deserializing event data: %w", err)
 		}
 
@@ -175,7 +175,7 @@ func (s *EventSourcedAggregateStore[E]) Save(ctx context.Context, aggregate *est
 			return fmt.Errorf("generating event ID: %w", err)
 		}
 
-		data, err := s.eventDataSerde.Marshal(unsavedEvent.Data)
+		data, err := s.entityEventMarshaler.Marshal(unsavedEvent.Data)
 		if err != nil {
 			return fmt.Errorf("serializing event data: %w", err)
 		}
@@ -214,9 +214,9 @@ func (s *EventSourcedAggregateStore[E]) Save(ctx context.Context, aggregate *est
 
 type AggregateStoreOption[E estoria.Entity] func(*EventSourcedAggregateStore[E]) error
 
-func WithEventDataSerde[E estoria.Entity](serde estoria.EventDataSerde) AggregateStoreOption[E] {
+func WithEntityEventMarshaler[E estoria.Entity](marshaler estoria.EntityEventMarshaler) AggregateStoreOption[E] {
 	return func(s *EventSourcedAggregateStore[E]) error {
-		s.eventDataSerde = serde
+		s.entityEventMarshaler = marshaler
 		return nil
 	}
 }

@@ -25,7 +25,7 @@ type SnapshotPolicy interface {
 	ShouldSnapshot(aggregateID typeid.TypeID, aggregateVersion int64, timestamp time.Time) bool
 }
 
-type EntitySnapshotSerde[E estoria.Entity] interface {
+type EntitySnapshotMarshaler[E estoria.Entity] interface {
 	Marshal(entity E) ([]byte, error)
 	Unmarshal(data []byte, dest *E) error
 }
@@ -41,12 +41,12 @@ func (JSONEntitySnapshotSerde[E]) Unmarshal(data []byte, dest *E) error {
 }
 
 type SnapshottingAggregateStore[E estoria.Entity] struct {
-	inner  estoria.AggregateStore[E]
-	reader SnapshotReader
-	writer SnapshotWriter
-	policy SnapshotPolicy
-	serde  EntitySnapshotSerde[E]
-	log    *slog.Logger
+	inner     estoria.AggregateStore[E]
+	reader    SnapshotReader
+	writer    SnapshotWriter
+	policy    SnapshotPolicy
+	marshaler EntitySnapshotMarshaler[E]
+	log       *slog.Logger
 }
 
 var _ estoria.AggregateStore[estoria.Entity] = (*SnapshottingAggregateStore[estoria.Entity])(nil)
@@ -59,12 +59,12 @@ func NewSnapshottingAggregateStore[E estoria.Entity](
 	opts ...SnapshottingAggregateStoreOption[E],
 ) *SnapshottingAggregateStore[E] {
 	store := &SnapshottingAggregateStore[E]{
-		inner:  inner,
-		reader: reader,
-		writer: writer,
-		policy: policy,
-		serde:  JSONEntitySnapshotSerde[E]{},
-		log:    slog.Default().WithGroup("snapshottingaggregatestore"),
+		inner:     inner,
+		reader:    reader,
+		writer:    writer,
+		policy:    policy,
+		marshaler: JSONEntitySnapshotSerde[E]{},
+		log:       slog.Default().WithGroup("snapshottingaggregatestore"),
 	}
 
 	for _, opt := range opts {
@@ -115,7 +115,7 @@ func (s *SnapshottingAggregateStore[E]) Hydrate(ctx context.Context, aggregate *
 	}
 
 	entity := aggregate.Entity()
-	if err := s.serde.Unmarshal(snap.Data(), &entity); err != nil {
+	if err := s.marshaler.Unmarshal(snap.Data(), &entity); err != nil {
 		slog.Warn("failed to unmarshal snapshot", "error", err)
 		return s.inner.Hydrate(ctx, aggregate, opts)
 	}
@@ -155,7 +155,7 @@ func (s *SnapshottingAggregateStore[E]) Save(ctx context.Context, aggregate *est
 
 		if s.policy.ShouldSnapshot(aggregate.ID(), aggregate.Version(), now) {
 			slog.Debug("taking snapshot", "aggregate_id", aggregate.ID(), "version", aggregate.Version())
-			data, err := s.serde.Marshal(aggregate.Entity())
+			data, err := s.marshaler.Marshal(aggregate.Entity())
 			if err != nil {
 				slog.Error("failed to marshal snapshot", "error", err)
 				continue
@@ -173,9 +173,9 @@ func (s *SnapshottingAggregateStore[E]) Save(ctx context.Context, aggregate *est
 
 type SnapshottingAggregateStoreOption[E estoria.Entity] func(*SnapshottingAggregateStore[E]) error
 
-func WithSnapshotSerde[E estoria.Entity](serde EntitySnapshotSerde[E]) SnapshottingAggregateStoreOption[E] {
+func WithSnapshotSerde[E estoria.Entity](marshaler EntitySnapshotMarshaler[E]) SnapshottingAggregateStoreOption[E] {
 	return func(s *SnapshottingAggregateStore[E]) error {
-		s.serde = serde
+		s.marshaler = marshaler
 		return nil
 	}
 }
