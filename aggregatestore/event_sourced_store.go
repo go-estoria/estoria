@@ -26,7 +26,7 @@ type EventSourcedAggregateStore[E estoria.Entity] struct {
 
 var _ estoria.AggregateStore[estoria.Entity] = (*EventSourcedAggregateStore[estoria.Entity])(nil)
 
-func New[E estoria.Entity](
+func NewEventSourcedAggregateStore[E estoria.Entity](
 	eventReader estoria.EventStreamReader,
 	eventWriter estoria.EventStreamWriter,
 	entityFactory estoria.EntityFactory[E],
