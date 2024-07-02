@@ -30,7 +30,7 @@ func NewEventSourcedAggregateStore[E estoria.Entity](
 	eventReader estoria.EventStreamReader,
 	eventWriter estoria.EventStreamWriter,
 	entityFactory estoria.EntityFactory[E],
-	opts ...AggregateStoreOption[E],
+	opts ...EventSourcedAggregateStoreOption[E],
 ) (*EventSourcedAggregateStore[E], error) {
 	store := &EventSourcedAggregateStore[E]{
 		EventReader:          eventReader,
@@ -212,9 +212,9 @@ func (s *EventSourcedAggregateStore[E]) Save(ctx context.Context, aggregate *est
 	return nil
 }
 
-type AggregateStoreOption[E estoria.Entity] func(*EventSourcedAggregateStore[E]) error
+type EventSourcedAggregateStoreOption[E estoria.Entity] func(*EventSourcedAggregateStore[E]) error
 
-func WithEntityEventMarshaler[E estoria.Entity](marshaler estoria.EntityEventMarshaler) AggregateStoreOption[E] {
+func WithEntityEventMarshaler[E estoria.Entity](marshaler estoria.EntityEventMarshaler) EventSourcedAggregateStoreOption[E] {
 	return func(s *EventSourcedAggregateStore[E]) error {
 		s.entityEventMarshaler = marshaler
 		return nil
