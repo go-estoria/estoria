@@ -44,17 +44,17 @@ func (e *event) Data() []byte {
 	return e.data
 }
 
-type EventDataSerde interface {
+type EventDataMarshaler interface {
 	Unmarshal(b []byte, d estoria.EntityEvent) error
 	Marshal(d estoria.EntityEvent) ([]byte, error)
 }
 
-type JSONEventDataSerde struct{}
+type JSONEventDataMarshaler struct{}
 
-func (s JSONEventDataSerde) Unmarshal(b []byte, d estoria.EntityEvent) error {
+func (s JSONEventDataMarshaler) Unmarshal(b []byte, d estoria.EntityEvent) error {
 	return json.Unmarshal(b, d)
 }
 
-func (s JSONEventDataSerde) Marshal(d estoria.EntityEvent) ([]byte, error) {
+func (s JSONEventDataMarshaler) Marshal(d estoria.EntityEvent) ([]byte, error) {
 	return json.Marshal(d)
 }

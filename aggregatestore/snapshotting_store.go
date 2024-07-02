@@ -30,13 +30,13 @@ type EntitySnapshotMarshaler[E estoria.Entity] interface {
 	Unmarshal(data []byte, dest *E) error
 }
 
-type JSONEntitySnapshotSerde[E estoria.Entity] struct{}
+type JSONEntitySnapshotMarshaler[E estoria.Entity] struct{}
 
-func (JSONEntitySnapshotSerde[E]) Marshal(entity E) ([]byte, error) {
+func (JSONEntitySnapshotMarshaler[E]) Marshal(entity E) ([]byte, error) {
 	return json.Marshal(entity)
 }
 
-func (JSONEntitySnapshotSerde[E]) Unmarshal(data []byte, dest *E) error {
+func (JSONEntitySnapshotMarshaler[E]) Unmarshal(data []byte, dest *E) error {
 	return json.Unmarshal(data, dest)
 }
 
@@ -63,7 +63,7 @@ func NewSnapshottingAggregateStore[E estoria.Entity](
 		reader:    reader,
 		writer:    writer,
 		policy:    policy,
-		marshaler: JSONEntitySnapshotSerde[E]{},
+		marshaler: JSONEntitySnapshotMarshaler[E]{},
 		log:       slog.Default().WithGroup("snapshottingaggregatestore"),
 	}
 
@@ -173,7 +173,7 @@ func (s *SnapshottingAggregateStore[E]) Save(ctx context.Context, aggregate *est
 
 type SnapshottingAggregateStoreOption[E estoria.Entity] func(*SnapshottingAggregateStore[E]) error
 
-func WithSnapshotSerde[E estoria.Entity](marshaler EntitySnapshotMarshaler[E]) SnapshottingAggregateStoreOption[E] {
+func WithSnapshotMarshaler[E estoria.Entity](marshaler EntitySnapshotMarshaler[E]) SnapshottingAggregateStoreOption[E] {
 	return func(s *SnapshottingAggregateStore[E]) error {
 		s.marshaler = marshaler
 		return nil
