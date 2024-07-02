@@ -10,20 +10,13 @@ import (
 	"github.com/go-estoria/estoria/typeid"
 )
 
-type AggregateEvent[E Entity] interface {
-	ID() typeid.UUID
-	AggregateID() typeid.TypeID
-	Timestamp() time.Time
-	Data() EntityEvent
-}
-
 // An Aggregate is a reconstructed representation of an event-sourced entity's state.
 type Aggregate[E Entity] struct {
 	// the entity that the aggregate represents
 	entity E
 
 	// appended to the aggregate but not yet persisted
-	unsavedEvents []AggregateEvent[E]
+	unsavedEvents []AggregateEvent
 
 	// events loaded from persistence or newly saved but not yet applied to the entity
 	unappliedEvents []EntityEvent
@@ -61,18 +54,17 @@ func (a *Aggregate[E]) Append(events ...EntityEvent) error {
 			return fmt.Errorf("generating event ID: %w", err)
 		}
 
-		a.unsavedEvents = append(a.unsavedEvents, &unsavedEvent{
-			id:          eventID,
-			aggregateID: a.ID(),
-			timestamp:   time.Now(),
-			data:        eventData,
+		a.unsavedEvents = append(a.unsavedEvents, AggregateEvent{
+			ID:        eventID,
+			Timestamp: time.Now(),
+			Data:      eventData,
 		})
 	}
 
 	return nil
 }
 
-func (a *Aggregate[E]) QueueEventForApplication(event EntityEvent) {
+func (a *Aggregate[E]) QueueForApplication(event EntityEvent) {
 	a.unappliedEvents = append(a.unappliedEvents, event)
 }
 
@@ -89,7 +81,7 @@ func (a *Aggregate[E]) ClearUnsavedEvents() {
 	a.unsavedEvents = nil
 }
 
-func (a *Aggregate[E]) UnsavedEvents() []AggregateEvent[E] {
+func (a *Aggregate[E]) UnsavedEvents() []AggregateEvent {
 	return a.unsavedEvents
 }
 
@@ -110,25 +102,8 @@ func (a *Aggregate[E]) ApplyNext(ctx context.Context) error {
 
 var ErrNoUnappliedEvents = errors.New("no unapplied events")
 
-type unsavedEvent struct {
-	id          typeid.UUID
-	aggregateID typeid.TypeID
-	timestamp   time.Time
-	data        EntityEvent
-}
-
-func (e *unsavedEvent) ID() typeid.UUID {
-	return e.id
-}
-
-func (e *unsavedEvent) AggregateID() typeid.TypeID {
-	return e.aggregateID
-}
-
-func (e *unsavedEvent) Timestamp() time.Time {
-	return e.timestamp
-}
-
-func (e *unsavedEvent) Data() EntityEvent {
-	return e.data
+type AggregateEvent struct {
+	ID        typeid.UUID
+	Timestamp time.Time
+	Data      EntityEvent
 }
