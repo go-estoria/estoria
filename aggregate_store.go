@@ -52,11 +52,6 @@ type SaveAggregateOptions struct {
 	SkipApply bool
 }
 
-type EntityEventMarshaler interface {
-	Unmarshal(b []byte, d EntityEvent) error
-	Marshal(d EntityEvent) ([]byte, error)
-}
-
 // ErrStreamNotFound is returned when a stream is not found.
 var ErrStreamNotFound = errors.New("stream not found")
 

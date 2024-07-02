@@ -11,15 +11,10 @@ import (
 	"github.com/go-estoria/estoria/typeid"
 )
 
-type EventMarshaler interface {
-	Marshal(event estoria.EventStoreEvent) ([]byte, error)
-	Unmarshal(data []byte, dest estoria.EventStoreEvent) error
-}
-
 type EventStore struct {
 	events    map[string][]estoria.EventStoreEvent
 	mu        sync.RWMutex
-	marshaler EventMarshaler
+	marshaler estoria.EventStoreEventMarshaler
 	outbox    *Outbox
 }
 

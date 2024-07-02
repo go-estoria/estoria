@@ -1,7 +1,6 @@
 package aggregatestore
 
 import (
-	"encoding/json"
 	"time"
 
 	"github.com/go-estoria/estoria"
@@ -42,19 +41,4 @@ func (e *event) Timestamp() time.Time {
 // Data returns the event's data.
 func (e *event) Data() []byte {
 	return e.data
-}
-
-type EventDataMarshaler interface {
-	Unmarshal(b []byte, d estoria.EntityEvent) error
-	Marshal(d estoria.EntityEvent) ([]byte, error)
-}
-
-type JSONEventDataMarshaler struct{}
-
-func (s JSONEventDataMarshaler) Unmarshal(b []byte, d estoria.EntityEvent) error {
-	return json.Unmarshal(b, d)
-}
-
-func (s JSONEventDataMarshaler) Marshal(d estoria.EntityEvent) ([]byte, error) {
-	return json.Marshal(d)
 }

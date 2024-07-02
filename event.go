@@ -14,3 +14,8 @@ type EventStoreEvent interface {
 	Timestamp() time.Time
 	Data() []byte
 }
+
+type EventStoreEventMarshaler interface {
+	Marshal(event EventStoreEvent) ([]byte, error)
+	Unmarshal(data []byte, dest EventStoreEvent) error
+}

@@ -37,7 +37,7 @@ func NewEventSourcedAggregateStore[E estoria.Entity](
 		EventWriter:          eventWriter,
 		NewEntity:            entityFactory,
 		eventDataFactories:   make(map[string]func() estoria.EntityEvent),
-		entityEventMarshaler: JSONEventDataMarshaler{},
+		entityEventMarshaler: estoria.JSONEntityEventMarshaler{},
 		log:                  slog.Default().WithGroup("aggregatestore"),
 	}
 
