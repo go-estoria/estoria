@@ -13,11 +13,11 @@ import (
 )
 
 type SnapshotReader interface {
-	ReadSnapshot(ctx context.Context, aggregateID typeid.TypeID, opts snapshotstore.ReadOptions) (estoria.AggregateSnapshot, error)
+	ReadSnapshot(ctx context.Context, aggregateID typeid.TypeID, opts snapshotstore.ReadOptions) (*estoria.AggregateSnapshot, error)
 }
 
 type SnapshotWriter interface {
-	WriteSnapshot(ctx context.Context, aggregateID typeid.TypeID, aggregateVersion int64, entityData []byte) error
+	WriteSnapshot(ctx context.Context, snap *estoria.AggregateSnapshot) error
 }
 
 type SnapshotPolicy interface {
@@ -99,7 +99,7 @@ func (s *SnapshottingAggregateStore[E]) Hydrate(ctx context.Context, aggregate *
 	}
 
 	entity := aggregate.Entity()
-	if err := s.marshaler.Unmarshal(snap.Data(), &entity); err != nil {
+	if err := s.marshaler.Unmarshal(snap.Data, &entity); err != nil {
 		slog.Warn("failed to unmarshal snapshot", "error", err)
 		return s.inner.Hydrate(ctx, aggregate, opts)
 	}
@@ -109,10 +109,10 @@ func (s *SnapshottingAggregateStore[E]) Hydrate(ctx context.Context, aggregate *
 		return s.inner.Hydrate(ctx, aggregate, opts)
 	}
 
-	log.Debug("loaded snapshot", "version", snap.AggregateVersion())
+	log.Debug("loaded snapshot", "version", snap.AggregateVersion)
 
 	aggregate.SetEntity(entity)
-	aggregate.SetVersion(snap.AggregateVersion())
+	aggregate.SetVersion(snap.AggregateVersion)
 
 	return s.inner.Hydrate(ctx, aggregate, opts)
 }
@@ -145,7 +145,11 @@ func (s *SnapshottingAggregateStore[E]) Save(ctx context.Context, aggregate *est
 				continue
 			}
 
-			if err := s.writer.WriteSnapshot(ctx, aggregate.ID(), aggregate.Version(), data); err != nil {
+			if err := s.writer.WriteSnapshot(ctx, &estoria.AggregateSnapshot{
+				AggregateID:      aggregate.ID(),
+				AggregateVersion: aggregate.Version(),
+				Data:             data,
+			}); err != nil {
 				slog.Error("failed to write snapshot", "error", err)
 				continue
 			}

@@ -2,7 +2,6 @@ package snapshotstore
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -15,15 +14,17 @@ import (
 
 type EventStreamReader struct {
 	eventReader estoria.EventStreamReader
+	marshaler   estoria.AggregateSnapshotMarshaler
 }
 
 func NewEventStreamReader(eventReader estoria.EventStreamReader) *EventStreamReader {
 	return &EventStreamReader{
 		eventReader: eventReader,
+		marshaler:   estoria.JSONAggregateSnapshotMarshaler{},
 	}
 }
 
-func (s *EventStreamReader) ReadSnapshot(ctx context.Context, aggregateID typeid.TypeID, opts ReadOptions) (estoria.AggregateSnapshot, error) {
+func (s *EventStreamReader) ReadSnapshot(ctx context.Context, aggregateID typeid.TypeID, opts ReadOptions) (*estoria.AggregateSnapshot, error) {
 	slog.Debug("finding snapshot", "aggregate_id", aggregateID)
 
 	snapshotStreamID := typeid.FromString(aggregateID.TypeName()+"snapshot", aggregateID.Value())
@@ -50,9 +51,9 @@ func (s *EventStreamReader) ReadSnapshot(ctx context.Context, aggregateID typeid
 		"stream_id", snapshotStreamID,
 		"stream_version", event.StreamVersion())
 
-	var snapshot snapshot
-	if err := json.Unmarshal(event.Data(), &snapshot); err != nil {
-		return nil, fmt.Errorf("unmarshalling snapshot: %w", err)
+	var snapshot estoria.AggregateSnapshot
+	if err := s.marshaler.UnmarshalSnapshot(event.Data(), &snapshot); err != nil {
+		return nil, fmt.Errorf("unmarshaling snapshot: %w", err)
 	}
 
 	return &snapshot, nil
@@ -64,94 +65,96 @@ type ReadOptions struct {
 
 type EventStreamWriter struct {
 	eventWriter estoria.EventStreamWriter
+	marshaler   estoria.AggregateSnapshotMarshaler
 }
 
 func NewEventStreamWriter(eventWriter estoria.EventStreamWriter) *EventStreamWriter {
 	return &EventStreamWriter{
 		eventWriter: eventWriter,
+		marshaler:   estoria.JSONAggregateSnapshotMarshaler{},
 	}
 }
 
-func (s *EventStreamWriter) WriteSnapshot(ctx context.Context, aggregateID typeid.TypeID, aggregateVersion int64, data []byte) error {
-	slog.Debug("writing snapshot", "aggregate_id", aggregateID, "aggregate_version", aggregateVersion, "data_length", len(data))
+func (s *EventStreamWriter) WriteSnapshot(ctx context.Context, snap *estoria.AggregateSnapshot) error {
+	slog.Debug("writing snapshot",
+		"aggregate_id", snap.AggregateID,
+		"aggregate_version",
+		snap.AggregateVersion,
+		"data_length", len(snap.Data))
 
-	snapshotStreamPrefix := aggregateID.TypeName() + "snapshot"
+	snapshotStreamPrefix := snap.AggregateID.TypeName() + "snapshot"
 
-	snapshotStreamID := typeid.FromString(snapshotStreamPrefix, aggregateID.Value())
+	snapshotStreamID := typeid.FromString(snapshotStreamPrefix, snap.AggregateID.Value())
 
 	eventID, err := typeid.NewUUID(snapshotStreamPrefix)
 	if err != nil {
 		return fmt.Errorf("generating snapshot event ID: %w", err)
 	}
 
-	// this data wraps the snapshot data with the aggregate ID and version
-	eventData, err := json.Marshal(snapshot{
-		SnapshotAggregateID:      aggregateID.String(),
-		SnapshotAggregateVersion: aggregateVersion,
-		SnapshotData:             data,
-	})
+	// event data includes the aggregate ID, aggregate version, and snapshot data
+	eventData, err := s.marshaler.MarshalSnapshot(snap)
 	if err != nil {
-		return fmt.Errorf("marshalling snapshot data for stream event: %w", err)
+		return fmt.Errorf("marshaling snapshot data for stream event: %w", err)
 	}
 
-	event := &snapshotEvent{
-		EventID:        eventID,
-		EventStreamID:  snapshotStreamID,
-		EventTimestamp: time.Now(),
-		EventData:      eventData,
-	}
-
-	if err := s.eventWriter.AppendStream(ctx, snapshotStreamID, estoria.AppendStreamOptions{}, []estoria.EventStoreEvent{event}); err != nil {
+	if err := s.eventWriter.AppendStream(ctx, snapshotStreamID, estoria.AppendStreamOptions{}, []estoria.EventStoreEvent{
+		&snapshotEvent{
+			id:        eventID,
+			streamID:  snapshotStreamID,
+			timestamp: time.Now(),
+			data:      eventData,
+		},
+	}); err != nil {
 		return fmt.Errorf("appending snapshot stream: %w", err)
 	}
 
-	slog.Debug("wrote snapshot", "aggregate_id", aggregateID, "snapshot_event_id", event.ID())
+	slog.Debug("wrote snapshot", "aggregate_id", snap.AggregateID, "snapshot_event_id", eventID)
 
 	return nil
 }
 
 type snapshot struct {
-	SnapshotAggregateID      string `json:"aggregate_id"`
-	SnapshotAggregateVersion int64  `json:"aggregate_version"`
-	SnapshotData             []byte `json:"data"`
+	id      string
+	version int64
+	data    []byte
 }
 
-func (s *snapshot) AggregateID() typeid.TypeID {
-	return typeid.Must(typeid.ParseString(s.SnapshotAggregateID))
+func (s snapshot) AggregateID() typeid.TypeID {
+	return typeid.Must(typeid.ParseString(s.id))
 }
 
-func (s *snapshot) AggregateVersion() int64 {
-	return s.SnapshotAggregateVersion
+func (s snapshot) AggregateVersion() int64 {
+	return s.version
 }
 
-func (s *snapshot) Data() []byte {
-	return s.SnapshotData
+func (s snapshot) Data() []byte {
+	return s.data
 }
 
 type snapshotEvent struct {
-	EventID            typeid.UUID
-	EventStreamID      typeid.TypeID
-	EventStreamVersion int64
-	EventTimestamp     time.Time
-	EventData          json.RawMessage
+	id            typeid.UUID
+	streamID      typeid.TypeID
+	streamVersion int64
+	timestamp     time.Time
+	data          []byte
 }
 
-func (e *snapshotEvent) ID() typeid.UUID {
-	return e.EventID
+func (e snapshotEvent) ID() typeid.UUID {
+	return e.id
 }
 
-func (e *snapshotEvent) StreamID() typeid.TypeID {
-	return e.EventStreamID
+func (e snapshotEvent) StreamID() typeid.TypeID {
+	return e.streamID
 }
 
-func (e *snapshotEvent) StreamVersion() int64 {
-	return e.EventStreamVersion
+func (e snapshotEvent) StreamVersion() int64 {
+	return e.streamVersion
 }
 
-func (e *snapshotEvent) Timestamp() time.Time {
-	return e.EventTimestamp
+func (e snapshotEvent) Timestamp() time.Time {
+	return e.timestamp
 }
 
-func (e *snapshotEvent) Data() []byte {
-	return e.EventData
+func (e snapshotEvent) Data() []byte {
+	return e.data
 }

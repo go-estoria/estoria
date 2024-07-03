@@ -25,6 +25,21 @@ type uuidID struct {
 	sep string
 }
 
+func (id uuidID) MarshalJSON() ([]byte, error) {
+	return []byte(fmt.Sprintf(`"%s"`, id.String())), nil
+}
+
+func (id *uuidID) UnmarshalJSON(data []byte) error {
+	tid, err := uuidFactory.Parse(string(data[1 : len(data)-1]))
+	if err != nil {
+		return fmt.Errorf("parsing UUID TypeID: %w", err)
+	}
+
+	*id = tid.(uuidID)
+
+	return nil
+}
+
 var _ UUID = (*uuidID)(nil)
 
 func (id uuidID) String() string {
