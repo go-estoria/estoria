@@ -9,7 +9,7 @@ import (
 // An EventStoreEvent can be appended to and loaded from an event store.
 type EventStoreEvent interface {
 	ID() typeid.UUID
-	StreamID() typeid.TypeID
+	StreamID() typeid.UUID
 	StreamVersion() int64
 	Timestamp() time.Time
 	Data() []byte

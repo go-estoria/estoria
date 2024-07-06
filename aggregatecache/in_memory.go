@@ -33,7 +33,7 @@ type CacheEvictionPolicy struct {
 
 type InMemoryCache[E estoria.Entity] struct {
 	cancel         context.CancelFunc
-	entries        map[typeid.TypeID]*cacheEntry[E]
+	entries        map[typeid.UUID]*cacheEntry[E]
 	evictionPolicy CacheEvictionPolicy
 	mu             sync.RWMutex
 }
@@ -85,7 +85,7 @@ func (c *InMemoryCache[E]) Stop() error {
 	return nil
 }
 
-func (c *InMemoryCache[E]) GetAggregate(_ context.Context, id typeid.TypeID) (*estoria.Aggregate[E], error) {
+func (c *InMemoryCache[E]) GetAggregate(_ context.Context, id typeid.UUID) (*estoria.Aggregate[E], error) {
 	entry := c.get(id)
 	if entry == nil {
 		return nil, nil
@@ -113,7 +113,7 @@ func (c *InMemoryCache[E]) clear() {
 	c.entries = nil
 }
 
-func (c *InMemoryCache[E]) get(id typeid.TypeID) *cacheEntry[E] {
+func (c *InMemoryCache[E]) get(id typeid.UUID) *cacheEntry[E] {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
@@ -129,12 +129,12 @@ func (c *InMemoryCache[E]) get(id typeid.TypeID) *cacheEntry[E] {
 	return entry
 }
 
-func (c *InMemoryCache[E]) put(id typeid.TypeID, entry *cacheEntry[E]) {
+func (c *InMemoryCache[E]) put(id typeid.UUID, entry *cacheEntry[E]) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
 	if c.entries == nil {
-		c.entries = make(map[typeid.TypeID]*cacheEntry[E])
+		c.entries = make(map[typeid.UUID]*cacheEntry[E])
 	}
 
 	if c.evictionPolicy.MaxSize > 0 && len(c.entries) >= c.evictionPolicy.MaxSize {
@@ -146,7 +146,7 @@ func (c *InMemoryCache[E]) put(id typeid.TypeID, entry *cacheEntry[E]) {
 
 func (c *InMemoryCache[E]) evictLRU() {
 	var (
-		lruID    typeid.TypeID
+		lruID    typeid.UUID
 		lruEntry *cacheEntry[E]
 	)
 

@@ -22,7 +22,7 @@ const (
 
 type PrecreateHook func() error
 
-type PreloadHook func(ctx context.Context, id typeid.TypeID) error
+type PreloadHook func(ctx context.Context, id typeid.UUID) error
 
 type Hook[E estoria.Entity] func(ctx context.Context, aggregate *estoria.Aggregate[E]) error
 
@@ -61,7 +61,7 @@ func (s *HookableAggregateStore[E]) AddHook(stage HookStage, hook Hook[E]) {
 }
 
 // NewAggregate creates a new aggregate.
-func (s *HookableAggregateStore[E]) NewAggregate(id typeid.TypeID) (*estoria.Aggregate[E], error) {
+func (s *HookableAggregateStore[E]) NewAggregate(id *typeid.UUID) (*estoria.Aggregate[E], error) {
 	s.log.Debug("creating new aggregate")
 	for _, hook := range s.precreateHooks {
 		if err := hook(); err != nil {
@@ -83,7 +83,7 @@ func (s *HookableAggregateStore[E]) NewAggregate(id typeid.TypeID) (*estoria.Agg
 	return aggregate, nil
 }
 
-func (s *HookableAggregateStore[E]) Load(ctx context.Context, id typeid.TypeID, opts estoria.LoadAggregateOptions) (*estoria.Aggregate[E], error) {
+func (s *HookableAggregateStore[E]) Load(ctx context.Context, id typeid.UUID, opts estoria.LoadAggregateOptions) (*estoria.Aggregate[E], error) {
 	s.log.Debug("loading aggregate", "aggregate_id", id)
 	for _, hook := range s.preloadHooks {
 		if err := hook(ctx, id); err != nil {

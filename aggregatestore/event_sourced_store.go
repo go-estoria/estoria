@@ -54,10 +54,10 @@ func NewEventSourcedAggregateStore[E estoria.Entity](
 	return store, nil
 }
 
-func (s *EventSourcedAggregateStore[E]) NewAggregate(id typeid.TypeID) (*estoria.Aggregate[E], error) {
+func (s *EventSourcedAggregateStore[E]) NewAggregate(id *typeid.UUID) (*estoria.Aggregate[E], error) {
 	entity := s.NewEntity()
 	if id != nil {
-		entity.SetEntityID(id)
+		entity.SetEntityID(*id)
 	}
 
 	aggregate := &estoria.Aggregate[E]{}
@@ -68,10 +68,10 @@ func (s *EventSourcedAggregateStore[E]) NewAggregate(id typeid.TypeID) (*estoria
 }
 
 // Load loads an aggregate by its ID.
-func (s *EventSourcedAggregateStore[E]) Load(ctx context.Context, id typeid.TypeID, opts estoria.LoadAggregateOptions) (*estoria.Aggregate[E], error) {
+func (s *EventSourcedAggregateStore[E]) Load(ctx context.Context, id typeid.UUID, opts estoria.LoadAggregateOptions) (*estoria.Aggregate[E], error) {
 	s.log.Debug("loading aggregate from event store", "aggregate_id", id)
 
-	aggregate, err := s.NewAggregate(id)
+	aggregate, err := s.NewAggregate(&id)
 	if err != nil {
 		return nil, fmt.Errorf("creating new aggregate: %w", err)
 	}

@@ -110,7 +110,7 @@ func (i *OutboxIterator) Next(ctx context.Context) (outbox.OutboxItem, error) {
 
 	for ; i.cursor < len(i.outbox.items) && i.outbox.items[i.cursor].FullyProcessed(); i.cursor++ {
 		// skip items that have been fully processed
-		slog.Info("skipping fully processed outbox item", "event_id", i.outbox.items[i.cursor].EventID())
+		slog.Debug("skipping fully processed outbox item", "event_id", i.outbox.items[i.cursor].EventID())
 	}
 
 	if i.cursor >= len(i.outbox.items) {
@@ -125,7 +125,7 @@ func (i *OutboxIterator) Next(ctx context.Context) (outbox.OutboxItem, error) {
 
 type outboxItem struct {
 	id        uuid.UUID
-	streamID  typeid.TypeID
+	streamID  typeid.UUID
 	eventID   typeid.UUID
 	eventData []byte
 	handlers  outbox.HandlerResultMap
@@ -136,7 +136,7 @@ func (e *outboxItem) ID() uuid.UUID {
 	return e.id
 }
 
-func (e *outboxItem) StreamID() typeid.TypeID {
+func (e *outboxItem) StreamID() typeid.UUID {
 	return e.streamID
 }
 

@@ -21,7 +21,7 @@ type Iterator interface {
 
 type OutboxItem interface {
 	ID() uuid.UUID
-	StreamID() typeid.TypeID
+	StreamID() typeid.UUID
 	EventID() typeid.UUID
 	EventData() []byte
 	Handlers() HandlerResultMap

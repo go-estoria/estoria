@@ -9,7 +9,7 @@ import (
 )
 
 type AggregateCache[E estoria.Entity] interface {
-	GetAggregate(ctx context.Context, aggregateID typeid.TypeID) (*estoria.Aggregate[E], error)
+	GetAggregate(ctx context.Context, aggregateID typeid.UUID) (*estoria.Aggregate[E], error)
 	PutAggregate(ctx context.Context, aggregate *estoria.Aggregate[E]) error
 }
 
@@ -33,11 +33,11 @@ func NewCachedAggregateStore[E estoria.Entity](
 var _ estoria.AggregateStore[estoria.Entity] = (*CachedAggregateStore[estoria.Entity])(nil)
 
 // NewAggregate creates a new aggregate.
-func (s *CachedAggregateStore[E]) NewAggregate(id typeid.TypeID) (*estoria.Aggregate[E], error) {
+func (s *CachedAggregateStore[E]) NewAggregate(id *typeid.UUID) (*estoria.Aggregate[E], error) {
 	return s.store.NewAggregate(id)
 }
 
-func (s *CachedAggregateStore[E]) Load(ctx context.Context, id typeid.TypeID, opts estoria.LoadAggregateOptions) (*estoria.Aggregate[E], error) {
+func (s *CachedAggregateStore[E]) Load(ctx context.Context, id typeid.UUID, opts estoria.LoadAggregateOptions) (*estoria.Aggregate[E], error) {
 	aggregate, err := s.cache.GetAggregate(ctx, id)
 	if err != nil {
 		s.log.Warn("failed to read cache", "error", err)

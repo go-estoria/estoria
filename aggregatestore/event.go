@@ -10,7 +10,7 @@ import (
 // The internal representation of an event store event.
 type event struct {
 	id            typeid.UUID
-	streamID      typeid.TypeID
+	streamID      typeid.UUID
 	streamVersion int64
 	timestamp     time.Time
 	data          []byte
@@ -24,7 +24,7 @@ func (e *event) ID() typeid.UUID {
 }
 
 // StreamID returns the ID of the stream that the event applies to.
-func (e *event) StreamID() typeid.TypeID {
+func (e *event) StreamID() typeid.UUID {
 	return e.streamID
 }
 

@@ -13,7 +13,7 @@ import (
 )
 
 type SnapshotReader interface {
-	ReadSnapshot(ctx context.Context, aggregateID typeid.TypeID, opts snapshotstore.ReadOptions) (*estoria.AggregateSnapshot, error)
+	ReadSnapshot(ctx context.Context, aggregateID typeid.UUID, opts snapshotstore.ReadOptions) (*estoria.AggregateSnapshot, error)
 }
 
 type SnapshotWriter interface {
@@ -21,7 +21,7 @@ type SnapshotWriter interface {
 }
 
 type SnapshotPolicy interface {
-	ShouldSnapshot(aggregateID typeid.TypeID, aggregateVersion int64, timestamp time.Time) bool
+	ShouldSnapshot(aggregateID typeid.UUID, aggregateVersion int64, timestamp time.Time) bool
 }
 
 type SnapshottingAggregateStore[E estoria.Entity] struct {
@@ -59,14 +59,14 @@ func NewSnapshottingAggregateStore[E estoria.Entity](
 }
 
 // NewAggregate creates a new aggregate.
-func (s *SnapshottingAggregateStore[E]) NewAggregate(id typeid.TypeID) (*estoria.Aggregate[E], error) {
+func (s *SnapshottingAggregateStore[E]) NewAggregate(id *typeid.UUID) (*estoria.Aggregate[E], error) {
 	return s.inner.NewAggregate(id)
 }
 
 // Load loads an aggregate by its ID.
-func (s *SnapshottingAggregateStore[E]) Load(ctx context.Context, aggregateID typeid.TypeID, opts estoria.LoadAggregateOptions) (*estoria.Aggregate[E], error) {
+func (s *SnapshottingAggregateStore[E]) Load(ctx context.Context, aggregateID typeid.UUID, opts estoria.LoadAggregateOptions) (*estoria.Aggregate[E], error) {
 	s.log.Debug("loading aggregate", "aggregate_id", aggregateID)
-	aggregate, err := s.NewAggregate(aggregateID)
+	aggregate, err := s.NewAggregate(&aggregateID)
 	if err != nil {
 		slog.Warn("failed to create new aggregate", "error", err)
 		return s.inner.Load(ctx, aggregateID, opts)

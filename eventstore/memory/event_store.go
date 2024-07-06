@@ -30,7 +30,7 @@ func NewEventStore(opts ...EventStoreOption) *EventStore {
 	return eventStore
 }
 
-func (s *EventStore) AppendStream(ctx context.Context, streamID typeid.TypeID, opts estoria.AppendStreamOptions, events []estoria.EventStoreEvent) error {
+func (s *EventStore) AppendStream(ctx context.Context, streamID typeid.UUID, opts estoria.AppendStreamOptions, events []estoria.EventStoreEvent) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -66,7 +66,7 @@ func (s *EventStore) AppendStream(ctx context.Context, streamID typeid.TypeID, o
 	return nil
 }
 
-func (s *EventStore) ReadStream(ctx context.Context, streamID typeid.TypeID, opts estoria.ReadStreamOptions) (estoria.EventStreamIterator, error) {
+func (s *EventStore) ReadStream(ctx context.Context, streamID typeid.UUID, opts estoria.ReadStreamOptions) (estoria.EventStreamIterator, error) {
 	stream, ok := s.events[streamID.String()]
 	if !ok || len(stream) == 0 {
 		return nil, estoria.ErrStreamNotFound
@@ -109,7 +109,7 @@ func WithOutbox(outbox *Outbox) EventStoreOption {
 
 // ErrEventExists is returned when attempting to write an event that already exists.
 type ErrEventExists struct {
-	EventID typeid.TypeID
+	EventID typeid.UUID
 }
 
 // Error returns the error message.

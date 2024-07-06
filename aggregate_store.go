@@ -10,8 +10,8 @@ import (
 // An AggregateStore is a read/write store for aggregates.
 // See package `aggregatestore` for implementations.
 type AggregateStore[E Entity] interface {
-	NewAggregate(id typeid.TypeID) (*Aggregate[E], error)
-	Load(ctx context.Context, id typeid.TypeID, opts LoadAggregateOptions) (*Aggregate[E], error)
+	NewAggregate(id *typeid.UUID) (*Aggregate[E], error)
+	Load(ctx context.Context, id typeid.UUID, opts LoadAggregateOptions) (*Aggregate[E], error)
 	Hydrate(ctx context.Context, aggregate *Aggregate[E], opts HydrateAggregateOptions) error
 	Save(ctx context.Context, aggregate *Aggregate[E], opts SaveAggregateOptions) error
 }

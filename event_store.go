@@ -17,7 +17,7 @@ type EventStore interface {
 type EventStreamReader interface {
 	// ReadStream creates an event stream iterator for reading events from a stream.
 	// The starting point, direction, and number of events to read can be specified in the options.
-	ReadStream(ctx context.Context, id typeid.TypeID, opts ReadStreamOptions) (EventStreamIterator, error)
+	ReadStream(ctx context.Context, id typeid.UUID, opts ReadStreamOptions) (EventStreamIterator, error)
 }
 
 // An EventStreamIterator reads events from a stream.
@@ -59,7 +59,7 @@ const (
 type EventStreamWriter interface {
 	// AppendStream appends events to an event stream.
 	// The expected version of the stream can be specified in the options.
-	AppendStream(ctx context.Context, streamID typeid.TypeID, opts AppendStreamOptions, events []EventStoreEvent) error
+	AppendStream(ctx context.Context, streamID typeid.UUID, opts AppendStreamOptions, events []EventStoreEvent) error
 }
 
 // AppendStreamOptions are options for appending events to a stream.

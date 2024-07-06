@@ -27,7 +27,7 @@ type Aggregate[E Entity] struct {
 
 // ID returns the aggregate's ID.
 // The ID is the ID of the entity that the aggregate represents.
-func (a *Aggregate[E]) ID() typeid.TypeID {
+func (a *Aggregate[E]) ID() typeid.UUID {
 	return a.entity.EntityID()
 }
 

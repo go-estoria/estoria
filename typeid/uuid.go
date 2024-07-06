@@ -11,50 +11,73 @@ import (
 var (
 	defaultUUIDCtor   = uuid.NewV4
 	defaultUUIDParser = uuid.FromString
+	sep               = "_"
 )
 
 // A UUID is a TypeID with a UUID value.
-type UUID interface {
-	TypeID
-	UUID() uuid.UUID
-}
-
-type uuidID struct {
+type UUID struct {
 	typ string
 	val uuid.UUID
-	sep string
 }
 
-func (id uuidID) MarshalJSON() ([]byte, error) {
+func (id UUID) MarshalJSON() ([]byte, error) {
 	return []byte(fmt.Sprintf(`"%s"`, id.String())), nil
 }
 
-func (id *uuidID) UnmarshalJSON(data []byte) error {
+func (id *UUID) UnmarshalJSON(data []byte) error {
 	tid, err := uuidFactory.Parse(string(data[1 : len(data)-1]))
 	if err != nil {
 		return fmt.Errorf("parsing UUID TypeID: %w", err)
 	}
 
-	*id = tid.(uuidID)
+	*id = tid
 
 	return nil
 }
 
-var _ UUID = (*uuidID)(nil)
-
-func (id uuidID) String() string {
-	return id.typ + id.sep + id.val.String()
+func (id UUID) MarshalText() ([]byte, error) {
+	return []byte(id.String()), nil
 }
 
-func (id uuidID) TypeName() string {
+func (id *UUID) UnmarshalText(data []byte) error {
+	tid, err := ParseUUID(string(data))
+	if err != nil {
+		return fmt.Errorf("parsing UUID TypeID: %w", err)
+	}
+
+	*id = tid
+
+	return nil
+}
+
+func (id UUID) MarshalBinary() ([]byte, error) {
+	return []byte(id.String()), nil
+}
+
+func (id *UUID) UnmarshalBinary(data []byte) error {
+	tid, err := ParseUUID(string(data))
+	if err != nil {
+		return fmt.Errorf("parsing UUID TypeID: %w", err)
+	}
+
+	*id = tid
+
+	return nil
+}
+
+func (id UUID) String() string {
+	return id.typ + sep + id.val.String()
+}
+
+func (id UUID) TypeName() string {
 	return id.typ
 }
 
-func (id uuidID) Value() string {
+func (id UUID) Value() string {
 	return id.val.String()
 }
 
-func (id uuidID) UUID() uuid.UUID {
+func (id UUID) UUID() uuid.UUID {
 	return id.val
 }
 
@@ -82,25 +105,25 @@ func NewUUIDFactory(opts ...UUIDParserOption) *UUIDFactory {
 func (p *UUIDFactory) New(typ string) (UUID, error) {
 	id, err := p.newUUID()
 	if err != nil {
-		return nil, err
+		return UUID{}, err
 	}
 
 	return FromUUID(typ, id), nil
 }
 
 func (p *UUIDFactory) From(typ string, id uuid.UUID) UUID {
-	return uuidID{typ: typ, val: id, sep: p.separator}
+	return UUID{typ: typ, val: id}
 }
 
 func (p *UUIDFactory) Parse(tid string) (UUID, error) {
-	parts := strings.Split(tid, p.separator)
+	parts := strings.Split(tid, sep)
 	if len(parts) != 2 {
-		return uuidID{}, errors.New("invalid type ID")
+		return UUID{}, errors.New("invalid type ID")
 	}
 
 	id, err := uuid.FromString(parts[1])
 	if err != nil {
-		return nil, fmt.Errorf("parsing UUID: %w", err)
+		return UUID{}, fmt.Errorf("parsing UUID: %w", err)
 	}
 
 	return FromUUID(parts[0], id), nil
