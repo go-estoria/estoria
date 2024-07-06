@@ -27,14 +27,13 @@ type EventSourcedAggregateStore[E estoria.Entity] struct {
 var _ estoria.AggregateStore[estoria.Entity] = (*EventSourcedAggregateStore[estoria.Entity])(nil)
 
 func NewEventSourcedAggregateStore[E estoria.Entity](
-	eventReader estoria.EventStreamReader,
-	eventWriter estoria.EventStreamWriter,
+	eventStore estoria.EventStore,
 	entityFactory estoria.EntityFactory[E],
 	opts ...EventSourcedAggregateStoreOption[E],
 ) (*EventSourcedAggregateStore[E], error) {
 	store := &EventSourcedAggregateStore[E]{
-		EventReader:          eventReader,
-		EventWriter:          eventWriter,
+		EventReader:          eventStore,
+		EventWriter:          eventStore,
 		NewEntity:            entityFactory,
 		eventDataFactories:   make(map[string]func() estoria.EntityEvent),
 		entityEventMarshaler: estoria.JSONEntityEventMarshaler{},
@@ -49,6 +48,10 @@ func NewEventSourcedAggregateStore[E estoria.Entity](
 		if err := opt(store); err != nil {
 			return nil, fmt.Errorf("applying option: %w", err)
 		}
+	}
+
+	if store.EventReader == nil && store.EventWriter == nil {
+		return nil, errors.New("no event store reader or writer provided")
 	}
 
 	return store, nil
@@ -217,6 +220,20 @@ type EventSourcedAggregateStoreOption[E estoria.Entity] func(*EventSourcedAggreg
 func WithEntityEventMarshaler[E estoria.Entity](marshaler estoria.EntityEventMarshaler) EventSourcedAggregateStoreOption[E] {
 	return func(s *EventSourcedAggregateStore[E]) error {
 		s.entityEventMarshaler = marshaler
+		return nil
+	}
+}
+
+func WithEventStreamReader[E estoria.Entity](reader estoria.EventStreamReader) EventSourcedAggregateStoreOption[E] {
+	return func(s *EventSourcedAggregateStore[E]) error {
+		s.EventReader = reader
+		return nil
+	}
+}
+
+func WithEventStreamWriter[E estoria.Entity](writer estoria.EventStreamWriter) EventSourcedAggregateStoreOption[E] {
+	return func(s *EventSourcedAggregateStore[E]) error {
+		s.EventWriter = writer
 		return nil
 	}
 }
