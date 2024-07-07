@@ -49,10 +49,10 @@ func (s *EventStreamReader) ReadSnapshot(ctx context.Context, aggregateID typeid
 
 	slog.Debug("snapshot event found",
 		"stream_id", snapshotStreamID,
-		"stream_version", event.StreamVersion())
+		"stream_version", event.StreamVersion)
 
 	var snapshot estoria.AggregateSnapshot
-	if err := s.marshaler.UnmarshalSnapshot(event.Data(), &snapshot); err != nil {
+	if err := s.marshaler.UnmarshalSnapshot(event.Data, &snapshot); err != nil {
 		return nil, fmt.Errorf("unmarshaling snapshot: %w", err)
 	}
 
@@ -97,12 +97,12 @@ func (s *EventStreamWriter) WriteSnapshot(ctx context.Context, snap *estoria.Agg
 		return fmt.Errorf("marshaling snapshot data for stream event: %w", err)
 	}
 
-	if err := s.eventWriter.AppendStream(ctx, snapshotStreamID, estoria.AppendStreamOptions{}, []estoria.EventStoreEvent{
-		&snapshotEvent{
-			id:        eventID,
-			streamID:  snapshotStreamID,
-			timestamp: time.Now(),
-			data:      eventData,
+	if err := s.eventWriter.AppendStream(ctx, snapshotStreamID, estoria.AppendStreamOptions{}, []*estoria.EventStoreEvent{
+		{
+			ID:        eventID,
+			StreamID:  snapshotStreamID,
+			Timestamp: time.Now(),
+			Data:      eventData,
 		},
 	}); err != nil {
 		return fmt.Errorf("appending snapshot stream: %w", err)

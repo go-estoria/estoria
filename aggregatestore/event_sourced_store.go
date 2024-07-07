@@ -139,13 +139,13 @@ func (s *EventSourcedAggregateStore[E]) Hydrate(ctx context.Context, aggregate *
 			return fmt.Errorf("reading event: %w", err)
 		}
 
-		newEntityEvent, ok := s.eventDataFactories[evt.ID().TypeName()]
+		newEntityEvent, ok := s.eventDataFactories[evt.ID.TypeName()]
 		if !ok {
-			return fmt.Errorf("no entity event factory for event type %s", evt.ID().TypeName())
+			return fmt.Errorf("no entity event factory for event type %s", evt.ID.TypeName())
 		}
 
 		entityEvent := newEntityEvent()
-		if err := s.entityEventMarshaler.Unmarshal(evt.Data(), entityEvent); err != nil {
+		if err := s.entityEventMarshaler.Unmarshal(evt.Data, entityEvent); err != nil {
 			return fmt.Errorf("deserializing event data: %w", err)
 		}
 
@@ -171,7 +171,7 @@ func (s *EventSourcedAggregateStore[E]) Save(ctx context.Context, aggregate *est
 		return nil
 	}
 
-	toSave := make([]estoria.EventStoreEvent, len(unsavedEvents))
+	toSave := make([]*estoria.EventStoreEvent, len(unsavedEvents))
 	for i, unsavedEvent := range unsavedEvents {
 		eventID, err := typeid.NewUUID(unsavedEvent.Data.EventType())
 		if err != nil {
@@ -183,11 +183,11 @@ func (s *EventSourcedAggregateStore[E]) Save(ctx context.Context, aggregate *est
 			return fmt.Errorf("serializing event data: %w", err)
 		}
 
-		toSave[i] = &event{
-			id:        eventID,
-			streamID:  aggregate.ID(),
-			timestamp: unsavedEvent.Timestamp,
-			data:      data,
+		toSave[i] = &estoria.EventStoreEvent{
+			ID:        eventID,
+			StreamID:  aggregate.ID(),
+			Timestamp: unsavedEvent.Timestamp,
+			Data:      data,
 		}
 	}
 

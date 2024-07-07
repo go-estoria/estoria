@@ -12,7 +12,7 @@ import (
 )
 
 type EventStore struct {
-	events    map[string][]estoria.EventStoreEvent
+	events    map[string][]*estoria.EventStoreEvent
 	mu        sync.RWMutex
 	marshaler estoria.EventStoreEventMarshaler
 	outbox    *Outbox
@@ -20,7 +20,7 @@ type EventStore struct {
 
 func NewEventStore(opts ...EventStoreOption) *EventStore {
 	eventStore := &EventStore{
-		events: map[string][]estoria.EventStoreEvent{},
+		events: map[string][]*estoria.EventStoreEvent{},
 	}
 
 	for _, opt := range opts {
@@ -30,13 +30,13 @@ func NewEventStore(opts ...EventStoreOption) *EventStore {
 	return eventStore
 }
 
-func (s *EventStore) AppendStream(ctx context.Context, streamID typeid.UUID, opts estoria.AppendStreamOptions, events []estoria.EventStoreEvent) error {
+func (s *EventStore) AppendStream(ctx context.Context, streamID typeid.UUID, opts estoria.AppendStreamOptions, events []*estoria.EventStoreEvent) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	stream, ok := s.events[streamID.String()]
 	if !ok {
-		s.events[streamID.String()] = []estoria.EventStoreEvent{}
+		s.events[streamID.String()] = []*estoria.EventStoreEvent{}
 		stream = s.events[streamID.String()]
 	}
 
@@ -44,12 +44,12 @@ func (s *EventStore) AppendStream(ctx context.Context, streamID typeid.UUID, opt
 		return estoria.ErrStreamVersionMismatch
 	}
 
-	tx := []estoria.EventStoreEvent{}
+	tx := []*estoria.EventStoreEvent{}
 	for _, event := range events {
-		if slices.ContainsFunc(stream, func(e estoria.EventStoreEvent) bool {
-			return event.ID().String() == e.ID().String()
+		if slices.ContainsFunc(stream, func(e *estoria.EventStoreEvent) bool {
+			return event.ID.String() == e.ID.String()
 		}) {
-			return ErrEventExists{EventID: event.ID()}
+			return ErrEventExists{EventID: event.ID}
 		}
 
 		tx = append(tx, event)

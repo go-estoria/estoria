@@ -41,7 +41,7 @@ func (o *Outbox) RegisterHandlers(eventType estoria.EntityEvent, handlers ...out
 }
 
 // HandleEvents adds an outbox item for each event.
-func (o *Outbox) HandleEvents(ctx context.Context, events []estoria.EventStoreEvent) error {
+func (o *Outbox) HandleEvents(ctx context.Context, events []*estoria.EventStoreEvent) error {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	slog.Info("inserting events into outbox", "tx", "inherited", "events", len(events))
@@ -49,14 +49,14 @@ func (o *Outbox) HandleEvents(ctx context.Context, events []estoria.EventStoreEv
 	for _, event := range events {
 		item := &outboxItem{
 			id:        uuid.Must(uuid.NewV7()),
-			streamID:  event.StreamID(),
-			eventID:   event.ID(),
-			eventData: event.Data(),
+			streamID:  event.StreamID,
+			eventID:   event.ID,
+			eventData: event.Data,
 			handlers:  make(outbox.HandlerResultMap),
 		}
 
 		// for each handler name for this event type, add a handler result to track processing
-		for _, handler := range o.handlers[event.ID().TypeName()] {
+		for _, handler := range o.handlers[event.ID.TypeName()] {
 			item.handlers[handler] = &outbox.HandlerResult{}
 		}
 

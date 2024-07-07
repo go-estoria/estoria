@@ -10,14 +10,14 @@ import (
 
 type StreamIterator struct {
 	streamID  typeid.UUID
-	events    []estoria.EventStoreEvent
+	events    []*estoria.EventStoreEvent
 	cursor    int64
 	direction estoria.ReadStreamDirection
 	limit     int64
 	retrieved int64
 }
 
-func (i *StreamIterator) Next(ctx context.Context) (estoria.EventStoreEvent, error) {
+func (i *StreamIterator) Next(ctx context.Context) (*estoria.EventStoreEvent, error) {
 	if i.direction == estoria.Forward && i.cursor >= int64(len(i.events)) {
 		return nil, io.EOF
 	} else if i.direction == estoria.Reverse && i.cursor < 0 {

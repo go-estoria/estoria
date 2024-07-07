@@ -23,7 +23,7 @@ type EventStreamReader interface {
 // An EventStreamIterator reads events from a stream.
 type EventStreamIterator interface {
 	// Next reads the next event from the stream. It returns io.EOF when there are no more events.
-	Next(ctx context.Context) (EventStoreEvent, error)
+	Next(ctx context.Context) (*EventStoreEvent, error)
 }
 
 // ReadStreamOptions are options for reading an event stream.
@@ -59,7 +59,7 @@ const (
 type EventStreamWriter interface {
 	// AppendStream appends events to an event stream.
 	// The expected version of the stream can be specified in the options.
-	AppendStream(ctx context.Context, streamID typeid.UUID, opts AppendStreamOptions, events []EventStoreEvent) error
+	AppendStream(ctx context.Context, streamID typeid.UUID, opts AppendStreamOptions, events []*EventStoreEvent) error
 }
 
 // AppendStreamOptions are options for appending events to a stream.
