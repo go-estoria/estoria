@@ -99,7 +99,7 @@ func (s *SnapshottingAggregateStore[E]) Hydrate(ctx context.Context, aggregate *
 	}
 
 	entity := aggregate.Entity()
-	if err := s.marshaler.Unmarshal(snap.Data, &entity); err != nil {
+	if err := s.marshaler.Unmarshal(snap.Data, entity); err != nil {
 		slog.Warn("failed to unmarshal snapshot", "error", err)
 		return s.inner.Hydrate(ctx, aggregate, opts)
 	}

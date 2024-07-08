@@ -17,7 +17,7 @@ type Entity interface {
 
 type EntityMarshaler[E Entity] interface {
 	Marshal(entity E) ([]byte, error)
-	Unmarshal(data []byte, dest *E) error
+	Unmarshal(data []byte, destn E) error
 }
 
 type JSONEntityMarshaler[E Entity] struct{}
@@ -26,7 +26,7 @@ func (JSONEntityMarshaler[E]) Marshal(entity E) ([]byte, error) {
 	return json.Marshal(entity)
 }
 
-func (JSONEntityMarshaler[E]) Unmarshal(data []byte, dest *E) error {
+func (JSONEntityMarshaler[E]) Unmarshal(data []byte, dest E) error {
 	return json.Unmarshal(data, dest)
 }
 
