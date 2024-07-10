@@ -14,13 +14,13 @@ import (
 
 type EventStreamReader struct {
 	eventReader estoria.EventStreamReader
-	marshaler   estoria.AggregateSnapshotMarshaler
+	marshaler   estoria.Marshaler[estoria.AggregateSnapshot, *estoria.AggregateSnapshot]
 }
 
 func NewEventStreamReader(eventReader estoria.EventStreamReader) *EventStreamReader {
 	return &EventStreamReader{
 		eventReader: eventReader,
-		marshaler:   estoria.JSONAggregateSnapshotMarshaler{},
+		marshaler:   estoria.JSONMarshaler[estoria.AggregateSnapshot]{},
 	}
 }
 
@@ -52,7 +52,7 @@ func (s *EventStreamReader) ReadSnapshot(ctx context.Context, aggregateID typeid
 		"stream_version", event.StreamVersion)
 
 	var snapshot estoria.AggregateSnapshot
-	if err := s.marshaler.UnmarshalSnapshot(event.Data, &snapshot); err != nil {
+	if err := s.marshaler.Unmarshal(event.Data, &snapshot); err != nil {
 		return nil, fmt.Errorf("unmarshaling snapshot: %w", err)
 	}
 
@@ -65,13 +65,13 @@ type ReadOptions struct {
 
 type EventStreamWriter struct {
 	eventWriter estoria.EventStreamWriter
-	marshaler   estoria.AggregateSnapshotMarshaler
+	marshaler   estoria.Marshaler[estoria.AggregateSnapshot, *estoria.AggregateSnapshot]
 }
 
 func NewEventStreamWriter(eventWriter estoria.EventStreamWriter) *EventStreamWriter {
 	return &EventStreamWriter{
 		eventWriter: eventWriter,
-		marshaler:   estoria.JSONAggregateSnapshotMarshaler{},
+		marshaler:   estoria.JSONMarshaler[estoria.AggregateSnapshot]{},
 	}
 }
 
@@ -92,7 +92,7 @@ func (s *EventStreamWriter) WriteSnapshot(ctx context.Context, snap *estoria.Agg
 	}
 
 	// event data includes the aggregate ID, aggregate version, and snapshot data
-	eventData, err := s.marshaler.MarshalSnapshot(snap)
+	eventData, err := s.marshaler.Marshal(snap)
 	if err != nil {
 		return fmt.Errorf("marshaling snapshot data for stream event: %w", err)
 	}

@@ -19,7 +19,7 @@ type EventSourcedAggregateStore[E estoria.Entity] struct {
 
 	NewEntity            estoria.EntityFactory[E]
 	eventDataFactories   map[string]func() estoria.EntityEvent
-	entityEventMarshaler estoria.EntityEventMarshaler
+	entityEventMarshaler estoria.Marshaler[estoria.EntityEvent, *estoria.EntityEvent]
 
 	log *slog.Logger
 }
@@ -36,7 +36,7 @@ func NewEventSourcedAggregateStore[E estoria.Entity](
 		EventWriter:          eventStore,
 		NewEntity:            entityFactory,
 		eventDataFactories:   make(map[string]func() estoria.EntityEvent),
-		entityEventMarshaler: estoria.JSONEntityEventMarshaler{},
+		entityEventMarshaler: estoria.JSONMarshaler[estoria.EntityEvent]{},
 		log:                  slog.Default().WithGroup("aggregatestore"),
 	}
 
@@ -145,7 +145,7 @@ func (s *EventSourcedAggregateStore[E]) Hydrate(ctx context.Context, aggregate *
 		}
 
 		entityEvent := newEntityEvent()
-		if err := s.entityEventMarshaler.Unmarshal(evt.Data, entityEvent); err != nil {
+		if err := s.entityEventMarshaler.Unmarshal(evt.Data, &entityEvent); err != nil {
 			return fmt.Errorf("deserializing event data: %w", err)
 		}
 
@@ -178,7 +178,7 @@ func (s *EventSourcedAggregateStore[E]) Save(ctx context.Context, aggregate *est
 			return fmt.Errorf("generating event ID: %w", err)
 		}
 
-		data, err := s.entityEventMarshaler.Marshal(unsavedEvent.Data)
+		data, err := s.entityEventMarshaler.Marshal(&unsavedEvent.Data)
 		if err != nil {
 			return fmt.Errorf("serializing event data: %w", err)
 		}
@@ -217,7 +217,7 @@ func (s *EventSourcedAggregateStore[E]) Save(ctx context.Context, aggregate *est
 
 type EventSourcedAggregateStoreOption[E estoria.Entity] func(*EventSourcedAggregateStore[E]) error
 
-func WithEntityEventMarshaler[E estoria.Entity](marshaler estoria.EntityEventMarshaler) EventSourcedAggregateStoreOption[E] {
+func WithEntityEventMarshaler[E estoria.Entity](marshaler estoria.Marshaler[estoria.EntityEvent, *estoria.EntityEvent]) EventSourcedAggregateStoreOption[E] {
 	return func(s *EventSourcedAggregateStore[E]) error {
 		s.entityEventMarshaler = marshaler
 		return nil

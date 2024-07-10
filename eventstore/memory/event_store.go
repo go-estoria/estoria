@@ -14,13 +14,14 @@ import (
 type EventStore struct {
 	events    map[string][]*estoria.EventStoreEvent
 	mu        sync.RWMutex
-	marshaler estoria.EventStoreEventMarshaler
+	marshaler estoria.Marshaler[estoria.EventStoreEvent, *estoria.EventStoreEvent]
 	outbox    *Outbox
 }
 
 func NewEventStore(opts ...EventStoreOption) *EventStore {
 	eventStore := &EventStore{
-		events: map[string][]*estoria.EventStoreEvent{},
+		events:    map[string][]*estoria.EventStoreEvent{},
+		marshaler: estoria.JSONMarshaler[estoria.EventStoreEvent]{},
 	}
 
 	for _, opt := range opts {
