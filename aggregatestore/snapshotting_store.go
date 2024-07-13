@@ -13,11 +13,11 @@ import (
 )
 
 type SnapshotReader interface {
-	ReadSnapshot(ctx context.Context, aggregateID typeid.UUID, opts snapshotstore.ReadOptions) (*estoria.AggregateSnapshot, error)
+	ReadSnapshot(ctx context.Context, aggregateID typeid.UUID, opts snapshotstore.ReadSnapshotOptions) (*snapshotstore.AggregateSnapshot, error)
 }
 
 type SnapshotWriter interface {
-	WriteSnapshot(ctx context.Context, snap *estoria.AggregateSnapshot) error
+	WriteSnapshot(ctx context.Context, snap *snapshotstore.AggregateSnapshot) error
 }
 
 type SnapshotStore interface {
@@ -91,7 +91,7 @@ func (s *SnapshottingAggregateStore[E]) Hydrate(ctx context.Context, aggregate *
 	log := s.log.With("aggregate_id", aggregate.ID())
 	log.Debug("hydrating aggregate from snapshot", "from_version", aggregate.Version(), "to_version", opts.ToVersion)
 
-	snap, err := s.reader.ReadSnapshot(ctx, aggregate.ID(), snapshotstore.ReadOptions{
+	snap, err := s.reader.ReadSnapshot(ctx, aggregate.ID(), snapshotstore.ReadSnapshotOptions{
 		MaxVersion: opts.ToVersion,
 	})
 	if err != nil {
@@ -150,7 +150,7 @@ func (s *SnapshottingAggregateStore[E]) Save(ctx context.Context, aggregate *est
 				continue
 			}
 
-			if err := s.writer.WriteSnapshot(ctx, &estoria.AggregateSnapshot{
+			if err := s.writer.WriteSnapshot(ctx, &snapshotstore.AggregateSnapshot{
 				AggregateID:      aggregate.ID(),
 				AggregateVersion: aggregate.Version(),
 				Data:             data,

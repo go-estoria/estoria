@@ -10,18 +10,18 @@ import (
 )
 
 type MemorySnapshotStore struct {
-	snapshots map[typeid.UUID][]*estoria.AggregateSnapshot
-	marshaler estoria.Marshaler[estoria.AggregateSnapshot, *estoria.AggregateSnapshot]
+	snapshots map[typeid.UUID][]*AggregateSnapshot
+	marshaler estoria.Marshaler[AggregateSnapshot, *AggregateSnapshot]
 }
 
 func NewMemorySnapshotStore() *MemorySnapshotStore {
 	return &MemorySnapshotStore{
-		snapshots: map[typeid.UUID][]*estoria.AggregateSnapshot{},
-		marshaler: estoria.JSONMarshaler[estoria.AggregateSnapshot]{},
+		snapshots: map[typeid.UUID][]*AggregateSnapshot{},
+		marshaler: estoria.JSONMarshaler[AggregateSnapshot]{},
 	}
 }
 
-func (s *MemorySnapshotStore) ReadSnapshot(ctx context.Context, aggregateID typeid.UUID, opts ReadOptions) (*estoria.AggregateSnapshot, error) {
+func (s *MemorySnapshotStore) ReadSnapshot(ctx context.Context, aggregateID typeid.UUID, opts ReadSnapshotOptions) (*AggregateSnapshot, error) {
 	slog.Debug("finding snapshot", "aggregate_id", aggregateID)
 
 	snapshots, ok := s.snapshots[aggregateID]
@@ -42,7 +42,7 @@ func (s *MemorySnapshotStore) ReadSnapshot(ctx context.Context, aggregateID type
 	return snapshots[len(snapshots)-1], nil
 }
 
-func (s *MemorySnapshotStore) WriteSnapshot(ctx context.Context, snap *estoria.AggregateSnapshot) error {
+func (s *MemorySnapshotStore) WriteSnapshot(ctx context.Context, snap *AggregateSnapshot) error {
 	slog.Debug("writing snapshot",
 		"aggregate_id", snap.AggregateID,
 		"aggregate_version",
@@ -51,7 +51,7 @@ func (s *MemorySnapshotStore) WriteSnapshot(ctx context.Context, snap *estoria.A
 
 	snapshots, ok := s.snapshots[snap.AggregateID]
 	if !ok {
-		s.snapshots[snap.AggregateID] = []*estoria.AggregateSnapshot{}
+		s.snapshots[snap.AggregateID] = []*AggregateSnapshot{}
 		snapshots = s.snapshots[snap.AggregateID]
 	}
 

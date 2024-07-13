@@ -15,18 +15,18 @@ import (
 type EventStreamSnapshotStore struct {
 	eventReader estoria.EventStreamReader
 	eventWriter estoria.EventStreamWriter
-	marshaler   estoria.Marshaler[estoria.AggregateSnapshot, *estoria.AggregateSnapshot]
+	marshaler   estoria.Marshaler[AggregateSnapshot, *AggregateSnapshot]
 }
 
 func NewEventStreamSnapshotStore(eventStore estoria.EventStore) *EventStreamSnapshotStore {
 	return &EventStreamSnapshotStore{
 		eventReader: eventStore,
 		eventWriter: eventStore,
-		marshaler:   estoria.JSONMarshaler[estoria.AggregateSnapshot]{},
+		marshaler:   estoria.JSONMarshaler[AggregateSnapshot]{},
 	}
 }
 
-func (s *EventStreamSnapshotStore) ReadSnapshot(ctx context.Context, aggregateID typeid.UUID, opts ReadOptions) (*estoria.AggregateSnapshot, error) {
+func (s *EventStreamSnapshotStore) ReadSnapshot(ctx context.Context, aggregateID typeid.UUID, opts ReadSnapshotOptions) (*AggregateSnapshot, error) {
 	slog.Debug("finding snapshot", "aggregate_id", aggregateID)
 
 	snapshotStreamID := typeid.FromUUID(aggregateID.TypeName()+"snapshot", aggregateID.UUID())
@@ -53,7 +53,7 @@ func (s *EventStreamSnapshotStore) ReadSnapshot(ctx context.Context, aggregateID
 		"stream_id", snapshotStreamID,
 		"stream_version", event.StreamVersion)
 
-	var snapshot estoria.AggregateSnapshot
+	var snapshot AggregateSnapshot
 	if err := s.marshaler.Unmarshal(event.Data, &snapshot); err != nil {
 		return nil, fmt.Errorf("unmarshaling snapshot: %w", err)
 	}
@@ -61,7 +61,7 @@ func (s *EventStreamSnapshotStore) ReadSnapshot(ctx context.Context, aggregateID
 	return &snapshot, nil
 }
 
-func (s *EventStreamSnapshotStore) WriteSnapshot(ctx context.Context, snap *estoria.AggregateSnapshot) error {
+func (s *EventStreamSnapshotStore) WriteSnapshot(ctx context.Context, snap *AggregateSnapshot) error {
 	slog.Debug("writing snapshot",
 		"aggregate_id", snap.AggregateID,
 		"aggregate_version",
