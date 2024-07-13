@@ -149,11 +149,13 @@ func (s *EventSourcedAggregateStore[E]) Hydrate(ctx context.Context, aggregate *
 			return fmt.Errorf("deserializing event data: %w", err)
 		}
 
-		if err := aggregate.Entity().ApplyEvent(ctx, entityEvent); err != nil {
+		// queue and apply the event immediately
+		aggregate.QueueForApplication(entityEvent)
+		if err := aggregate.ApplyNext(ctx); errors.Is(err, estoria.ErrNoUnappliedEvents) {
+			break
+		} else if err != nil {
 			return fmt.Errorf("applying event: %w", err)
 		}
-
-		aggregate.SetVersion(aggregate.Version() + 1)
 	}
 
 	s.log.Debug("hydrated aggregate", "aggregate_id", aggregate.ID(), "entity_id", aggregate.Entity().EntityID(), "version", aggregate.Version())
@@ -206,7 +208,9 @@ func (s *EventSourcedAggregateStore[E]) Save(ctx context.Context, aggregate *est
 	if !opts.SkipApply {
 		for {
 			err := aggregate.ApplyNext(ctx)
-			if err != nil && !errors.Is(err, estoria.ErrNoUnappliedEvents) {
+			if errors.Is(err, estoria.ErrNoUnappliedEvents) {
+				return nil
+			} else if err != nil {
 				return fmt.Errorf("applying event: %w", err)
 			}
 		}
