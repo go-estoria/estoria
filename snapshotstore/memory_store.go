@@ -12,12 +12,14 @@ import (
 type MemorySnapshotStore struct {
 	snapshots map[typeid.UUID][]*AggregateSnapshot
 	marshaler estoria.Marshaler[AggregateSnapshot, *AggregateSnapshot]
+	retention RetentionPolicy
 }
 
 func NewMemorySnapshotStore() *MemorySnapshotStore {
 	return &MemorySnapshotStore{
 		snapshots: map[typeid.UUID][]*AggregateSnapshot{},
 		marshaler: estoria.JSONMarshaler[AggregateSnapshot]{},
+		retention: MaxSnapshotsRetentionPolicy{N: 0},
 	}
 }
 

@@ -26,3 +26,26 @@ func (p EventCountSnapshotPolicy) ShouldSnapshot(_ typeid.UUID, aggregateVersion
 type ReadSnapshotOptions struct {
 	MaxVersion int64
 }
+
+// A RetentionPolicy determines which snapshots the store should retain.
+type RetentionPolicy interface {
+	// ShouldRetain returns true if the snapshot should be retained.
+	ShouldRetain(snap *AggregateSnapshot, snapshotIndex, totalSnapshots int64) bool
+}
+
+// A MaxSnapshotsRetentionPolicy retains the last N snapshots.
+type MaxSnapshotsRetentionPolicy struct {
+	N int64
+}
+
+func (p MaxSnapshotsRetentionPolicy) ShouldRetain(snap *AggregateSnapshot, snapshotIndex, totalSnapshots int64) bool {
+	return p.N > 0 && snapshotIndex >= totalSnapshots-p.N
+}
+
+type MinAggregateVersionRetentionPolicy struct {
+	MinVersion int64
+}
+
+func (p MinAggregateVersionRetentionPolicy) ShouldRetain(snap *AggregateSnapshot, snapshotIndex, totalSnapshots int64) bool {
+	return snap.AggregateVersion >= p.MinVersion
+}
