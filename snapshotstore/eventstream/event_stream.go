@@ -1,4 +1,4 @@
-package snapshotstore
+package eventstream
 
 import (
 	"context"
@@ -9,22 +9,23 @@ import (
 	"time"
 
 	"github.com/go-estoria/estoria"
+	"github.com/go-estoria/estoria/snapshotstore"
 	"github.com/go-estoria/estoria/typeid"
 )
 
-type EventStreamReader struct {
+type SnapshotReader struct {
 	eventReader estoria.EventStreamReader
 	marshaler   estoria.Marshaler[estoria.AggregateSnapshot, *estoria.AggregateSnapshot]
 }
 
-func NewEventStreamReader(eventReader estoria.EventStreamReader) *EventStreamReader {
-	return &EventStreamReader{
+func NewSnapshotReader(eventReader estoria.EventStreamReader) *SnapshotReader {
+	return &SnapshotReader{
 		eventReader: eventReader,
 		marshaler:   estoria.JSONMarshaler[estoria.AggregateSnapshot]{},
 	}
 }
 
-func (s *EventStreamReader) ReadSnapshot(ctx context.Context, aggregateID typeid.UUID, opts ReadOptions) (*estoria.AggregateSnapshot, error) {
+func (s *SnapshotReader) ReadSnapshot(ctx context.Context, aggregateID typeid.UUID, opts snapshotstore.ReadOptions) (*estoria.AggregateSnapshot, error) {
 	slog.Debug("finding snapshot", "aggregate_id", aggregateID)
 
 	snapshotStreamID := typeid.FromUUID(aggregateID.TypeName()+"snapshot", aggregateID.UUID())
@@ -59,23 +60,19 @@ func (s *EventStreamReader) ReadSnapshot(ctx context.Context, aggregateID typeid
 	return &snapshot, nil
 }
 
-type ReadOptions struct {
-	MaxVersion int64
-}
-
-type EventStreamWriter struct {
+type SnapshotWriter struct {
 	eventWriter estoria.EventStreamWriter
 	marshaler   estoria.Marshaler[estoria.AggregateSnapshot, *estoria.AggregateSnapshot]
 }
 
-func NewEventStreamWriter(eventWriter estoria.EventStreamWriter) *EventStreamWriter {
-	return &EventStreamWriter{
+func NewSnapshotWriter(eventWriter estoria.EventStreamWriter) *SnapshotWriter {
+	return &SnapshotWriter{
 		eventWriter: eventWriter,
 		marshaler:   estoria.JSONMarshaler[estoria.AggregateSnapshot]{},
 	}
 }
 
-func (s *EventStreamWriter) WriteSnapshot(ctx context.Context, snap *estoria.AggregateSnapshot) error {
+func (s *SnapshotWriter) WriteSnapshot(ctx context.Context, snap *estoria.AggregateSnapshot) error {
 	slog.Debug("writing snapshot",
 		"aggregate_id", snap.AggregateID,
 		"aggregate_version",
