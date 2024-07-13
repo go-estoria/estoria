@@ -42,25 +42,24 @@ var _ estoria.AggregateStore[estoria.Entity] = (*SnapshottingAggregateStore[esto
 
 func NewSnapshottingAggregateStore[E estoria.Entity](
 	inner estoria.AggregateStore[E],
-	reader SnapshotReader,
-	writer SnapshotWriter,
+	store SnapshotStore,
 	policy SnapshotPolicy,
 	opts ...SnapshottingAggregateStoreOption[E],
 ) *SnapshottingAggregateStore[E] {
-	store := &SnapshottingAggregateStore[E]{
+	aggregateStore := &SnapshottingAggregateStore[E]{
 		inner:     inner,
-		reader:    reader,
-		writer:    writer,
+		reader:    store,
+		writer:    store,
 		policy:    policy,
 		marshaler: estoria.JSONMarshaler[E]{},
 		log:       slog.Default().WithGroup("snapshottingaggregatestore"),
 	}
 
 	for _, opt := range opts {
-		opt(store)
+		opt(aggregateStore)
 	}
 
-	return store
+	return aggregateStore
 }
 
 // NewAggregate creates a new aggregate.
@@ -170,6 +169,20 @@ type SnapshottingAggregateStoreOption[E estoria.Entity] func(*SnapshottingAggreg
 func WithSnapshotMarshaler[E estoria.Entity](marshaler estoria.Marshaler[E, *E]) SnapshottingAggregateStoreOption[E] {
 	return func(s *SnapshottingAggregateStore[E]) error {
 		s.marshaler = marshaler
+		return nil
+	}
+}
+
+func WithSnapshotReader[E estoria.Entity](reader SnapshotReader) SnapshottingAggregateStoreOption[E] {
+	return func(s *SnapshottingAggregateStore[E]) error {
+		s.reader = reader
+		return nil
+	}
+}
+
+func WithSnapshotWriter[E estoria.Entity](writer SnapshotWriter) SnapshottingAggregateStoreOption[E] {
+	return func(s *SnapshottingAggregateStore[E]) error {
+		s.writer = writer
 		return nil
 	}
 }
