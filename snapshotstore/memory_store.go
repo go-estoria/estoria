@@ -40,7 +40,7 @@ func (s *MemorySnapshotStore) ReadSnapshot(ctx context.Context, aggregateID type
 			}
 		}
 
-		slog.Debug("no snapshot found within version range", "aggregate_id", aggregateID, "max_version", opts.MaxVersion)
+		slog.Debug("no snapshots found within version range", "aggregate_id", aggregateID, "max_version", opts.MaxVersion)
 		return nil, nil
 	}
 

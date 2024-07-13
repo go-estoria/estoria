@@ -39,7 +39,7 @@ type MaxSnapshotsRetentionPolicy struct {
 }
 
 func (p MaxSnapshotsRetentionPolicy) ShouldRetain(snap *AggregateSnapshot, snapshotIndex, totalSnapshots int64) bool {
-	return p.N > 0 && snapshotIndex >= totalSnapshots-p.N
+	return p.N == 0 || snapshotIndex >= totalSnapshots-p.N
 }
 
 type MinAggregateVersionRetentionPolicy struct {
