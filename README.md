@@ -10,7 +10,7 @@ See [Getting Started](#getting-started) to start using Estoria.
 
 - [~] Features
   - [X] Aggregate Store Implementations
-    - [X] Event-Sourced (Core)
+    - [X] Event-Sourced (core)
     - [X] Cached
     - [X] Snapshotting
     - [X] Hookable
@@ -31,10 +31,9 @@ See [Getting Started](#getting-started) to start using Estoria.
   - [~] Snapshot Store Implementations
     - [X] In-memory
     - [~] Persistent
-      - [X] Event Store
-      - [ ] Event-Sourced (uncommitted) (incremental snapshot diffing)
+      - [X] Event Store (adapter)
+      - [?] Event-Sourced (uncommitted) (incremental snapshot diffing)
       - [ ] 3rd Party (via [estoria-contrib](https://github.com/go-estoria/estoria-contrib))
-        - [ ] EventStoreDB
         - [ ] Postgres
         - [ ] MongoDB
   - [X] Outbox Processing
@@ -50,6 +49,10 @@ See [Getting Started](#getting-started) to start using Estoria.
   - [ ] Caching
   - [ ] Lifecycle Hooks
   - [ ] Outbox Processing
+- [ ] Benchmarks
+  - [ ] Aggregate Stores
+  - [ ] Event Stores
+  - [ ] Snapshot Stores
 
 ## Getting Started
 
@@ -57,7 +60,7 @@ See [Getting Started](#getting-started) to start using Estoria.
 go get github.com/go-estoria/estoria
 ```
 
-See the [example project in estoria-contrib](https://github.com/go-estoria/estoria-contrib/tree/main/example) for a complete example.
+See the [example project in estoria-contrib](https://github.com/go-estoria/estoria-contrib/tree/main/example) for API usage examples.
 
 ## Event Store Providers
 
