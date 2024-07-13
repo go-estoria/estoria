@@ -1,4 +1,4 @@
-package eventstream
+package snapshotstore
 
 import (
 	"context"
@@ -9,25 +9,24 @@ import (
 	"time"
 
 	"github.com/go-estoria/estoria"
-	"github.com/go-estoria/estoria/snapshotstore"
 	"github.com/go-estoria/estoria/typeid"
 )
 
-type SnapshotStore struct {
+type EventStreamSnapshotStore struct {
 	eventReader estoria.EventStreamReader
 	eventWriter estoria.EventStreamWriter
 	marshaler   estoria.Marshaler[estoria.AggregateSnapshot, *estoria.AggregateSnapshot]
 }
 
-func NewSnapshotStore(eventStore estoria.EventStore) *SnapshotStore {
-	return &SnapshotStore{
+func NewEventStreamSnapshotStore(eventStore estoria.EventStore) *EventStreamSnapshotStore {
+	return &EventStreamSnapshotStore{
 		eventReader: eventStore,
 		eventWriter: eventStore,
 		marshaler:   estoria.JSONMarshaler[estoria.AggregateSnapshot]{},
 	}
 }
 
-func (s *SnapshotStore) ReadSnapshot(ctx context.Context, aggregateID typeid.UUID, opts snapshotstore.ReadOptions) (*estoria.AggregateSnapshot, error) {
+func (s *EventStreamSnapshotStore) ReadSnapshot(ctx context.Context, aggregateID typeid.UUID, opts ReadOptions) (*estoria.AggregateSnapshot, error) {
 	slog.Debug("finding snapshot", "aggregate_id", aggregateID)
 
 	snapshotStreamID := typeid.FromUUID(aggregateID.TypeName()+"snapshot", aggregateID.UUID())
@@ -62,7 +61,7 @@ func (s *SnapshotStore) ReadSnapshot(ctx context.Context, aggregateID typeid.UUI
 	return &snapshot, nil
 }
 
-func (s *SnapshotStore) WriteSnapshot(ctx context.Context, snap *estoria.AggregateSnapshot) error {
+func (s *EventStreamSnapshotStore) WriteSnapshot(ctx context.Context, snap *estoria.AggregateSnapshot) error {
 	slog.Debug("writing snapshot",
 		"aggregate_id", snap.AggregateID,
 		"aggregate_version",

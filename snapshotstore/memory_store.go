@@ -1,4 +1,4 @@
-package memory
+package snapshotstore
 
 import (
 	"context"
@@ -6,23 +6,22 @@ import (
 	"log/slog"
 
 	"github.com/go-estoria/estoria"
-	"github.com/go-estoria/estoria/snapshotstore"
 	"github.com/go-estoria/estoria/typeid"
 )
 
-type SnapshotStore struct {
+type MemorySnapshotStore struct {
 	snapshots map[typeid.UUID][]*estoria.AggregateSnapshot
 	marshaler estoria.Marshaler[estoria.AggregateSnapshot, *estoria.AggregateSnapshot]
 }
 
-func NewSnapshotStore() *SnapshotStore {
-	return &SnapshotStore{
+func NewMemorySnapshotStore() *MemorySnapshotStore {
+	return &MemorySnapshotStore{
 		snapshots: map[typeid.UUID][]*estoria.AggregateSnapshot{},
 		marshaler: estoria.JSONMarshaler[estoria.AggregateSnapshot]{},
 	}
 }
 
-func (s *SnapshotStore) ReadSnapshot(ctx context.Context, aggregateID typeid.UUID, opts snapshotstore.ReadOptions) (*estoria.AggregateSnapshot, error) {
+func (s *MemorySnapshotStore) ReadSnapshot(ctx context.Context, aggregateID typeid.UUID, opts ReadOptions) (*estoria.AggregateSnapshot, error) {
 	slog.Debug("finding snapshot", "aggregate_id", aggregateID)
 
 	snapshots, ok := s.snapshots[aggregateID]
@@ -43,7 +42,7 @@ func (s *SnapshotStore) ReadSnapshot(ctx context.Context, aggregateID typeid.UUI
 	return snapshots[len(snapshots)-1], nil
 }
 
-func (s *SnapshotStore) WriteSnapshot(ctx context.Context, snap *estoria.AggregateSnapshot) error {
+func (s *MemorySnapshotStore) WriteSnapshot(ctx context.Context, snap *estoria.AggregateSnapshot) error {
 	slog.Debug("writing snapshot",
 		"aggregate_id", snap.AggregateID,
 		"aggregate_version",
