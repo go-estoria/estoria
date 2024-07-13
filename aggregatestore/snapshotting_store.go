@@ -20,6 +20,11 @@ type SnapshotWriter interface {
 	WriteSnapshot(ctx context.Context, snap *estoria.AggregateSnapshot) error
 }
 
+type SnapshotStore interface {
+	SnapshotReader
+	SnapshotWriter
+}
+
 type SnapshotPolicy interface {
 	ShouldSnapshot(aggregateID typeid.UUID, aggregateVersion int64, timestamp time.Time) bool
 }
