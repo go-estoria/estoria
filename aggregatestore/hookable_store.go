@@ -27,7 +27,7 @@ type PreloadHook func(ctx context.Context, id typeid.UUID) error
 type Hook[E estoria.Entity] func(ctx context.Context, aggregate *estoria.Aggregate[E]) error
 
 type HookableAggregateStore[E estoria.Entity] struct {
-	store          estoria.AggregateStore[E]
+	inner          estoria.AggregateStore[E]
 	precreateHooks []PrecreateHook
 	preloadHooks   []PreloadHook
 	hooks          map[HookStage][]Hook[E]
@@ -40,7 +40,7 @@ func NewHookableAggregateStore[E estoria.Entity](
 	inner estoria.AggregateStore[E],
 ) *HookableAggregateStore[E] {
 	return &HookableAggregateStore[E]{
-		store:          inner,
+		inner:          inner,
 		precreateHooks: make([]PrecreateHook, 0),
 		preloadHooks:   make([]PreloadHook, 0),
 		hooks:          make(map[HookStage][]Hook[E]),
@@ -69,7 +69,7 @@ func (s *HookableAggregateStore[E]) NewAggregate(id *typeid.UUID) (*estoria.Aggr
 		}
 	}
 
-	aggregate, err := s.store.NewAggregate(id)
+	aggregate, err := s.inner.NewAggregate(id)
 	if err != nil {
 		return nil, err
 	}
@@ -91,7 +91,7 @@ func (s *HookableAggregateStore[E]) Load(ctx context.Context, id typeid.UUID, op
 		}
 	}
 
-	aggregate, err := s.store.Load(ctx, id, opts)
+	aggregate, err := s.inner.Load(ctx, id, opts)
 	if err != nil {
 		return nil, err
 	}
@@ -114,7 +114,7 @@ func (s *HookableAggregateStore[E]) Hydrate(ctx context.Context, aggregate *esto
 		}
 	}
 
-	err := s.store.Hydrate(ctx, aggregate, opts)
+	err := s.inner.Hydrate(ctx, aggregate, opts)
 	if err != nil {
 		return err
 	}
@@ -137,7 +137,7 @@ func (s *HookableAggregateStore[E]) Save(ctx context.Context, aggregate *estoria
 		}
 	}
 
-	if err := s.store.Save(ctx, aggregate, opts); err != nil {
+	if err := s.inner.Save(ctx, aggregate, opts); err != nil {
 		return err
 	}
 

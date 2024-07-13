@@ -14,7 +14,7 @@ type AggregateCache[E estoria.Entity] interface {
 }
 
 type CachedAggregateStore[E estoria.Entity] struct {
-	store estoria.AggregateStore[E]
+	inner estoria.AggregateStore[E]
 	cache AggregateCache[E]
 	log   *slog.Logger
 }
@@ -24,7 +24,7 @@ func NewCachedAggregateStore[E estoria.Entity](
 	cacher AggregateCache[E],
 ) *CachedAggregateStore[E] {
 	return &CachedAggregateStore[E]{
-		store: inner,
+		inner: inner,
 		cache: cacher,
 		log:   slog.Default().WithGroup("cachedaggregatestore"),
 	}
@@ -34,17 +34,17 @@ var _ estoria.AggregateStore[estoria.Entity] = (*CachedAggregateStore[estoria.En
 
 // NewAggregate creates a new aggregate.
 func (s *CachedAggregateStore[E]) NewAggregate(id *typeid.UUID) (*estoria.Aggregate[E], error) {
-	return s.store.NewAggregate(id)
+	return s.inner.NewAggregate(id)
 }
 
 func (s *CachedAggregateStore[E]) Load(ctx context.Context, id typeid.UUID, opts estoria.LoadAggregateOptions) (*estoria.Aggregate[E], error) {
 	aggregate, err := s.cache.GetAggregate(ctx, id)
 	if err != nil {
 		s.log.Warn("failed to read cache", "error", err)
-		return s.store.Load(ctx, id, opts)
+		return s.inner.Load(ctx, id, opts)
 	} else if aggregate == nil {
 		s.log.Debug("aggregate not in cache", "aggregate_id", id)
-		return s.store.Load(ctx, id, opts)
+		return s.inner.Load(ctx, id, opts)
 	}
 
 	return aggregate, nil
@@ -52,12 +52,12 @@ func (s *CachedAggregateStore[E]) Load(ctx context.Context, id typeid.UUID, opts
 
 // Hydrate hydrates an aggregate.
 func (s *CachedAggregateStore[E]) Hydrate(ctx context.Context, aggregate *estoria.Aggregate[E], opts estoria.HydrateAggregateOptions) error {
-	return s.store.Hydrate(ctx, aggregate, opts)
+	return s.inner.Hydrate(ctx, aggregate, opts)
 }
 
 // Save saves an aggregate.
 func (s *CachedAggregateStore[E]) Save(ctx context.Context, aggregate *estoria.Aggregate[E], opts estoria.SaveAggregateOptions) error {
-	if err := s.store.Save(ctx, aggregate, opts); err != nil {
+	if err := s.inner.Save(ctx, aggregate, opts); err != nil {
 		return err
 	}
 
