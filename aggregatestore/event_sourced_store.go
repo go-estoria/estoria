@@ -12,11 +12,11 @@ import (
 	"github.com/go-estoria/estoria/typeid"
 )
 
-// An EventSourcedAggregateStore loads and saves aggregates using an EventStore.
+// An EventSourcedStore loads and saves aggregates using an EventStore.
 // It hydrates aggregates by reading events from the event store and applying them to the aggregate.
-type EventSourcedAggregateStore[E estoria.Entity] struct {
-	eventReader eventstore.EventStreamReader
-	eventWriter eventstore.EventStreamWriter
+type EventSourcedStore[E estoria.Entity] struct {
+	eventReader eventstore.StreamReader
+	eventWriter eventstore.StreamWriter
 
 	newEntity            estoria.EntityFactory[E]
 	eventDataFactories   map[string]func() estoria.EntityEvent
@@ -25,14 +25,14 @@ type EventSourcedAggregateStore[E estoria.Entity] struct {
 	log *slog.Logger
 }
 
-var _ Store[estoria.Entity] = (*EventSourcedAggregateStore[estoria.Entity])(nil)
+var _ Store[estoria.Entity] = (*EventSourcedStore[estoria.Entity])(nil)
 
-func NewEventSourcedAggregateStore[E estoria.Entity](
-	eventStore eventstore.EventStore,
+func NewEventSourcedStore[E estoria.Entity](
+	eventStore eventstore.Store,
 	entityFactory estoria.EntityFactory[E],
 	opts ...EventSourcedAggregateStoreOption[E],
-) (*EventSourcedAggregateStore[E], error) {
-	store := &EventSourcedAggregateStore[E]{
+) (*EventSourcedStore[E], error) {
+	store := &EventSourcedStore[E]{
 		eventReader:          eventStore,
 		eventWriter:          eventStore,
 		newEntity:            entityFactory,
@@ -58,7 +58,7 @@ func NewEventSourcedAggregateStore[E estoria.Entity](
 	return store, nil
 }
 
-func (s *EventSourcedAggregateStore[E]) NewAggregate(id *typeid.UUID) (*estoria.Aggregate[E], error) {
+func (s *EventSourcedStore[E]) New(id *typeid.UUID) (*estoria.Aggregate[E], error) {
 	entity := s.newEntity()
 	if id != nil {
 		entity.SetEntityID(*id)
@@ -72,10 +72,10 @@ func (s *EventSourcedAggregateStore[E]) NewAggregate(id *typeid.UUID) (*estoria.
 }
 
 // Load loads an aggregate by its ID.
-func (s *EventSourcedAggregateStore[E]) Load(ctx context.Context, id typeid.UUID, opts LoadOptions) (*estoria.Aggregate[E], error) {
+func (s *EventSourcedStore[E]) Load(ctx context.Context, id typeid.UUID, opts LoadOptions) (*estoria.Aggregate[E], error) {
 	s.log.Debug("loading aggregate from event store", "aggregate_id", id)
 
-	aggregate, err := s.NewAggregate(&id)
+	aggregate, err := s.New(&id)
 	if err != nil {
 		return nil, fmt.Errorf("creating new aggregate: %w", err)
 	}
@@ -92,7 +92,7 @@ func (s *EventSourcedAggregateStore[E]) Load(ctx context.Context, id typeid.UUID
 }
 
 // Hydrate hydrates an aggregate.
-func (s *EventSourcedAggregateStore[E]) Hydrate(ctx context.Context, aggregate *estoria.Aggregate[E], opts HydrateOptions) error {
+func (s *EventSourcedStore[E]) Hydrate(ctx context.Context, aggregate *estoria.Aggregate[E], opts HydrateOptions) error {
 	log := s.log.With("aggregate_id", aggregate.ID())
 	log.Debug("hydrating aggregate from event store", "from_version", aggregate.Version(), "to_version", opts.ToVersion)
 
@@ -165,7 +165,7 @@ func (s *EventSourcedAggregateStore[E]) Hydrate(ctx context.Context, aggregate *
 }
 
 // Save saves an aggregate.
-func (s *EventSourcedAggregateStore[E]) Save(ctx context.Context, aggregate *estoria.Aggregate[E], opts SaveOptions) error {
+func (s *EventSourcedStore[E]) Save(ctx context.Context, aggregate *estoria.Aggregate[E], opts SaveOptions) error {
 	unsavedEvents := aggregate.UnsavedEvents()
 	s.log.Debug("saving aggregate to event store", "aggregate_id", aggregate.ID(), "events", len(unsavedEvents))
 
@@ -220,24 +220,24 @@ func (s *EventSourcedAggregateStore[E]) Save(ctx context.Context, aggregate *est
 	return nil
 }
 
-type EventSourcedAggregateStoreOption[E estoria.Entity] func(*EventSourcedAggregateStore[E]) error
+type EventSourcedAggregateStoreOption[E estoria.Entity] func(*EventSourcedStore[E]) error
 
 func WithEntityEventMarshaler[E estoria.Entity](marshaler estoria.Marshaler[estoria.EntityEvent, *estoria.EntityEvent]) EventSourcedAggregateStoreOption[E] {
-	return func(s *EventSourcedAggregateStore[E]) error {
+	return func(s *EventSourcedStore[E]) error {
 		s.entityEventMarshaler = marshaler
 		return nil
 	}
 }
 
-func WithEventStreamReader[E estoria.Entity](reader eventstore.EventStreamReader) EventSourcedAggregateStoreOption[E] {
-	return func(s *EventSourcedAggregateStore[E]) error {
+func WithStreamReader[E estoria.Entity](reader eventstore.StreamReader) EventSourcedAggregateStoreOption[E] {
+	return func(s *EventSourcedStore[E]) error {
 		s.eventReader = reader
 		return nil
 	}
 }
 
-func WithEventStreamWriter[E estoria.Entity](writer eventstore.EventStreamWriter) EventSourcedAggregateStoreOption[E] {
-	return func(s *EventSourcedAggregateStore[E]) error {
+func WithStreamWriter[E estoria.Entity](writer eventstore.StreamWriter) EventSourcedAggregateStoreOption[E] {
+	return func(s *EventSourcedStore[E]) error {
 		s.eventWriter = writer
 		return nil
 	}

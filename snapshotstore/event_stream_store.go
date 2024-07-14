@@ -14,12 +14,12 @@ import (
 )
 
 type EventStreamSnapshotStore struct {
-	eventReader eventstore.EventStreamReader
-	eventWriter eventstore.EventStreamWriter
+	eventReader eventstore.StreamReader
+	eventWriter eventstore.StreamWriter
 	marshaler   estoria.Marshaler[AggregateSnapshot, *AggregateSnapshot]
 }
 
-func NewEventStreamSnapshotStore(eventStore eventstore.EventStore) *EventStreamSnapshotStore {
+func NewEventStreamSnapshotStore(eventStore eventstore.Store) *EventStreamSnapshotStore {
 	return &EventStreamSnapshotStore{
 		eventReader: eventStore,
 		eventWriter: eventStore,

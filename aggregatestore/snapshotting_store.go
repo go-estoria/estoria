@@ -29,7 +29,7 @@ type SnapshotPolicy interface {
 	ShouldSnapshot(aggregateID typeid.UUID, aggregateVersion int64, timestamp time.Time) bool
 }
 
-type SnapshottingAggregateStore[E estoria.Entity] struct {
+type SnapshottingStore[E estoria.Entity] struct {
 	inner     Store[E]
 	reader    SnapshotReader
 	writer    SnapshotWriter
@@ -38,15 +38,15 @@ type SnapshottingAggregateStore[E estoria.Entity] struct {
 	log       *slog.Logger
 }
 
-var _ Store[estoria.Entity] = (*SnapshottingAggregateStore[estoria.Entity])(nil)
+var _ Store[estoria.Entity] = (*SnapshottingStore[estoria.Entity])(nil)
 
-func NewSnapshottingAggregateStore[E estoria.Entity](
+func NewSnapshottingStore[E estoria.Entity](
 	inner Store[E],
 	store SnapshotStore,
 	policy SnapshotPolicy,
 	opts ...SnapshottingAggregateStoreOption[E],
-) *SnapshottingAggregateStore[E] {
-	aggregateStore := &SnapshottingAggregateStore[E]{
+) *SnapshottingStore[E] {
+	aggregateStore := &SnapshottingStore[E]{
 		inner:     inner,
 		reader:    store,
 		writer:    store,
@@ -63,14 +63,14 @@ func NewSnapshottingAggregateStore[E estoria.Entity](
 }
 
 // NewAggregate creates a new aggregate.
-func (s *SnapshottingAggregateStore[E]) NewAggregate(id *typeid.UUID) (*estoria.Aggregate[E], error) {
-	return s.inner.NewAggregate(id)
+func (s *SnapshottingStore[E]) New(id *typeid.UUID) (*estoria.Aggregate[E], error) {
+	return s.inner.New(id)
 }
 
 // Load loads an aggregate by its ID.
-func (s *SnapshottingAggregateStore[E]) Load(ctx context.Context, aggregateID typeid.UUID, opts LoadOptions) (*estoria.Aggregate[E], error) {
+func (s *SnapshottingStore[E]) Load(ctx context.Context, aggregateID typeid.UUID, opts LoadOptions) (*estoria.Aggregate[E], error) {
 	s.log.Debug("loading aggregate", "aggregate_id", aggregateID)
-	aggregate, err := s.NewAggregate(&aggregateID)
+	aggregate, err := s.New(&aggregateID)
 	if err != nil {
 		slog.Warn("failed to create new aggregate", "error", err)
 		return s.inner.Load(ctx, aggregateID, opts)
@@ -87,7 +87,7 @@ func (s *SnapshottingAggregateStore[E]) Load(ctx context.Context, aggregateID ty
 }
 
 // Hydrate hydrates an aggregate.
-func (s *SnapshottingAggregateStore[E]) Hydrate(ctx context.Context, aggregate *estoria.Aggregate[E], opts HydrateOptions) error {
+func (s *SnapshottingStore[E]) Hydrate(ctx context.Context, aggregate *estoria.Aggregate[E], opts HydrateOptions) error {
 	log := s.log.With("aggregate_id", aggregate.ID())
 	log.Debug("hydrating aggregate from snapshot", "from_version", aggregate.Version(), "to_version", opts.ToVersion)
 
@@ -122,7 +122,7 @@ func (s *SnapshottingAggregateStore[E]) Hydrate(ctx context.Context, aggregate *
 }
 
 // Save saves an aggregate.
-func (s *SnapshottingAggregateStore[E]) Save(ctx context.Context, aggregate *estoria.Aggregate[E], opts SaveOptions) error {
+func (s *SnapshottingStore[E]) Save(ctx context.Context, aggregate *estoria.Aggregate[E], opts SaveOptions) error {
 	slog.Debug("saving aggregate", "aggregate_id", aggregate.ID())
 
 	// defer applying events so a snapshot can be taken at an exact version
@@ -164,24 +164,24 @@ func (s *SnapshottingAggregateStore[E]) Save(ctx context.Context, aggregate *est
 	return nil
 }
 
-type SnapshottingAggregateStoreOption[E estoria.Entity] func(*SnapshottingAggregateStore[E]) error
+type SnapshottingAggregateStoreOption[E estoria.Entity] func(*SnapshottingStore[E]) error
 
 func WithSnapshotMarshaler[E estoria.Entity](marshaler estoria.Marshaler[E, *E]) SnapshottingAggregateStoreOption[E] {
-	return func(s *SnapshottingAggregateStore[E]) error {
+	return func(s *SnapshottingStore[E]) error {
 		s.marshaler = marshaler
 		return nil
 	}
 }
 
 func WithSnapshotReader[E estoria.Entity](reader SnapshotReader) SnapshottingAggregateStoreOption[E] {
-	return func(s *SnapshottingAggregateStore[E]) error {
+	return func(s *SnapshottingStore[E]) error {
 		s.reader = reader
 		return nil
 	}
 }
 
 func WithSnapshotWriter[E estoria.Entity](writer SnapshotWriter) SnapshottingAggregateStoreOption[E] {
-	return func(s *SnapshottingAggregateStore[E]) error {
+	return func(s *SnapshottingStore[E]) error {
 		s.writer = writer
 		return nil
 	}

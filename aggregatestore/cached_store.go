@@ -13,31 +13,31 @@ type AggregateCache[E estoria.Entity] interface {
 	PutAggregate(ctx context.Context, aggregate *estoria.Aggregate[E]) error
 }
 
-type CachedAggregateStore[E estoria.Entity] struct {
+type CachedStore[E estoria.Entity] struct {
 	inner Store[E]
 	cache AggregateCache[E]
 	log   *slog.Logger
 }
 
-func NewCachedAggregateStore[E estoria.Entity](
+func NewCachedStore[E estoria.Entity](
 	inner Store[E],
 	cacher AggregateCache[E],
-) *CachedAggregateStore[E] {
-	return &CachedAggregateStore[E]{
+) *CachedStore[E] {
+	return &CachedStore[E]{
 		inner: inner,
 		cache: cacher,
 		log:   slog.Default().WithGroup("cachedaggregatestore"),
 	}
 }
 
-var _ Store[estoria.Entity] = (*CachedAggregateStore[estoria.Entity])(nil)
+var _ Store[estoria.Entity] = (*CachedStore[estoria.Entity])(nil)
 
 // NewAggregate creates a new aggregate.
-func (s *CachedAggregateStore[E]) NewAggregate(id *typeid.UUID) (*estoria.Aggregate[E], error) {
-	return s.inner.NewAggregate(id)
+func (s *CachedStore[E]) New(id *typeid.UUID) (*estoria.Aggregate[E], error) {
+	return s.inner.New(id)
 }
 
-func (s *CachedAggregateStore[E]) Load(ctx context.Context, id typeid.UUID, opts LoadOptions) (*estoria.Aggregate[E], error) {
+func (s *CachedStore[E]) Load(ctx context.Context, id typeid.UUID, opts LoadOptions) (*estoria.Aggregate[E], error) {
 	aggregate, err := s.cache.GetAggregate(ctx, id)
 	if err != nil {
 		s.log.Warn("failed to read cache", "error", err)
@@ -51,12 +51,12 @@ func (s *CachedAggregateStore[E]) Load(ctx context.Context, id typeid.UUID, opts
 }
 
 // Hydrate hydrates an aggregate.
-func (s *CachedAggregateStore[E]) Hydrate(ctx context.Context, aggregate *estoria.Aggregate[E], opts HydrateOptions) error {
+func (s *CachedStore[E]) Hydrate(ctx context.Context, aggregate *estoria.Aggregate[E], opts HydrateOptions) error {
 	return s.inner.Hydrate(ctx, aggregate, opts)
 }
 
 // Save saves an aggregate.
-func (s *CachedAggregateStore[E]) Save(ctx context.Context, aggregate *estoria.Aggregate[E], opts SaveOptions) error {
+func (s *CachedStore[E]) Save(ctx context.Context, aggregate *estoria.Aggregate[E], opts SaveOptions) error {
 	if err := s.inner.Save(ctx, aggregate, opts); err != nil {
 		return err
 	}

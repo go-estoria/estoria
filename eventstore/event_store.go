@@ -8,21 +8,21 @@ import (
 	"github.com/go-estoria/estoria/typeid"
 )
 
-// An EventStore can read and write events to a stream.
-type EventStore interface {
-	EventStreamReader
-	EventStreamWriter
+// An Store can read and write events to a stream.
+type Store interface {
+	StreamReader
+	StreamWriter
 }
 
-// An EventStreamReader can read events from a stream.
-type EventStreamReader interface {
+// An StreamReader can read events from a stream.
+type StreamReader interface {
 	// ReadStream creates an event stream iterator for reading events from a stream.
 	// The starting point, direction, and number of events to read can be specified in the options.
-	ReadStream(ctx context.Context, id typeid.UUID, opts ReadStreamOptions) (EventStreamIterator, error)
+	ReadStream(ctx context.Context, id typeid.UUID, opts ReadStreamOptions) (StreamIterator, error)
 }
 
-// An EventStreamIterator reads events from a stream.
-type EventStreamIterator interface {
+// An StreamIterator reads events from a stream.
+type StreamIterator interface {
 	// Next reads the next event from the stream. It returns io.EOF when there are no more events.
 	Next(ctx context.Context) (*EventStoreEvent, error)
 }
@@ -56,8 +56,8 @@ const (
 	Reverse
 )
 
-// An EventStreamWriter appends events to an event stream.
-type EventStreamWriter interface {
+// An StreamWriter appends events to an event stream.
+type StreamWriter interface {
 	// AppendStream appends events to an event stream.
 	// The expected version of the stream can be specified in the options.
 	AppendStream(ctx context.Context, streamID typeid.UUID, opts AppendStreamOptions, events []*EventStoreEvent) error
