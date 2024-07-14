@@ -9,21 +9,27 @@ import (
 	"github.com/go-estoria/estoria/typeid"
 )
 
-type MemorySnapshotStore struct {
+// A RetentionPolicy determines which snapshots the store should retain.
+type RetentionPolicy interface {
+	// ShouldRetain returns true if the snapshot should be retained.
+	ShouldRetain(snap *AggregateSnapshot, snapshotIndex, totalSnapshots int64) bool
+}
+
+type MemoryStore struct {
 	snapshots map[typeid.UUID][]*AggregateSnapshot
 	marshaler estoria.Marshaler[AggregateSnapshot, *AggregateSnapshot]
 	retention RetentionPolicy
 }
 
-func NewMemoryStore() *MemorySnapshotStore {
-	return &MemorySnapshotStore{
+func NewMemoryStore() *MemoryStore {
+	return &MemoryStore{
 		snapshots: map[typeid.UUID][]*AggregateSnapshot{},
 		marshaler: estoria.JSONMarshaler[AggregateSnapshot]{},
 		retention: MaxSnapshotsRetentionPolicy{N: 1},
 	}
 }
 
-func (s *MemorySnapshotStore) ReadSnapshot(ctx context.Context, aggregateID typeid.UUID, opts ReadSnapshotOptions) (*AggregateSnapshot, error) {
+func (s *MemoryStore) ReadSnapshot(ctx context.Context, aggregateID typeid.UUID, opts ReadSnapshotOptions) (*AggregateSnapshot, error) {
 	slog.Debug("finding snapshot", "aggregate_id", aggregateID)
 
 	snapshots, ok := s.snapshots[aggregateID]
@@ -49,7 +55,7 @@ func (s *MemorySnapshotStore) ReadSnapshot(ctx context.Context, aggregateID type
 	return snap, nil
 }
 
-func (s *MemorySnapshotStore) WriteSnapshot(ctx context.Context, snap *AggregateSnapshot) error {
+func (s *MemoryStore) WriteSnapshot(ctx context.Context, snap *AggregateSnapshot) error {
 	slog.Debug("writing snapshot",
 		"aggregate_id", snap.AggregateID,
 		"aggregate_version",
