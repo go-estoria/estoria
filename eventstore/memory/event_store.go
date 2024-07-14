@@ -14,17 +14,17 @@ import (
 
 // EventStore is an in-memory event store. It should not be used in production applications.
 type EventStore struct {
-	events    map[string][]*estoria.EventStoreEvent
+	events    map[string][]*eventstore.EventStoreEvent
 	mu        sync.RWMutex
-	marshaler estoria.Marshaler[estoria.EventStoreEvent, *estoria.EventStoreEvent]
+	marshaler estoria.Marshaler[eventstore.EventStoreEvent, *eventstore.EventStoreEvent]
 	outbox    *Outbox
 }
 
 // NewEventStore creates a new in-memory event store.
 func NewEventStore(opts ...EventStoreOption) *EventStore {
 	eventStore := &EventStore{
-		events:    map[string][]*estoria.EventStoreEvent{},
-		marshaler: estoria.JSONMarshaler[estoria.EventStoreEvent]{},
+		events:    map[string][]*eventstore.EventStoreEvent{},
+		marshaler: estoria.JSONMarshaler[eventstore.EventStoreEvent]{},
 	}
 
 	for _, opt := range opts {
@@ -35,23 +35,23 @@ func NewEventStore(opts ...EventStoreOption) *EventStore {
 }
 
 // AppendStream appends events to a stream.
-func (s *EventStore) AppendStream(ctx context.Context, streamID typeid.UUID, opts estoria.AppendStreamOptions, events []*estoria.EventStoreEvent) error {
+func (s *EventStore) AppendStream(ctx context.Context, streamID typeid.UUID, opts eventstore.AppendStreamOptions, events []*eventstore.EventStoreEvent) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	stream, ok := s.events[streamID.String()]
 	if !ok {
-		s.events[streamID.String()] = []*estoria.EventStoreEvent{}
+		s.events[streamID.String()] = []*eventstore.EventStoreEvent{}
 		stream = s.events[streamID.String()]
 	}
 
 	if opts.ExpectVersion > 0 && opts.ExpectVersion != int64(len(stream)) {
-		return estoria.ErrStreamVersionMismatch
+		return eventstore.ErrStreamVersionMismatch
 	}
 
-	tx := []*estoria.EventStoreEvent{}
+	tx := []*eventstore.EventStoreEvent{}
 	for _, event := range events {
-		if slices.ContainsFunc(stream, func(e *estoria.EventStoreEvent) bool {
+		if slices.ContainsFunc(stream, func(e *eventstore.EventStoreEvent) bool {
 			return event.ID.String() == e.ID.String()
 		}) {
 			return ErrEventExists{EventID: event.ID}
@@ -72,19 +72,19 @@ func (s *EventStore) AppendStream(ctx context.Context, streamID typeid.UUID, opt
 }
 
 // ReadStream reads events from a stream.
-func (s *EventStore) ReadStream(ctx context.Context, streamID typeid.UUID, opts estoria.ReadStreamOptions) (estoria.EventStreamIterator, error) {
+func (s *EventStore) ReadStream(ctx context.Context, streamID typeid.UUID, opts eventstore.ReadStreamOptions) (eventstore.EventStreamIterator, error) {
 	stream, ok := s.events[streamID.String()]
 	if !ok || len(stream) == 0 {
 		return nil, eventstore.ErrStreamNotFound
 	}
 
 	cursor := int64(0)
-	if opts.Direction == estoria.Reverse {
+	if opts.Direction == eventstore.Reverse {
 		cursor = int64(len(stream) - 1)
 	}
 
 	if opts.Offset > 0 {
-		if opts.Direction == estoria.Reverse {
+		if opts.Direction == eventstore.Reverse {
 			cursor -= int64(opts.Offset)
 		} else {
 			cursor += int64(opts.Offset)

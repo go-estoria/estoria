@@ -8,6 +8,7 @@ import (
 	"sync"
 
 	"github.com/go-estoria/estoria"
+	"github.com/go-estoria/estoria/eventstore"
 	"github.com/go-estoria/estoria/outbox"
 	"github.com/go-estoria/estoria/typeid"
 	"github.com/gofrs/uuid/v5"
@@ -41,7 +42,7 @@ func (o *Outbox) RegisterHandlers(eventType estoria.EntityEvent, handlers ...out
 }
 
 // HandleEvents adds an outbox item for each event.
-func (o *Outbox) HandleEvents(ctx context.Context, events []*estoria.EventStoreEvent) error {
+func (o *Outbox) HandleEvents(ctx context.Context, events []*eventstore.EventStoreEvent) error {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	slog.Info("inserting events into outbox", "tx", "inherited", "events", len(events))

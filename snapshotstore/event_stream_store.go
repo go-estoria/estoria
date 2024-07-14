@@ -9,16 +9,17 @@ import (
 	"time"
 
 	"github.com/go-estoria/estoria"
+	"github.com/go-estoria/estoria/eventstore"
 	"github.com/go-estoria/estoria/typeid"
 )
 
 type EventStreamSnapshotStore struct {
-	eventReader estoria.EventStreamReader
-	eventWriter estoria.EventStreamWriter
+	eventReader eventstore.EventStreamReader
+	eventWriter eventstore.EventStreamWriter
 	marshaler   estoria.Marshaler[AggregateSnapshot, *AggregateSnapshot]
 }
 
-func NewEventStreamSnapshotStore(eventStore estoria.EventStore) *EventStreamSnapshotStore {
+func NewEventStreamSnapshotStore(eventStore eventstore.EventStore) *EventStreamSnapshotStore {
 	return &EventStreamSnapshotStore{
 		eventReader: eventStore,
 		eventWriter: eventStore,
@@ -31,10 +32,10 @@ func (s *EventStreamSnapshotStore) ReadSnapshot(ctx context.Context, aggregateID
 
 	snapshotStreamID := typeid.FromUUID(aggregateID.TypeName()+"snapshot", aggregateID.UUID())
 
-	stream, err := s.eventReader.ReadStream(ctx, snapshotStreamID, estoria.ReadStreamOptions{
+	stream, err := s.eventReader.ReadStream(ctx, snapshotStreamID, eventstore.ReadStreamOptions{
 		Offset:    0,
 		Count:     1,
-		Direction: estoria.Reverse,
+		Direction: eventstore.Reverse,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("finding snapshot stream: %w", err)
@@ -83,7 +84,7 @@ func (s *EventStreamSnapshotStore) WriteSnapshot(ctx context.Context, snap *Aggr
 		return fmt.Errorf("marshaling snapshot data for stream event: %w", err)
 	}
 
-	if err := s.eventWriter.AppendStream(ctx, snapshotStreamID, estoria.AppendStreamOptions{}, []*estoria.EventStoreEvent{
+	if err := s.eventWriter.AppendStream(ctx, snapshotStreamID, eventstore.AppendStreamOptions{}, []*eventstore.EventStoreEvent{
 		{
 			ID:        eventID,
 			StreamID:  snapshotStreamID,

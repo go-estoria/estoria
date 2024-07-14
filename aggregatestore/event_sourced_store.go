@@ -15,8 +15,8 @@ import (
 // An EventSourcedAggregateStore loads and saves aggregates using an EventStore.
 // It hydrates aggregates by reading events from the event store and applying them to the aggregate.
 type EventSourcedAggregateStore[E estoria.Entity] struct {
-	eventReader estoria.EventStreamReader
-	eventWriter estoria.EventStreamWriter
+	eventReader eventstore.EventStreamReader
+	eventWriter eventstore.EventStreamWriter
 
 	newEntity            estoria.EntityFactory[E]
 	eventDataFactories   map[string]func() estoria.EntityEvent
@@ -28,7 +28,7 @@ type EventSourcedAggregateStore[E estoria.Entity] struct {
 var _ Store[estoria.Entity] = (*EventSourcedAggregateStore[estoria.Entity])(nil)
 
 func NewEventSourcedAggregateStore[E estoria.Entity](
-	eventStore estoria.EventStore,
+	eventStore eventstore.EventStore,
 	entityFactory estoria.EntityFactory[E],
 	opts ...EventSourcedAggregateStoreOption[E],
 ) (*EventSourcedAggregateStore[E], error) {
@@ -106,9 +106,9 @@ func (s *EventSourcedAggregateStore[E]) Hydrate(ctx context.Context, aggregate *
 		aggregate.Entity().SetEntityID(aggregate.ID())
 	}
 
-	readOpts := estoria.ReadStreamOptions{
+	readOpts := eventstore.ReadStreamOptions{
 		Offset:    aggregate.Version(),
-		Direction: estoria.Forward,
+		Direction: eventstore.Forward,
 	}
 
 	if opts.ToVersion > 0 {
@@ -174,7 +174,7 @@ func (s *EventSourcedAggregateStore[E]) Save(ctx context.Context, aggregate *est
 		return nil
 	}
 
-	toSave := make([]*estoria.EventStoreEvent, len(unsavedEvents))
+	toSave := make([]*eventstore.EventStoreEvent, len(unsavedEvents))
 	for i, unsavedEvent := range unsavedEvents {
 		eventID, err := typeid.NewUUID(unsavedEvent.Data.EventType())
 		if err != nil {
@@ -186,7 +186,7 @@ func (s *EventSourcedAggregateStore[E]) Save(ctx context.Context, aggregate *est
 			return fmt.Errorf("serializing event data: %w", err)
 		}
 
-		toSave[i] = &estoria.EventStoreEvent{
+		toSave[i] = &eventstore.EventStoreEvent{
 			ID:        eventID,
 			StreamID:  aggregate.ID(),
 			Timestamp: unsavedEvent.Timestamp,
@@ -194,7 +194,7 @@ func (s *EventSourcedAggregateStore[E]) Save(ctx context.Context, aggregate *est
 		}
 	}
 
-	if err := s.eventWriter.AppendStream(ctx, aggregate.ID(), estoria.AppendStreamOptions{
+	if err := s.eventWriter.AppendStream(ctx, aggregate.ID(), eventstore.AppendStreamOptions{
 		ExpectVersion: aggregate.Version(),
 	}, toSave); err != nil {
 		return fmt.Errorf("saving events: %w", err)
@@ -229,14 +229,14 @@ func WithEntityEventMarshaler[E estoria.Entity](marshaler estoria.Marshaler[esto
 	}
 }
 
-func WithEventStreamReader[E estoria.Entity](reader estoria.EventStreamReader) EventSourcedAggregateStoreOption[E] {
+func WithEventStreamReader[E estoria.Entity](reader eventstore.EventStreamReader) EventSourcedAggregateStoreOption[E] {
 	return func(s *EventSourcedAggregateStore[E]) error {
 		s.eventReader = reader
 		return nil
 	}
 }
 
-func WithEventStreamWriter[E estoria.Entity](writer estoria.EventStreamWriter) EventSourcedAggregateStoreOption[E] {
+func WithEventStreamWriter[E estoria.Entity](writer eventstore.EventStreamWriter) EventSourcedAggregateStoreOption[E] {
 	return func(s *EventSourcedAggregateStore[E]) error {
 		s.eventWriter = writer
 		return nil
