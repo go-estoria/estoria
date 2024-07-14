@@ -85,7 +85,7 @@ func (p *Processor) Start(ctx context.Context) error {
 		return fmt.Errorf("creating outbox iterator: %w", err)
 	}
 
-	slog.Info("starting outbox processor", "handlers", len(p.handlers))
+	slog.Debug("starting outbox processor", "handlers", len(p.handlers))
 
 	ctx, cancel := context.WithCancel(ctx)
 	p.stop = cancel
@@ -99,7 +99,7 @@ func (p *Processor) Stop() {
 
 func (p *Processor) Handle(ctx context.Context, entry OutboxItem) error {
 	if entry.FullyProcessed() {
-		slog.Info("nothing to process", "event_id", entry.EventID())
+		slog.Debug("nothing to process", "event_id", entry.EventID())
 		return nil
 	}
 
@@ -137,7 +137,7 @@ func (p *Processor) run(ctx context.Context, iterator Iterator) {
 	for {
 		select {
 		case <-ctx.Done():
-			slog.Info("stopping outbox processor", "reason", ctx.Err())
+			slog.Debug("stopping outbox processor", "reason", ctx.Err())
 			return
 		default:
 		}

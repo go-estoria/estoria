@@ -15,7 +15,7 @@ type MemorySnapshotStore struct {
 	retention RetentionPolicy
 }
 
-func NewMemorySnapshotStore() *MemorySnapshotStore {
+func NewMemoryStore() *MemorySnapshotStore {
 	return &MemorySnapshotStore{
 		snapshots: map[typeid.UUID][]*AggregateSnapshot{},
 		marshaler: estoria.JSONMarshaler[AggregateSnapshot]{},

@@ -45,7 +45,7 @@ func (o *Outbox) RegisterHandlers(eventType estoria.EntityEvent, handlers ...out
 func (o *Outbox) HandleEvents(ctx context.Context, events []*eventstore.EventStoreEvent) error {
 	o.mu.Lock()
 	defer o.mu.Unlock()
-	slog.Info("inserting events into outbox", "tx", "inherited", "events", len(events))
+	slog.Debug("inserting events into outbox", "tx", "inherited", "events", len(events))
 
 	for _, event := range events {
 		item := &outboxItem{
