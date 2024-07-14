@@ -8,6 +8,7 @@ import (
 	"log/slog"
 
 	"github.com/go-estoria/estoria"
+	"github.com/go-estoria/estoria/eventstore"
 	"github.com/go-estoria/estoria/typeid"
 )
 
@@ -24,7 +25,7 @@ type EventSourcedAggregateStore[E estoria.Entity] struct {
 	log *slog.Logger
 }
 
-var _ estoria.AggregateStore[estoria.Entity] = (*EventSourcedAggregateStore[estoria.Entity])(nil)
+var _ Store[estoria.Entity] = (*EventSourcedAggregateStore[estoria.Entity])(nil)
 
 func NewEventSourcedAggregateStore[E estoria.Entity](
 	eventStore estoria.EventStore,
@@ -71,7 +72,7 @@ func (s *EventSourcedAggregateStore[E]) NewAggregate(id *typeid.UUID) (*estoria.
 }
 
 // Load loads an aggregate by its ID.
-func (s *EventSourcedAggregateStore[E]) Load(ctx context.Context, id typeid.UUID, opts estoria.LoadAggregateOptions) (*estoria.Aggregate[E], error) {
+func (s *EventSourcedAggregateStore[E]) Load(ctx context.Context, id typeid.UUID, opts LoadOptions) (*estoria.Aggregate[E], error) {
 	s.log.Debug("loading aggregate from event store", "aggregate_id", id)
 
 	aggregate, err := s.NewAggregate(&id)
@@ -79,7 +80,7 @@ func (s *EventSourcedAggregateStore[E]) Load(ctx context.Context, id typeid.UUID
 		return nil, fmt.Errorf("creating new aggregate: %w", err)
 	}
 
-	hydrateOpts := estoria.HydrateAggregateOptions{
+	hydrateOpts := HydrateOptions{
 		ToVersion: opts.ToVersion,
 	}
 
@@ -91,7 +92,7 @@ func (s *EventSourcedAggregateStore[E]) Load(ctx context.Context, id typeid.UUID
 }
 
 // Hydrate hydrates an aggregate.
-func (s *EventSourcedAggregateStore[E]) Hydrate(ctx context.Context, aggregate *estoria.Aggregate[E], opts estoria.HydrateAggregateOptions) error {
+func (s *EventSourcedAggregateStore[E]) Hydrate(ctx context.Context, aggregate *estoria.Aggregate[E], opts HydrateOptions) error {
 	log := s.log.With("aggregate_id", aggregate.ID())
 	log.Debug("hydrating aggregate from event store", "from_version", aggregate.Version(), "to_version", opts.ToVersion)
 
@@ -123,8 +124,8 @@ func (s *EventSourcedAggregateStore[E]) Hydrate(ctx context.Context, aggregate *
 
 	// Load the aggregate's events.
 	stream, err := s.eventReader.ReadStream(ctx, aggregate.ID(), readOpts)
-	if errors.Is(err, estoria.ErrStreamNotFound) {
-		return estoria.ErrAggregateNotFound
+	if errors.Is(err, eventstore.ErrStreamNotFound) {
+		return ErrAggregateNotFound
 	} else if err != nil {
 		return fmt.Errorf("reading event stream: %w", err)
 	}
@@ -164,7 +165,7 @@ func (s *EventSourcedAggregateStore[E]) Hydrate(ctx context.Context, aggregate *
 }
 
 // Save saves an aggregate.
-func (s *EventSourcedAggregateStore[E]) Save(ctx context.Context, aggregate *estoria.Aggregate[E], opts estoria.SaveAggregateOptions) error {
+func (s *EventSourcedAggregateStore[E]) Save(ctx context.Context, aggregate *estoria.Aggregate[E], opts SaveOptions) error {
 	unsavedEvents := aggregate.UnsavedEvents()
 	s.log.Debug("saving aggregate to event store", "aggregate_id", aggregate.ID(), "events", len(unsavedEvents))
 

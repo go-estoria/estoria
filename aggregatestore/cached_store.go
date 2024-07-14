@@ -14,13 +14,13 @@ type AggregateCache[E estoria.Entity] interface {
 }
 
 type CachedAggregateStore[E estoria.Entity] struct {
-	inner estoria.AggregateStore[E]
+	inner Store[E]
 	cache AggregateCache[E]
 	log   *slog.Logger
 }
 
 func NewCachedAggregateStore[E estoria.Entity](
-	inner estoria.AggregateStore[E],
+	inner Store[E],
 	cacher AggregateCache[E],
 ) *CachedAggregateStore[E] {
 	return &CachedAggregateStore[E]{
@@ -30,14 +30,14 @@ func NewCachedAggregateStore[E estoria.Entity](
 	}
 }
 
-var _ estoria.AggregateStore[estoria.Entity] = (*CachedAggregateStore[estoria.Entity])(nil)
+var _ Store[estoria.Entity] = (*CachedAggregateStore[estoria.Entity])(nil)
 
 // NewAggregate creates a new aggregate.
 func (s *CachedAggregateStore[E]) NewAggregate(id *typeid.UUID) (*estoria.Aggregate[E], error) {
 	return s.inner.NewAggregate(id)
 }
 
-func (s *CachedAggregateStore[E]) Load(ctx context.Context, id typeid.UUID, opts estoria.LoadAggregateOptions) (*estoria.Aggregate[E], error) {
+func (s *CachedAggregateStore[E]) Load(ctx context.Context, id typeid.UUID, opts LoadOptions) (*estoria.Aggregate[E], error) {
 	aggregate, err := s.cache.GetAggregate(ctx, id)
 	if err != nil {
 		s.log.Warn("failed to read cache", "error", err)
@@ -51,12 +51,12 @@ func (s *CachedAggregateStore[E]) Load(ctx context.Context, id typeid.UUID, opts
 }
 
 // Hydrate hydrates an aggregate.
-func (s *CachedAggregateStore[E]) Hydrate(ctx context.Context, aggregate *estoria.Aggregate[E], opts estoria.HydrateAggregateOptions) error {
+func (s *CachedAggregateStore[E]) Hydrate(ctx context.Context, aggregate *estoria.Aggregate[E], opts HydrateOptions) error {
 	return s.inner.Hydrate(ctx, aggregate, opts)
 }
 
 // Save saves an aggregate.
-func (s *CachedAggregateStore[E]) Save(ctx context.Context, aggregate *estoria.Aggregate[E], opts estoria.SaveAggregateOptions) error {
+func (s *CachedAggregateStore[E]) Save(ctx context.Context, aggregate *estoria.Aggregate[E], opts SaveOptions) error {
 	if err := s.inner.Save(ctx, aggregate, opts); err != nil {
 		return err
 	}

@@ -8,6 +8,7 @@ import (
 	"sync"
 
 	"github.com/go-estoria/estoria"
+	"github.com/go-estoria/estoria/eventstore"
 	"github.com/go-estoria/estoria/typeid"
 )
 
@@ -70,7 +71,7 @@ func (s *EventStore) AppendStream(ctx context.Context, streamID typeid.UUID, opt
 func (s *EventStore) ReadStream(ctx context.Context, streamID typeid.UUID, opts estoria.ReadStreamOptions) (estoria.EventStreamIterator, error) {
 	stream, ok := s.events[streamID.String()]
 	if !ok || len(stream) == 0 {
-		return nil, estoria.ErrStreamNotFound
+		return nil, eventstore.ErrStreamNotFound
 	}
 
 	cursor := int64(0)

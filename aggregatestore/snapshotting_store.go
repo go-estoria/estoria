@@ -30,7 +30,7 @@ type SnapshotPolicy interface {
 }
 
 type SnapshottingAggregateStore[E estoria.Entity] struct {
-	inner     estoria.AggregateStore[E]
+	inner     Store[E]
 	reader    SnapshotReader
 	writer    SnapshotWriter
 	policy    SnapshotPolicy
@@ -38,10 +38,10 @@ type SnapshottingAggregateStore[E estoria.Entity] struct {
 	log       *slog.Logger
 }
 
-var _ estoria.AggregateStore[estoria.Entity] = (*SnapshottingAggregateStore[estoria.Entity])(nil)
+var _ Store[estoria.Entity] = (*SnapshottingAggregateStore[estoria.Entity])(nil)
 
 func NewSnapshottingAggregateStore[E estoria.Entity](
-	inner estoria.AggregateStore[E],
+	inner Store[E],
 	store SnapshotStore,
 	policy SnapshotPolicy,
 	opts ...SnapshottingAggregateStoreOption[E],
@@ -68,7 +68,7 @@ func (s *SnapshottingAggregateStore[E]) NewAggregate(id *typeid.UUID) (*estoria.
 }
 
 // Load loads an aggregate by its ID.
-func (s *SnapshottingAggregateStore[E]) Load(ctx context.Context, aggregateID typeid.UUID, opts estoria.LoadAggregateOptions) (*estoria.Aggregate[E], error) {
+func (s *SnapshottingAggregateStore[E]) Load(ctx context.Context, aggregateID typeid.UUID, opts LoadOptions) (*estoria.Aggregate[E], error) {
 	s.log.Debug("loading aggregate", "aggregate_id", aggregateID)
 	aggregate, err := s.NewAggregate(&aggregateID)
 	if err != nil {
@@ -76,7 +76,7 @@ func (s *SnapshottingAggregateStore[E]) Load(ctx context.Context, aggregateID ty
 		return s.inner.Load(ctx, aggregateID, opts)
 	}
 
-	if err := s.Hydrate(ctx, aggregate, estoria.HydrateAggregateOptions{
+	if err := s.Hydrate(ctx, aggregate, HydrateOptions{
 		ToVersion: opts.ToVersion,
 	}); err != nil {
 		slog.Warn("failed to hydrate aggregate", "error", err)
@@ -87,7 +87,7 @@ func (s *SnapshottingAggregateStore[E]) Load(ctx context.Context, aggregateID ty
 }
 
 // Hydrate hydrates an aggregate.
-func (s *SnapshottingAggregateStore[E]) Hydrate(ctx context.Context, aggregate *estoria.Aggregate[E], opts estoria.HydrateAggregateOptions) error {
+func (s *SnapshottingAggregateStore[E]) Hydrate(ctx context.Context, aggregate *estoria.Aggregate[E], opts HydrateOptions) error {
 	log := s.log.With("aggregate_id", aggregate.ID())
 	log.Debug("hydrating aggregate from snapshot", "from_version", aggregate.Version(), "to_version", opts.ToVersion)
 
@@ -122,7 +122,7 @@ func (s *SnapshottingAggregateStore[E]) Hydrate(ctx context.Context, aggregate *
 }
 
 // Save saves an aggregate.
-func (s *SnapshottingAggregateStore[E]) Save(ctx context.Context, aggregate *estoria.Aggregate[E], opts estoria.SaveAggregateOptions) error {
+func (s *SnapshottingAggregateStore[E]) Save(ctx context.Context, aggregate *estoria.Aggregate[E], opts SaveOptions) error {
 	slog.Debug("saving aggregate", "aggregate_id", aggregate.ID())
 
 	// defer applying events so a snapshot can be taken at an exact version
