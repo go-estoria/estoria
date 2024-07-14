@@ -42,6 +42,12 @@ func NewEventSourcedStore[E estoria.Entity](
 	}
 
 	for _, prototype := range store.newEntity().EventTypes() {
+		if _, ok := store.eventDataFactories[prototype.EventType()]; ok {
+			return nil, fmt.Errorf("duplicate event type %s for entity %T",
+				prototype.EventType(),
+				store.newEntity().EntityID().TypeName())
+		}
+
 		store.eventDataFactories[prototype.EventType()] = prototype.New
 	}
 
