@@ -1,21 +1,32 @@
 # estoria
 
-## Motivations
+Estoria is an event sourcing toolkit for Go.
 
-- Provide adequate abstractions at every layer to allow for hyper customization and extensibility
-- Assume nothing about storage backends
-- Provide sensible defaults and factories for common implementations
-- Ability for individual entities to be event-sourced, rather than the entire app's data
-- Event-sourcing as a storage abstraction below the application level
+>**Note**: This project is in early beta. While functional, the API is not yet stable and is not suitable for production use.
 
-## Feature Brainstorming
+Event sourcing enables you to model your application as a series of state-changing events. This approach can make it easier to reason about your application's behavior, as well as to implement features like auditing, replay, and time travel.
 
-- Diffing of entities to auto-generate events?!?
-- Middleware
-  - Event appending
-  - Event application (upgrading events, etc)
-  - Tracing: OTEL, etc
-- CQRS components?
-- Outbox functionality
-- Event bus(es)
-- CLI tool for generating commands/events for existing entity types?
+Estoria provides composable components for implementing event sourcing in a Go application, including:
+
+- Event-based aggregegate state management
+- Flexible event store implementations
+- Transactional outbox processing
+- Aggregate snapshotting
+- Aggregate caching
+- Lifecycle hooks
+
+## Getting Started
+
+```shell
+go get github.com/go-estoria/estoria
+```
+
+See [estoria-examples](https://github.com/go-estoria/estoria-examples) for runnable API usage examples.
+
+## Component Providers
+
+See [estoria-contrib](https://github.com/go-estoria/estoria-contrib) for officially-supported event store, snapshot store, and aggregate cache implementations.
+
+## License
+
+Estoria is licensed under the MIT License.

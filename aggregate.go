@@ -2,46 +2,108 @@ package estoria
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"time"
+
+	"github.com/go-estoria/estoria/typeid"
 )
 
 // An Aggregate is a reconstructed representation of an event-sourced entity's state.
 type Aggregate[E Entity] struct {
-	id            AggregateID
-	data          E
-	UnsavedEvents []Event
+	// the entity that the aggregate represents
+	entity E
+
+	// appended to the aggregate but not yet persisted
+	unsavedEvents []AggregateEvent
+
+	// events loaded from persistence or newly saved but not yet applied to the entity
+	unappliedEvents []EntityEvent
+
+	// the number of events that have been applied to the aggregate
+	version int64
 }
 
-func (a *Aggregate[E]) ID() AggregateID {
-	return a.id
+// ID returns the aggregate's ID.
+// The ID is the ID of the entity that the aggregate represents.
+func (a *Aggregate[E]) ID() typeid.UUID {
+	return a.entity.EntityID()
 }
 
+// Entity returns the aggregate's underlying entity.
+// The entity is the object that the aggregate represents.
 func (a *Aggregate[E]) Entity() E {
-	return a.data
+	return a.entity
+}
+
+// Version returns the aggregate's version.
+// The version is the number of events that have been applied to the aggregate.
+// An aggregate with no events has a version of 0.
+func (a *Aggregate[E]) Version() int64 {
+	return a.version
 }
 
 // Append appends the given events to the aggregate's unsaved events.
-func (a *Aggregate[E]) Append(events ...any) error {
+// Events are not persisted or applied to the entity until the aggregate is saved.
+func (a *Aggregate[E]) Append(events ...EntityEvent) error {
 	slog.Debug("appending events to aggregate", "aggregate_id", a.ID(), "events", len(events))
-	for _, event := range events {
-		a.UnsavedEvents = append(a.UnsavedEvents, newEvent(
-			a.ID(),
-			time.Now(),
-			event,
-		))
+	for _, eventData := range events {
+		eventID, err := typeid.NewUUID(eventData.EventType())
+		if err != nil {
+			return fmt.Errorf("generating event ID: %w", err)
+		}
+
+		a.unsavedEvents = append(a.unsavedEvents, AggregateEvent{
+			ID:        eventID,
+			Timestamp: time.Now(),
+			Data:      eventData,
+		})
 	}
 
 	return nil
 }
 
-// Apply applies the given events to the aggregate's state.
-func (a *Aggregate[E]) Apply(ctx context.Context, event Event) error {
-	slog.Debug("applying event to aggregate", "aggregate_id", a.ID(), "event_id", event.ID())
-	if err := a.data.ApplyEvent(ctx, event.Data()); err != nil {
+func (a *Aggregate[E]) QueueForApplication(event EntityEvent) {
+	a.unappliedEvents = append(a.unappliedEvents, event)
+}
+
+func (a *Aggregate[E]) SetEntity(entity E) {
+	a.unsavedEvents = nil
+	a.entity = entity
+}
+
+func (a *Aggregate[E]) SetVersion(version int64) {
+	a.version = version
+}
+
+func (a *Aggregate[E]) ClearUnsavedEvents() {
+	a.unsavedEvents = nil
+}
+
+func (a *Aggregate[E]) UnsavedEvents() []AggregateEvent {
+	return a.unsavedEvents
+}
+
+func (a *Aggregate[E]) ApplyNext(ctx context.Context) error {
+	if len(a.unappliedEvents) == 0 {
+		return ErrNoUnappliedEvents
+	}
+
+	if err := a.entity.ApplyEvent(ctx, a.unappliedEvents[0]); err != nil {
 		return fmt.Errorf("applying event: %w", err)
 	}
 
+	a.unappliedEvents = a.unappliedEvents[1:]
+	a.version++
+
 	return nil
+}
+
+var ErrNoUnappliedEvents = errors.New("no unapplied events")
+
+type AggregateEvent struct {
+	ID        typeid.UUID
+	Timestamp time.Time
+	Data      EntityEvent
 }

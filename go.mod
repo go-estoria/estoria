@@ -1,5 +1,5 @@
 module github.com/go-estoria/estoria
 
-go 1.21.6
+go 1.22.4
 
-require github.com/google/uuid v1.5.0
+require github.com/gofrs/uuid/v5 v5.2.0
