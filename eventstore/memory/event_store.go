@@ -12,6 +12,7 @@ import (
 	"github.com/go-estoria/estoria/typeid"
 )
 
+// EventStore is an in-memory event store. It should not be used in production applications.
 type EventStore struct {
 	events    map[string][]*estoria.EventStoreEvent
 	mu        sync.RWMutex
@@ -19,6 +20,7 @@ type EventStore struct {
 	outbox    *Outbox
 }
 
+// NewEventStore creates a new in-memory event store.
 func NewEventStore(opts ...EventStoreOption) *EventStore {
 	eventStore := &EventStore{
 		events:    map[string][]*estoria.EventStoreEvent{},
@@ -32,6 +34,7 @@ func NewEventStore(opts ...EventStoreOption) *EventStore {
 	return eventStore
 }
 
+// AppendStream appends events to a stream.
 func (s *EventStore) AppendStream(ctx context.Context, streamID typeid.UUID, opts estoria.AppendStreamOptions, events []*estoria.EventStoreEvent) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -68,6 +71,7 @@ func (s *EventStore) AppendStream(ctx context.Context, streamID typeid.UUID, opt
 	return nil
 }
 
+// ReadStream reads events from a stream.
 func (s *EventStore) ReadStream(ctx context.Context, streamID typeid.UUID, opts estoria.ReadStreamOptions) (estoria.EventStreamIterator, error) {
 	stream, ok := s.events[streamID.String()]
 	if !ok || len(stream) == 0 {
@@ -101,15 +105,17 @@ func (s *EventStore) ReadStream(ctx context.Context, streamID typeid.UUID, opts 
 	}, nil
 }
 
+// An EventStoreOption configures an EventStore.
 type EventStoreOption func(*EventStore)
 
+// WithOutbox configures the event store to use an outbox.
 func WithOutbox(outbox *Outbox) EventStoreOption {
 	return func(s *EventStore) {
 		s.outbox = outbox
 	}
 }
 
-// ErrEventExists is returned when attempting to write an event that already exists.
+// ErrEventExists is returned when attempting to append an event that already exists.
 type ErrEventExists struct {
 	EventID typeid.UUID
 }
