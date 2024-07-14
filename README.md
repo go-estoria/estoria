@@ -2,57 +2,18 @@
 
 Estoria is an event sourcing toolkit for Go.
 
->**Note: This project is in its alpha phase, the API changes frequently, and it is not yet ready for production use.**
+>**Note**: This project is in early beta. While functional, the API is not yet stable and is not suitable for production use.
 
-See [Getting Started](#getting-started) to start using Estoria.
+Event sourcing enables you to model your application as a series of state-changing events. This approach can make it easier to reason about your application's behavior, as well as to implement features like auditing, replay, and time travel.
 
-## V1 Roadmap (subject to change)
+Estoria provides composable components for implementing event sourcing in a Go application, including:
 
-- [~] Features
-  - [X] Aggregate Store Implementations
-    - [X] Event-Sourced (core)
-    - [X] Cached
-    - [X] Snapshotting
-    - [X] Hookable
-  - [~] Event Store Implementations
-    - [X] In-memory
-    - [~] Persistent (via [estoria-contrib](https://github.com/go-estoria/estoria-contrib))
-      - [X] EventStoreDB
-      - [X] Postgres
-      - [X] MongoDB
-      - [ ] DynamoDB
-      - [ ] MySQL
-      - [ ] Azure Cosmos DB
-      - [ ] Google Cloud Spanner
-      - [ ] SQLite
-      - [?] Cassandra (uncommitted)
-      - [?] Google Cloud Firestore (uncommitted)
-      - [?] MSSQL (uncommitted)
-  - [~] Snapshot Store Implementations
-    - [X] In-memory
-    - [~] Persistent
-      - [X] Event Store (adapter)
-      - [?] Event-Sourced (uncommitted) (incremental snapshot diffing)
-      - [ ] 3rd Party (via [estoria-contrib](https://github.com/go-estoria/estoria-contrib))
-        - [ ] Postgres
-        - [ ] MongoDB
-  - [X] Outbox Processing
-- [ ] Tests
-  - [ ] Unit Tests
-  - [ ] Integration Tests
-- [ ] Documentation
-  - [ ] README
-  - [ ] GoDoc
-  - [ ] Examples
-- [ ] Examples
-  - [ ] Basic Usage
-  - [ ] Caching
-  - [ ] Lifecycle Hooks
-  - [ ] Outbox Processing
-- [ ] Benchmarks
-  - [ ] Aggregate Stores
-  - [ ] Event Stores
-  - [ ] Snapshot Stores
+- Event-based aggregegate state management
+- Flexible event store implementations
+- Transactional outbox processing
+- Aggregate snapshotting
+- Aggregate caching
+- Lifecycle hooks
 
 ## Getting Started
 
@@ -60,12 +21,12 @@ See [Getting Started](#getting-started) to start using Estoria.
 go get github.com/go-estoria/estoria
 ```
 
-See the [example project in estoria-contrib](https://github.com/go-estoria/estoria-contrib/tree/main/example) for API usage examples.
+See [estoria-examples](https://github.com/go-estoria/estoria-examples) for runnable API usage examples.
 
-## Event Store Providers
+## Component Providers
 
-See [estoria-contrib](https://github.com/go-estoria/estoria-contrib) for officially-supported event store implementations.
+See [estoria-contrib](https://github.com/go-estoria/estoria-contrib) for officially-supported event store, snapshot store, and aggregate cache implementations.
 
 ## License
 
-This project is licensed under the MIT License.
+Estoria is licensed under the MIT License.
