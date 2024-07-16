@@ -46,45 +46,43 @@ func (a *Aggregate[E]) Version() int64 {
 
 // Append appends the given events to the aggregate's unsaved events.
 // Events are not persisted or applied to the entity until the aggregate is saved.
-func (a *Aggregate[E]) Append(events ...EntityEvent) error {
+func (a *Aggregate[E]) Append(events ...AggregateEvent) error {
 	slog.Debug("appending events to aggregate", "aggregate_id", a.ID(), "events", len(events))
-	for _, eventData := range events {
-		eventID, err := typeid.NewUUID(eventData.EventType())
-		if err != nil {
-			return fmt.Errorf("generating event ID: %w", err)
-		}
-
-		a.unsavedEvents = append(a.unsavedEvents, AggregateEvent{
-			ID:        eventID,
-			Timestamp: time.Now(),
-			Data:      eventData,
-		})
-	}
+	a.unsavedEvents = append(a.unsavedEvents, events...)
 
 	return nil
 }
 
-func (a *Aggregate[E]) QueueForApplication(event EntityEvent) {
+// AddForApply enqueues the given entity event to be applied to the
+// aggregate's entity during subsequent calls to ApplyNext.
+func (a *Aggregate[E]) AddForApply(event EntityEvent) {
 	a.unappliedEvents = append(a.unappliedEvents, event)
 }
 
+// SetEntity sets the aggregate's entity, replacing the current entity.
 func (a *Aggregate[E]) SetEntity(entity E) {
 	a.unsavedEvents = nil
 	a.entity = entity
 }
 
+// SetVersion sets the aggregate's version, replacing the current version.
 func (a *Aggregate[E]) SetVersion(version int64) {
 	a.version = version
 }
 
+// ClearUnsavedEvents clears the aggregate's unsaved events.
 func (a *Aggregate[E]) ClearUnsavedEvents() {
 	a.unsavedEvents = nil
 }
 
+// UnsavedEvents returns the aggregate's unsaved events.
 func (a *Aggregate[E]) UnsavedEvents() []AggregateEvent {
 	return a.unsavedEvents
 }
 
+// ApplyNext applies the next entity event in the apply queue to the aggregate's
+// entity. A successfully applied event increments the aggregate's version. If
+// there are no events in the apply queue, ErrNoUnappliedEvents is returned.
 func (a *Aggregate[E]) ApplyNext(ctx context.Context) error {
 	if len(a.unappliedEvents) == 0 {
 		return ErrNoUnappliedEvents
@@ -100,10 +98,16 @@ func (a *Aggregate[E]) ApplyNext(ctx context.Context) error {
 	return nil
 }
 
+// ErrNoUnappliedEvents indicates that there are no unapplied events for the aggregate.
+// This error is returned by ApplyNext when there are no events in the apply queue.
+// It should be handled by the caller as a normal condition.
 var ErrNoUnappliedEvents = errors.New("no unapplied events")
 
+// An AggregateEvent is an event that that applies to an aggregate
+// to change its state. It consists of a unique ID, a timestamp, and
+// an entity event, which holds data specific to the event.
 type AggregateEvent struct {
-	ID        typeid.UUID
-	Timestamp time.Time
-	Data      EntityEvent
+	ID          typeid.UUID
+	Timestamp   time.Time
+	EntityEvent EntityEvent
 }
