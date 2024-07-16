@@ -30,7 +30,7 @@ var _ Store[estoria.Entity] = (*EventSourcedStore[estoria.Entity])(nil)
 func NewEventSourcedStore[E estoria.Entity](
 	eventStore eventstore.Store,
 	entityFactory estoria.EntityFactory[E],
-	opts ...EventSourcedAggregateStoreOption[E],
+	opts ...EventSourcedStoreOption[E],
 ) (*EventSourcedStore[E], error) {
 	store := &EventSourcedStore[E]{
 		eventReader:          eventStore,
@@ -178,16 +178,25 @@ func (s *EventSourcedStore[E]) Save(ctx context.Context, aggregate *estoria.Aggr
 
 	events := make([]*eventstore.EventStoreEvent, len(unsavedEvents))
 	for i, unsavedEvent := range unsavedEvents {
+		nextVersion := aggregate.Version() + int64(i) + 1
+
+		if unsavedEvent.Version > 0 && unsavedEvent.Version != nextVersion {
+			return fmt.Errorf("event version mismatch: next is %d, event specifies %d",
+				aggregate.Version()+int64(i)+1,
+				unsavedEvent.Version)
+		}
+
 		data, err := s.entityEventMarshaler.Marshal(&unsavedEvent.EntityEvent)
 		if err != nil {
 			return fmt.Errorf("serializing event data: %w", err)
 		}
 
 		events[i] = &eventstore.EventStoreEvent{
-			ID:        unsavedEvent.ID,
-			StreamID:  aggregate.ID(),
-			Timestamp: unsavedEvent.Timestamp,
-			Data:      data,
+			ID:            unsavedEvent.ID,
+			StreamID:      aggregate.ID(),
+			StreamVersion: nextVersion,
+			Timestamp:     unsavedEvent.Timestamp,
+			Data:          data,
 		}
 	}
 
@@ -219,23 +228,23 @@ func (s *EventSourcedStore[E]) Save(ctx context.Context, aggregate *estoria.Aggr
 	}
 }
 
-type EventSourcedAggregateStoreOption[E estoria.Entity] func(*EventSourcedStore[E]) error
+type EventSourcedStoreOption[E estoria.Entity] func(*EventSourcedStore[E]) error
 
-func WithEntityEventMarshaler[E estoria.Entity](marshaler estoria.Marshaler[estoria.EntityEvent, *estoria.EntityEvent]) EventSourcedAggregateStoreOption[E] {
+func WithEntityEventMarshaler[E estoria.Entity](marshaler estoria.Marshaler[estoria.EntityEvent, *estoria.EntityEvent]) EventSourcedStoreOption[E] {
 	return func(s *EventSourcedStore[E]) error {
 		s.entityEventMarshaler = marshaler
 		return nil
 	}
 }
 
-func WithStreamReader[E estoria.Entity](reader eventstore.StreamReader) EventSourcedAggregateStoreOption[E] {
+func WithStreamReader[E estoria.Entity](reader eventstore.StreamReader) EventSourcedStoreOption[E] {
 	return func(s *EventSourcedStore[E]) error {
 		s.eventReader = reader
 		return nil
 	}
 }
 
-func WithStreamWriter[E estoria.Entity](writer eventstore.StreamWriter) EventSourcedAggregateStoreOption[E] {
+func WithStreamWriter[E estoria.Entity](writer eventstore.StreamWriter) EventSourcedStoreOption[E] {
 	return func(s *EventSourcedStore[E]) error {
 		s.eventWriter = writer
 		return nil

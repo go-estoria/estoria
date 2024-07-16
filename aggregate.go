@@ -108,6 +108,7 @@ var ErrNoUnappliedEvents = errors.New("no unapplied events")
 // an entity event, which holds data specific to the event.
 type AggregateEvent struct {
 	ID          typeid.UUID
+	Version     int64
 	Timestamp   time.Time
 	EntityEvent EntityEvent
 }
