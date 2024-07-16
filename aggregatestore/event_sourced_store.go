@@ -108,10 +108,6 @@ func (s *EventSourcedStore[E]) Hydrate(ctx context.Context, aggregate *estoria.A
 		return fmt.Errorf("invalid target version")
 	}
 
-	if aggregate.Version() == 0 {
-		aggregate.Entity().SetEntityID(aggregate.ID())
-	}
-
 	readOpts := eventstore.ReadStreamOptions{
 		Offset:    aggregate.Version(),
 		Direction: eventstore.Forward,
@@ -121,14 +117,14 @@ func (s *EventSourcedStore[E]) Hydrate(ctx context.Context, aggregate *estoria.A
 		if aggregate.Version() == opts.ToVersion {
 			log.Debug("aggregate already at target version, nothing to hydrate", "version", opts.ToVersion)
 			return nil
-		} else if aggregate.Version() > opts.ToVersion {
-			return fmt.Errorf("cannot hydrate aggregate with greater version than target version")
+		} else if v := aggregate.Version(); v > opts.ToVersion {
+			return fmt.Errorf("cannot hydrate aggregate to lower version (%d) than current version (%d)", opts.ToVersion, v)
 		}
 
 		readOpts.Count = opts.ToVersion - aggregate.Version()
 	}
 
-	// Load the aggregate's events.
+	// load the aggregate's events
 	stream, err := s.eventReader.ReadStream(ctx, aggregate.ID(), readOpts)
 	if errors.Is(err, eventstore.ErrStreamNotFound) {
 		return ErrAggregateNotFound
@@ -136,11 +132,11 @@ func (s *EventSourcedStore[E]) Hydrate(ctx context.Context, aggregate *estoria.A
 		return fmt.Errorf("reading event stream: %w", err)
 	}
 
-	// Apply the events to the aggregate.
-	for i := 0; ; i++ {
+	// apply the events to the aggregate
+	for numRead := 0; ; numRead++ {
 		evt, err := stream.Next(ctx)
 		if err == io.EOF {
-			log.Debug("end of event stream", "events_read", i, "hydrated_version", aggregate.Version())
+			log.Debug("end of event stream", "events_read", numRead, "hydrated_version", aggregate.Version())
 			break
 		} else if err != nil {
 			return fmt.Errorf("reading event: %w", err)
