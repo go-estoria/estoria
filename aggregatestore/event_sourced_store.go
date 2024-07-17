@@ -168,34 +168,34 @@ func (s *EventSourcedStore[E]) Hydrate(ctx context.Context, aggregate *estoria.A
 
 // Save saves an aggregate.
 func (s *EventSourcedStore[E]) Save(ctx context.Context, aggregate *estoria.Aggregate[E], opts SaveOptions) error {
-	unsavedEvents := aggregate.State().UnpersistedEvents()
-	s.log.Debug("saving aggregate to event store", "aggregate_id", aggregate.ID(), "events", len(unsavedEvents))
+	unpersistedEvents := aggregate.State().UnpersistedEvents()
+	s.log.Debug("saving aggregate to event store", "aggregate_id", aggregate.ID(), "events", len(unpersistedEvents))
 
-	if len(unsavedEvents) == 0 {
+	if len(unpersistedEvents) == 0 {
 		s.log.Debug("no events to save")
 		return nil
 	}
 
-	events := make([]*eventstore.EventStoreEvent, len(unsavedEvents))
-	for i, unsavedEvent := range unsavedEvents {
+	events := make([]*eventstore.EventStoreEvent, len(unpersistedEvents))
+	for i, unpersistedEvent := range unpersistedEvents {
 		nextVersion := aggregate.Version() + int64(i) + 1
 
-		if unsavedEvent.Version > 0 && unsavedEvent.Version != nextVersion {
+		if unpersistedEvent.Version > 0 && unpersistedEvent.Version != nextVersion {
 			return fmt.Errorf("event version mismatch: next is %d, event specifies %d",
 				aggregate.Version()+int64(i)+1,
-				unsavedEvent.Version)
+				unpersistedEvent.Version)
 		}
 
-		data, err := s.entityEventMarshaler.Marshal(&unsavedEvent.EntityEvent)
+		data, err := s.entityEventMarshaler.Marshal(&unpersistedEvent.Incremental)
 		if err != nil {
 			return fmt.Errorf("serializing event data: %w", err)
 		}
 
 		events[i] = &eventstore.EventStoreEvent{
-			ID:            unsavedEvent.ID,
+			ID:            unpersistedEvent.ID,
 			StreamID:      aggregate.ID(),
 			StreamVersion: nextVersion,
-			Timestamp:     unsavedEvent.Timestamp,
+			Timestamp:     unpersistedEvent.Timestamp,
 			Data:          data,
 		}
 	}
@@ -208,8 +208,8 @@ func (s *EventSourcedStore[E]) Save(ctx context.Context, aggregate *estoria.Aggr
 	}
 
 	// queue the events for application
-	for _, unsavedEvent := range unsavedEvents {
-		aggregate.State().EnqueueForApplication(unsavedEvent.EntityEvent)
+	for _, unpersistedEvent := range unpersistedEvents {
+		aggregate.State().EnqueueForApplication(unpersistedEvent.Incremental)
 	}
 
 	aggregate.State().ClearUnpersistedEvents()
