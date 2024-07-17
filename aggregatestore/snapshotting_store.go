@@ -114,9 +114,7 @@ func (s *SnapshottingStore[E]) Hydrate(ctx context.Context, aggregate *estoria.A
 	}
 
 	log.Debug("loaded snapshot", "version", snap.AggregateVersion)
-
-	aggregate.SetEntity(entity)
-	aggregate.SetVersion(snap.AggregateVersion)
+	aggregate.SetEntityAtVersion(entity, snap.AggregateVersion)
 
 	return s.inner.Hydrate(ctx, aggregate, opts)
 }
@@ -134,7 +132,7 @@ func (s *SnapshottingStore[E]) Save(ctx context.Context, aggregate *estoria.Aggr
 
 	now := time.Now()
 	for {
-		err := aggregate.ApplyNext(ctx)
+		err := aggregate.State().ApplyNext(ctx)
 		if errors.Is(err, estoria.ErrNoUnappliedEvents) {
 			break
 		} else if err != nil {

@@ -71,7 +71,7 @@ func (s *EventSourcedStore[E]) New(id *typeid.UUID) (*estoria.Aggregate[E], erro
 	}
 
 	aggregate := &estoria.Aggregate[E]{}
-	aggregate.SetEntity(entity)
+	aggregate.SetEntityAtVersion(entity, 0)
 
 	s.log.Debug("created new aggregate", "aggregate_id", aggregate.ID())
 	return aggregate, nil
@@ -153,8 +153,8 @@ func (s *EventSourcedStore[E]) Hydrate(ctx context.Context, aggregate *estoria.A
 		}
 
 		// queue and apply the event immediately
-		aggregate.AddForApply(entityEvent)
-		if err := aggregate.ApplyNext(ctx); errors.Is(err, estoria.ErrNoUnappliedEvents) {
+		aggregate.State().EnqueueForApplication(entityEvent)
+		if err := aggregate.State().ApplyNext(ctx); errors.Is(err, estoria.ErrNoUnappliedEvents) {
 			break
 		} else if err != nil {
 			return fmt.Errorf("applying event: %w", err)
@@ -168,7 +168,7 @@ func (s *EventSourcedStore[E]) Hydrate(ctx context.Context, aggregate *estoria.A
 
 // Save saves an aggregate.
 func (s *EventSourcedStore[E]) Save(ctx context.Context, aggregate *estoria.Aggregate[E], opts SaveOptions) error {
-	unsavedEvents := aggregate.UnsavedEvents()
+	unsavedEvents := aggregate.State().UnpersistedEvents()
 	s.log.Debug("saving aggregate to event store", "aggregate_id", aggregate.ID(), "events", len(unsavedEvents))
 
 	if len(unsavedEvents) == 0 {
@@ -209,10 +209,10 @@ func (s *EventSourcedStore[E]) Save(ctx context.Context, aggregate *estoria.Aggr
 
 	// queue the events for application
 	for _, unsavedEvent := range unsavedEvents {
-		aggregate.AddForApply(unsavedEvent.EntityEvent)
+		aggregate.State().EnqueueForApplication(unsavedEvent.EntityEvent)
 	}
 
-	aggregate.ClearUnsavedEvents()
+	aggregate.State().ClearUnpersistedEvents()
 
 	if opts.SkipApply {
 		return nil
@@ -220,7 +220,7 @@ func (s *EventSourcedStore[E]) Save(ctx context.Context, aggregate *estoria.Aggr
 
 	// apply the events to the aggregate
 	for {
-		if err := aggregate.ApplyNext(ctx); errors.Is(err, estoria.ErrNoUnappliedEvents) {
+		if err := aggregate.State().ApplyNext(ctx); errors.Is(err, estoria.ErrNoUnappliedEvents) {
 			return nil
 		} else if err != nil {
 			return fmt.Errorf("applying event: %w", err)
