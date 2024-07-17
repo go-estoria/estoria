@@ -130,5 +130,5 @@ type AggregateEvent struct {
 	ID          typeid.UUID
 	Version     int64
 	Timestamp   time.Time
-	Incremental EntityEvent
+	EntityEvent EntityEvent
 }

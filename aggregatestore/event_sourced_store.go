@@ -186,7 +186,7 @@ func (s *EventSourcedStore[E]) Save(ctx context.Context, aggregate *estoria.Aggr
 				unpersistedEvent.Version)
 		}
 
-		data, err := s.entityEventMarshaler.Marshal(&unpersistedEvent.Incremental)
+		data, err := s.entityEventMarshaler.Marshal(&unpersistedEvent.EntityEvent)
 		if err != nil {
 			return fmt.Errorf("serializing event data: %w", err)
 		}
@@ -209,7 +209,7 @@ func (s *EventSourcedStore[E]) Save(ctx context.Context, aggregate *estoria.Aggr
 
 	// queue the events for application
 	for _, unpersistedEvent := range unpersistedEvents {
-		aggregate.State().EnqueueForApplication(unpersistedEvent.Incremental)
+		aggregate.State().EnqueueForApplication(unpersistedEvent.EntityEvent)
 	}
 
 	aggregate.State().ClearUnpersistedEvents()
