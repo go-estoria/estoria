@@ -43,11 +43,12 @@ func NewEventSourcedStore[E estoria.Entity](
 		log:                  slog.Default().WithGroup("aggregatestore"),
 	}
 
-	for _, prototype := range store.newEntity(uuid.UUID{}).EventTypes() {
+	entity := store.newEntity(uuid.UUID{})
+	for _, prototype := range entity.EventTypes() {
 		if _, ok := store.eventDataFactories[prototype.EventType()]; ok {
 			return nil, fmt.Errorf("duplicate event type %s for entity %T",
 				prototype.EventType(),
-				store.newEntity(uuid.UUID{}).EntityID().TypeName())
+				entity.EntityID().TypeName())
 		}
 
 		store.eventDataFactories[prototype.EventType()] = prototype.New
