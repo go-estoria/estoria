@@ -131,5 +131,4 @@ type AggregateEvent struct {
 	Version     int64
 	Timestamp   time.Time
 	Incremental EntityEvent
-	Replacement Entity
 }

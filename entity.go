@@ -10,7 +10,6 @@ import (
 // An Entity is anything whose state can be constructed by applying a series of events.
 type Entity interface {
 	EntityID() typeid.UUID
-	SetEntityID(id typeid.UUID)
 	EventTypes() []EntityEvent
 	ApplyEvent(ctx context.Context, eventData EntityEvent) error
 }
