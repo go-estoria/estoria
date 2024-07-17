@@ -114,7 +114,7 @@ func (s *SnapshottingStore[E]) Hydrate(ctx context.Context, aggregate *estoria.A
 	}
 
 	log.Debug("loaded snapshot", "version", snap.AggregateVersion)
-	aggregate.SetEntityAtVersion(entity, snap.AggregateVersion)
+	aggregate.State().SetEntityAtVersion(entity, snap.AggregateVersion)
 
 	return s.inner.Hydrate(ctx, aggregate, opts)
 }

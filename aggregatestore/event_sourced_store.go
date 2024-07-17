@@ -71,7 +71,7 @@ func (s *EventSourcedStore[E]) New(id *typeid.UUID) (*estoria.Aggregate[E], erro
 	}
 
 	aggregate := &estoria.Aggregate[E]{}
-	aggregate.SetEntityAtVersion(entity, 0)
+	aggregate.State().SetEntityAtVersion(entity, 0)
 
 	s.log.Debug("created new aggregate", "aggregate_id", aggregate.ID())
 	return aggregate, nil

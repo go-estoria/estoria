@@ -36,12 +36,6 @@ func (a *Aggregate[E]) ID() typeid.UUID {
 	return a.state.entity.EntityID()
 }
 
-// SetEntityAtVersion sets the aggregate's entity and version.
-func (a *Aggregate[E]) SetEntityAtVersion(entity E, version int64) {
-	a.state.entity = entity
-	a.state.version = version
-}
-
 // State returns the aggregate's underlying state, allowinig access to lower
 // level operations on the aggregate's unpersisted events and unapplied events.
 func (a *Aggregate[E]) State() *AggregateState[E] {
@@ -113,6 +107,12 @@ func (a *AggregateState[E]) UnpersistedEvents() []AggregateEvent {
 
 func (a *AggregateState[E]) ClearUnpersistedEvents() {
 	a.unpersistedEvents = nil
+}
+
+// SetEntityAtVersion sets the aggregate's entity and version.
+func (a *AggregateState[E]) SetEntityAtVersion(entity E, version int64) {
+	a.entity = entity
+	a.version = version
 }
 
 // ErrNoUnappliedEvents indicates that there are no unapplied events for the aggregate.
