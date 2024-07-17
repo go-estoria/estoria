@@ -4,6 +4,7 @@ import (
 	"context"
 
 	"github.com/go-estoria/estoria/typeid"
+	"github.com/gofrs/uuid/v5"
 )
 
 // An Entity is anything whose state can be constructed by applying a series of events.
@@ -29,4 +30,4 @@ type DiffableEntity interface {
 }
 
 // An EntityFactory is a function that creates a new instance of an entity.
-type EntityFactory[E Entity] func() E
+type EntityFactory[E Entity] func(id uuid.UUID) E

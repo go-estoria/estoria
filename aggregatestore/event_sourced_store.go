@@ -10,6 +10,7 @@ import (
 	"github.com/go-estoria/estoria"
 	"github.com/go-estoria/estoria/eventstore"
 	"github.com/go-estoria/estoria/typeid"
+	"github.com/gofrs/uuid/v5"
 )
 
 // An EventSourcedStore loads and saves aggregates using an EventStore.
@@ -27,6 +28,7 @@ type EventSourcedStore[E estoria.Entity] struct {
 
 var _ Store[estoria.Entity] = (*EventSourcedStore[estoria.Entity])(nil)
 
+// NewEventSourcedStore creates a new EventSourcedStore.
 func NewEventSourcedStore[E estoria.Entity](
 	eventStore eventstore.Store,
 	entityFactory estoria.EntityFactory[E],
@@ -41,11 +43,11 @@ func NewEventSourcedStore[E estoria.Entity](
 		log:                  slog.Default().WithGroup("aggregatestore"),
 	}
 
-	for _, prototype := range store.newEntity().EventTypes() {
+	for _, prototype := range store.newEntity(uuid.UUID{}).EventTypes() {
 		if _, ok := store.eventDataFactories[prototype.EventType()]; ok {
 			return nil, fmt.Errorf("duplicate event type %s for entity %T",
 				prototype.EventType(),
-				store.newEntity().EntityID().TypeName())
+				store.newEntity(uuid.UUID{}).EntityID().TypeName())
 		}
 
 		store.eventDataFactories[prototype.EventType()] = prototype.New
@@ -64,14 +66,11 @@ func NewEventSourcedStore[E estoria.Entity](
 	return store, nil
 }
 
-func (s *EventSourcedStore[E]) New(id *typeid.UUID) (*estoria.Aggregate[E], error) {
-	entity := s.newEntity()
-	if id != nil {
-		entity.SetEntityID(*id)
-	}
-
+// New creates a new aggregate.
+// If an ID is provided, the aggregate is created with that ID.
+func (s *EventSourcedStore[E]) New(id uuid.UUID) (*estoria.Aggregate[E], error) {
 	aggregate := &estoria.Aggregate[E]{}
-	aggregate.State().SetEntityAtVersion(entity, 0)
+	aggregate.State().SetEntityAtVersion(s.newEntity(id), 0)
 
 	s.log.Debug("created new aggregate", "aggregate_id", aggregate.ID())
 	return aggregate, nil
@@ -81,7 +80,7 @@ func (s *EventSourcedStore[E]) New(id *typeid.UUID) (*estoria.Aggregate[E], erro
 func (s *EventSourcedStore[E]) Load(ctx context.Context, id typeid.UUID, opts LoadOptions) (*estoria.Aggregate[E], error) {
 	s.log.Debug("loading aggregate from event store", "aggregate_id", id)
 
-	aggregate, err := s.New(&id)
+	aggregate, err := s.New(id.UUID())
 	if err != nil {
 		return nil, fmt.Errorf("creating new aggregate: %w", err)
 	}

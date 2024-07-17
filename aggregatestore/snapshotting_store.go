@@ -10,6 +10,7 @@ import (
 	"github.com/go-estoria/estoria"
 	"github.com/go-estoria/estoria/snapshotstore"
 	"github.com/go-estoria/estoria/typeid"
+	"github.com/gofrs/uuid/v5"
 )
 
 type SnapshotReader interface {
@@ -63,14 +64,14 @@ func NewSnapshottingStore[E estoria.Entity](
 }
 
 // NewAggregate creates a new aggregate.
-func (s *SnapshottingStore[E]) New(id *typeid.UUID) (*estoria.Aggregate[E], error) {
+func (s *SnapshottingStore[E]) New(id uuid.UUID) (*estoria.Aggregate[E], error) {
 	return s.inner.New(id)
 }
 
 // Load loads an aggregate by its ID.
 func (s *SnapshottingStore[E]) Load(ctx context.Context, aggregateID typeid.UUID, opts LoadOptions) (*estoria.Aggregate[E], error) {
 	s.log.Debug("loading aggregate", "aggregate_id", aggregateID)
-	aggregate, err := s.New(&aggregateID)
+	aggregate, err := s.New(aggregateID.UUID())
 	if err != nil {
 		slog.Warn("failed to create new aggregate", "error", err)
 		return s.inner.Load(ctx, aggregateID, opts)

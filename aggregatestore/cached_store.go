@@ -6,6 +6,7 @@ import (
 
 	"github.com/go-estoria/estoria"
 	"github.com/go-estoria/estoria/typeid"
+	"github.com/gofrs/uuid/v5"
 )
 
 type AggregateCache[E estoria.Entity] interface {
@@ -33,7 +34,7 @@ func NewCachedStore[E estoria.Entity](
 var _ Store[estoria.Entity] = (*CachedStore[estoria.Entity])(nil)
 
 // NewAggregate creates a new aggregate.
-func (s *CachedStore[E]) New(id *typeid.UUID) (*estoria.Aggregate[E], error) {
+func (s *CachedStore[E]) New(id uuid.UUID) (*estoria.Aggregate[E], error) {
 	return s.inner.New(id)
 }
 

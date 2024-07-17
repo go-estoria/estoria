@@ -7,6 +7,7 @@ import (
 
 	"github.com/go-estoria/estoria"
 	"github.com/go-estoria/estoria/typeid"
+	"github.com/gofrs/uuid/v5"
 )
 
 type HookStage int
@@ -61,7 +62,7 @@ func (s *HookableStore[E]) AddHook(stage HookStage, hook Hook[E]) {
 }
 
 // NewAggregate creates a new aggregate.
-func (s *HookableStore[E]) New(id *typeid.UUID) (*estoria.Aggregate[E], error) {
+func (s *HookableStore[E]) New(id uuid.UUID) (*estoria.Aggregate[E], error) {
 	s.log.Debug("creating new aggregate")
 	for _, hook := range s.precreateHooks {
 		if err := hook(); err != nil {
