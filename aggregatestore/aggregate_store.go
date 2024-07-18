@@ -12,10 +12,10 @@ import (
 // A Store is a read/write store for aggregates.
 // See package `aggregatestore` for implementations.
 type Store[E estoria.Entity] interface {
-	New(id uuid.UUID) (*estoria.Aggregate[E], error)
-	Load(ctx context.Context, id typeid.UUID, opts LoadOptions) (*estoria.Aggregate[E], error)
-	Hydrate(ctx context.Context, aggregate *estoria.Aggregate[E], opts HydrateOptions) error
-	Save(ctx context.Context, aggregate *estoria.Aggregate[E], opts SaveOptions) error
+	New(id uuid.UUID) (estoria.Aggregate[E], error)
+	Load(ctx context.Context, id typeid.UUID, opts LoadOptions) (estoria.Aggregate[E], error)
+	Hydrate(ctx context.Context, aggregate estoria.Aggregate[E], opts HydrateOptions) error
+	Save(ctx context.Context, aggregate estoria.Aggregate[E], opts SaveOptions) error
 }
 
 // LoadOptions are options for loading an aggregate.

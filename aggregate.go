@@ -10,14 +10,22 @@ import (
 	"github.com/go-estoria/estoria/typeid"
 )
 
+type Aggregate[E Entity] interface {
+	Append(events ...*AggregateEvent) error
+	Entity() E
+	ID() typeid.UUID
+	State() *AggregateState[E]
+	Version() int64
+}
+
 // An Aggregate is a state-managed entity.
-type Aggregate[E Entity] struct {
+type EventSourcedAggregate[E Entity] struct {
 	// the aggregate's state (unpersisted/unapplied events)
 	state AggregateState[E]
 }
 
 // Append appends events to the aggregate's unpersisted events.
-func (a *Aggregate[E]) Append(events ...AggregateEvent) error {
+func (a *EventSourcedAggregate[E]) Append(events ...*AggregateEvent) error {
 	slog.Debug("appending events to aggregate", "aggregate_id", a.ID(), "events", len(events))
 	a.state.unpersistedEvents = append(a.state.unpersistedEvents, events...)
 
@@ -26,13 +34,13 @@ func (a *Aggregate[E]) Append(events ...AggregateEvent) error {
 
 // Entity returns the aggregate's underlying entity.
 // The entity is the domain model whose state the aggregate manages.
-func (a *Aggregate[E]) Entity() E {
+func (a *EventSourcedAggregate[E]) Entity() E {
 	return a.state.entity
 }
 
 // ID returns the aggregate's ID.
 // The ID is the ID of the entity that the aggregate represents.
-func (a *Aggregate[E]) ID() typeid.UUID {
+func (a *EventSourcedAggregate[E]) ID() typeid.UUID {
 	return a.state.entity.EntityID()
 }
 
@@ -42,14 +50,14 @@ func (a *Aggregate[E]) ID() typeid.UUID {
 // State management is useful when implementing custom aggregate store
 // functionality; it is typically not needed when using an aggregate store
 // to load and save aggregates.
-func (a *Aggregate[E]) State() *AggregateState[E] {
+func (a *EventSourcedAggregate[E]) State() *AggregateState[E] {
 	return &a.state
 }
 
 // Version returns the aggregate's version.
 // The version is the number of events that have been applied to the aggregate.
 // An aggregate with no events has a version of 0.
-func (a *Aggregate[E]) Version() int64 {
+func (a *EventSourcedAggregate[E]) Version() int64 {
 	return a.state.version
 }
 
@@ -72,7 +80,7 @@ type AggregateState[E Entity] struct {
 	version int64
 
 	// appended to the aggregate but not yet persisted
-	unpersistedEvents []AggregateEvent
+	unpersistedEvents []*AggregateEvent
 
 	// events loaded from persistence or newly stored but not yet applied to the entity
 	unappliedEvents []EntityEvent
@@ -105,7 +113,7 @@ func (a *AggregateState[E]) EnqueueForApplication(event EntityEvent) {
 // UnpersistedEvents returns the unpersisted events for the aggregate.
 // These are events that have been appended to the aggregate but not yet saved.
 // They are thus not yet applied to the aggregate's entity.
-func (a *AggregateState[E]) UnpersistedEvents() []AggregateEvent {
+func (a *AggregateState[E]) UnpersistedEvents() []*AggregateEvent {
 	return a.unpersistedEvents
 }
 
