@@ -70,7 +70,7 @@ func NewEventSourcedStore[E estoria.Entity](
 // New creates a new aggregate.
 // If an ID is provided, the aggregate is created with that ID.
 func (s *EventSourcedStore[E]) New(id uuid.UUID) (estoria.Aggregate[E], error) {
-	aggregate := &estoria.EventSourcedAggregate[E]{}
+	aggregate := &EventSourcedAggregate[E]{}
 	aggregate.State().SetEntityAtVersion(s.newEntity(id), 0)
 
 	s.log.Debug("created new aggregate", "aggregate_id", aggregate.ID())

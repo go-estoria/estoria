@@ -4,61 +4,18 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log/slog"
 	"time"
 
 	"github.com/go-estoria/estoria/typeid"
 )
 
+// An Aggregate is a state-managed entity.
 type Aggregate[E Entity] interface {
 	Append(events ...*AggregateEvent) error
 	Entity() E
 	ID() typeid.UUID
 	State() *AggregateState[E]
 	Version() int64
-}
-
-// An Aggregate is a state-managed entity.
-type EventSourcedAggregate[E Entity] struct {
-	// the aggregate's state (unpersisted/unapplied events)
-	state AggregateState[E]
-}
-
-// Append appends events to the aggregate's unpersisted events.
-func (a *EventSourcedAggregate[E]) Append(events ...*AggregateEvent) error {
-	slog.Debug("appending events to aggregate", "aggregate_id", a.ID(), "events", len(events))
-	a.state.unpersistedEvents = append(a.state.unpersistedEvents, events...)
-
-	return nil
-}
-
-// Entity returns the aggregate's underlying entity.
-// The entity is the domain model whose state the aggregate manages.
-func (a *EventSourcedAggregate[E]) Entity() E {
-	return a.state.entity
-}
-
-// ID returns the aggregate's ID.
-// The ID is the ID of the entity that the aggregate represents.
-func (a *EventSourcedAggregate[E]) ID() typeid.UUID {
-	return a.state.entity.EntityID()
-}
-
-// State returns the aggregate's underlying state, allowinig access to lower
-// level operations on the aggregate's unpersisted events and unapplied events.
-//
-// State management is useful when implementing custom aggregate store
-// functionality; it is typically not needed when using an aggregate store
-// to load and save aggregates.
-func (a *EventSourcedAggregate[E]) State() *AggregateState[E] {
-	return &a.state
-}
-
-// Version returns the aggregate's version.
-// The version is the number of events that have been applied to the aggregate.
-// An aggregate with no events has a version of 0.
-func (a *EventSourcedAggregate[E]) Version() int64 {
-	return a.state.version
 }
 
 // AggregateState holds all of the aggregate's state, including the entity, version,
@@ -104,10 +61,30 @@ func (a *AggregateState[E]) ApplyNext(ctx context.Context) error {
 	return nil
 }
 
+// ClearUnpersistedEvents clears the aggregate's unpersisted events.
+func (a *AggregateState[E]) ClearUnpersistedEvents() {
+	a.unpersistedEvents = nil
+}
+
+// Entity returns the aggregate's entity.
+func (a *AggregateState[E]) Entity() E {
+	return a.entity
+}
+
 // EnqueueForApplication enqueues the given entity event to be applied to
 // the aggregate's entity during subsequent calls to ApplyNext.
 func (a *AggregateState[E]) EnqueueForApplication(event EntityEvent) {
 	a.unappliedEvents = append(a.unappliedEvents, event)
+}
+
+func (a *AggregateState[E]) EnqueueForSave(events []*AggregateEvent) {
+	a.unpersistedEvents = append(a.unpersistedEvents, events...)
+}
+
+// SetEntityAtVersion sets the aggregate's entity and version.
+func (a *AggregateState[E]) SetEntityAtVersion(entity E, version int64) {
+	a.entity = entity
+	a.version = version
 }
 
 // UnpersistedEvents returns the unpersisted events for the aggregate.
@@ -117,15 +94,9 @@ func (a *AggregateState[E]) UnpersistedEvents() []*AggregateEvent {
 	return a.unpersistedEvents
 }
 
-// ClearUnpersistedEvents clears the aggregate's unpersisted events.
-func (a *AggregateState[E]) ClearUnpersistedEvents() {
-	a.unpersistedEvents = nil
-}
-
-// SetEntityAtVersion sets the aggregate's entity and version.
-func (a *AggregateState[E]) SetEntityAtVersion(entity E, version int64) {
-	a.entity = entity
-	a.version = version
+// Version returns the aggregate's version.
+func (a *AggregateState[E]) Version() int64 {
+	return a.version
 }
 
 // ErrNoUnappliedEvents indicates that there are no unapplied events for the aggregate.
