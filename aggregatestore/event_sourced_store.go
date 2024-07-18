@@ -201,9 +201,9 @@ func (s *EventSourcedStore[E]) Save(ctx context.Context, aggregate estoria.Aggre
 	}
 
 	// write to event stream
-	if err := s.eventWriter.AppendStream(ctx, aggregate.ID(), eventstore.AppendStreamOptions{
+	if err := s.eventWriter.AppendStream(ctx, aggregate.ID(), events, eventstore.AppendStreamOptions{
 		ExpectVersion: aggregate.Version(),
-	}, events); err != nil {
+	}); err != nil {
 		return fmt.Errorf("saving events: %w", err)
 	}
 

@@ -60,7 +60,7 @@ const (
 type StreamWriter interface {
 	// AppendStream appends events to an event stream.
 	// The expected version of the stream can be specified in the options.
-	AppendStream(ctx context.Context, streamID typeid.UUID, opts AppendStreamOptions, events []*EventStoreEvent) error
+	AppendStream(ctx context.Context, streamID typeid.UUID, events []*EventStoreEvent, opts AppendStreamOptions) error
 }
 
 // AppendStreamOptions are options for appending events to a stream.

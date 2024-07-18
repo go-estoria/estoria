@@ -84,14 +84,14 @@ func (s *EventStreamStore) WriteSnapshot(ctx context.Context, snap *AggregateSna
 		return fmt.Errorf("marshaling snapshot data for stream event: %w", err)
 	}
 
-	if err := s.eventWriter.AppendStream(ctx, snapshotStreamID, eventstore.AppendStreamOptions{}, []*eventstore.EventStoreEvent{
+	if err := s.eventWriter.AppendStream(ctx, snapshotStreamID, []*eventstore.EventStoreEvent{
 		{
 			ID:        eventID,
 			StreamID:  snapshotStreamID,
 			Timestamp: time.Now(),
 			Data:      eventData,
 		},
-	}); err != nil {
+	}, eventstore.AppendStreamOptions{}); err != nil {
 		return fmt.Errorf("appending snapshot stream: %w", err)
 	}
 

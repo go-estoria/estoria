@@ -35,7 +35,7 @@ func NewEventStore(opts ...EventStoreOption) *EventStore {
 }
 
 // AppendStream appends events to a stream.
-func (s *EventStore) AppendStream(ctx context.Context, streamID typeid.UUID, opts eventstore.AppendStreamOptions, events []*eventstore.EventStoreEvent) error {
+func (s *EventStore) AppendStream(ctx context.Context, streamID typeid.UUID, events []*eventstore.EventStoreEvent, opts eventstore.AppendStreamOptions) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
