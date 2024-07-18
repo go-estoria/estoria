@@ -38,6 +38,10 @@ func (a *Aggregate[E]) ID() typeid.UUID {
 
 // State returns the aggregate's underlying state, allowinig access to lower
 // level operations on the aggregate's unpersisted events and unapplied events.
+//
+// State management is useful when implementing custom aggregate store
+// functionality; it is typically not needed when using an aggregate store
+// to load and save aggregates.
 func (a *Aggregate[E]) State() *AggregateState[E] {
 	return &a.state
 }
@@ -105,6 +109,7 @@ func (a *AggregateState[E]) UnpersistedEvents() []AggregateEvent {
 	return a.unpersistedEvents
 }
 
+// ClearUnpersistedEvents clears the aggregate's unpersisted events.
 func (a *AggregateState[E]) ClearUnpersistedEvents() {
 	a.unpersistedEvents = nil
 }
