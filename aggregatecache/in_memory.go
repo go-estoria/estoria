@@ -1,4 +1,4 @@
-package aggregatestore
+package aggregatecache
 
 import (
 	"context"
