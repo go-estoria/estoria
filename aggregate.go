@@ -4,88 +4,49 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log/slog"
 	"time"
 
 	"github.com/go-estoria/estoria/typeid"
 )
 
-// An Aggregate is a reconstructed representation of an event-sourced entity's state.
-type Aggregate[E Entity] struct {
+// An Aggregate is a state-managed entity.
+type Aggregate[E Entity] interface {
+	Append(events ...*AggregateEvent) error
+	Entity() E
+	ID() typeid.UUID
+	State() *AggregateState[E]
+	Version() int64
+}
+
+// AggregateState holds all of the aggregate's state, including the entity, version,
+// unpersisted events, and unapplied events.
+//
+// The unpersisted events are events that have been appended to the aggregate but not yet stored.
+//
+// The unapplied events are events that have been loaded from persistence or newly stored
+// but not yet applied to the entity.
+//
+// The entity is the domain object whose state the aggregate manages.
+//
+// The version is the number of events that have been applied to the entity.
+type AggregateState[E Entity] struct {
 	// the entity that the aggregate represents
 	entity E
 
-	// appended to the aggregate but not yet persisted
-	unsavedEvents []AggregateEvent
-
-	// events loaded from persistence or newly saved but not yet applied to the entity
-	unappliedEvents []EntityEvent
-
 	// the number of events that have been applied to the aggregate
 	version int64
+
+	// appended to the aggregate but not yet persisted
+	unpersistedEvents []*AggregateEvent
+
+	// events loaded from persistence or newly stored but not yet applied to the entity
+	unappliedEvents []EntityEvent
 }
 
-// ID returns the aggregate's ID.
-// The ID is the ID of the entity that the aggregate represents.
-func (a *Aggregate[E]) ID() typeid.UUID {
-	return a.entity.EntityID()
-}
-
-// Entity returns the aggregate's underlying entity.
-// The entity is the object that the aggregate represents.
-func (a *Aggregate[E]) Entity() E {
-	return a.entity
-}
-
-// Version returns the aggregate's version.
-// The version is the number of events that have been applied to the aggregate.
-// An aggregate with no events has a version of 0.
-func (a *Aggregate[E]) Version() int64 {
-	return a.version
-}
-
-// Append appends the given events to the aggregate's unsaved events.
-// Events are not persisted or applied to the entity until the aggregate is saved.
-func (a *Aggregate[E]) Append(events ...EntityEvent) error {
-	slog.Debug("appending events to aggregate", "aggregate_id", a.ID(), "events", len(events))
-	for _, eventData := range events {
-		eventID, err := typeid.NewUUID(eventData.EventType())
-		if err != nil {
-			return fmt.Errorf("generating event ID: %w", err)
-		}
-
-		a.unsavedEvents = append(a.unsavedEvents, AggregateEvent{
-			ID:        eventID,
-			Timestamp: time.Now(),
-			Data:      eventData,
-		})
-	}
-
-	return nil
-}
-
-func (a *Aggregate[E]) QueueForApplication(event EntityEvent) {
-	a.unappliedEvents = append(a.unappliedEvents, event)
-}
-
-func (a *Aggregate[E]) SetEntity(entity E) {
-	a.unsavedEvents = nil
-	a.entity = entity
-}
-
-func (a *Aggregate[E]) SetVersion(version int64) {
-	a.version = version
-}
-
-func (a *Aggregate[E]) ClearUnsavedEvents() {
-	a.unsavedEvents = nil
-}
-
-func (a *Aggregate[E]) UnsavedEvents() []AggregateEvent {
-	return a.unsavedEvents
-}
-
-func (a *Aggregate[E]) ApplyNext(ctx context.Context) error {
+// ApplyNext applies the next entity event in the apply queue to the entity.
+// A successfully applied event increments the aggregate's version. If
+// there are no events in the apply queue, ErrNoUnappliedEvents is returned.
+func (a *AggregateState[E]) ApplyNext(ctx context.Context) error {
 	if len(a.unappliedEvents) == 0 {
 		return ErrNoUnappliedEvents
 	}
@@ -100,10 +61,58 @@ func (a *Aggregate[E]) ApplyNext(ctx context.Context) error {
 	return nil
 }
 
+// ClearUnpersistedEvents clears the aggregate's unpersisted events.
+func (a *AggregateState[E]) ClearUnpersistedEvents() {
+	a.unpersistedEvents = nil
+}
+
+// Entity returns the aggregate's entity.
+func (a *AggregateState[E]) Entity() E {
+	return a.entity
+}
+
+// EnqueueForApplication enqueues the given entity event to be applied to
+// the aggregate's entity during subsequent calls to ApplyNext.
+func (a *AggregateState[E]) EnqueueForApplication(event EntityEvent) {
+	a.unappliedEvents = append(a.unappliedEvents, event)
+}
+
+func (a *AggregateState[E]) EnqueueForSave(events []*AggregateEvent) {
+	a.unpersistedEvents = append(a.unpersistedEvents, events...)
+}
+
+// SetEntityAtVersion sets the aggregate's entity and version.
+func (a *AggregateState[E]) SetEntityAtVersion(entity E, version int64) {
+	a.entity = entity
+	a.version = version
+}
+
+// UnpersistedEvents returns the unpersisted events for the aggregate.
+// These are events that have been appended to the aggregate but not yet saved.
+// They are thus not yet applied to the aggregate's entity.
+func (a *AggregateState[E]) UnpersistedEvents() []*AggregateEvent {
+	return a.unpersistedEvents
+}
+
+// Version returns the aggregate's version.
+func (a *AggregateState[E]) Version() int64 {
+	return a.version
+}
+
+// ErrNoUnappliedEvents indicates that there are no unapplied events for the aggregate.
+// This error is returned by ApplyNext when there are no events in the apply queue.
+// It should be handled by the caller as a normal condition.
 var ErrNoUnappliedEvents = errors.New("no unapplied events")
 
+// An AggregateEvent is an event that that applies to an aggregate
+// to change its state. It consists of a unique ID, a timestamp, and
+// an either an entity event, which holds data specific to and event
+// representinig an incremental change to the underlying entity, or
+// a replacement entity, which holds the entire state of the entity
+// after the event is applied.
 type AggregateEvent struct {
-	ID        typeid.UUID
-	Timestamp time.Time
-	Data      EntityEvent
+	ID          typeid.UUID
+	Version     int64
+	Timestamp   time.Time
+	EntityEvent EntityEvent
 }

@@ -13,21 +13,21 @@ import (
 	"github.com/go-estoria/estoria/typeid"
 )
 
-type EventStreamSnapshotStore struct {
+type EventStreamStore struct {
 	eventReader eventstore.StreamReader
 	eventWriter eventstore.StreamWriter
 	marshaler   estoria.Marshaler[AggregateSnapshot, *AggregateSnapshot]
 }
 
-func NewEventStreamSnapshotStore(eventStore eventstore.Store) *EventStreamSnapshotStore {
-	return &EventStreamSnapshotStore{
+func NewEventStreamStore(eventStore eventstore.Store) *EventStreamStore {
+	return &EventStreamStore{
 		eventReader: eventStore,
 		eventWriter: eventStore,
 		marshaler:   estoria.JSONMarshaler[AggregateSnapshot]{},
 	}
 }
 
-func (s *EventStreamSnapshotStore) ReadSnapshot(ctx context.Context, aggregateID typeid.UUID, opts ReadSnapshotOptions) (*AggregateSnapshot, error) {
+func (s *EventStreamStore) ReadSnapshot(ctx context.Context, aggregateID typeid.UUID, opts ReadSnapshotOptions) (*AggregateSnapshot, error) {
 	slog.Debug("finding snapshot", "aggregate_id", aggregateID)
 
 	snapshotStreamID := typeid.FromUUID(aggregateID.TypeName()+"snapshot", aggregateID.UUID())
@@ -62,7 +62,7 @@ func (s *EventStreamSnapshotStore) ReadSnapshot(ctx context.Context, aggregateID
 	return &snapshot, nil
 }
 
-func (s *EventStreamSnapshotStore) WriteSnapshot(ctx context.Context, snap *AggregateSnapshot) error {
+func (s *EventStreamStore) WriteSnapshot(ctx context.Context, snap *AggregateSnapshot) error {
 	slog.Debug("writing snapshot",
 		"aggregate_id", snap.AggregateID,
 		"aggregate_version",
@@ -84,14 +84,14 @@ func (s *EventStreamSnapshotStore) WriteSnapshot(ctx context.Context, snap *Aggr
 		return fmt.Errorf("marshaling snapshot data for stream event: %w", err)
 	}
 
-	if err := s.eventWriter.AppendStream(ctx, snapshotStreamID, eventstore.AppendStreamOptions{}, []*eventstore.EventStoreEvent{
+	if err := s.eventWriter.AppendStream(ctx, snapshotStreamID, []*eventstore.EventStoreEvent{
 		{
 			ID:        eventID,
 			StreamID:  snapshotStreamID,
 			Timestamp: time.Now(),
 			Data:      eventData,
 		},
-	}); err != nil {
+	}, eventstore.AppendStreamOptions{}); err != nil {
 		return fmt.Errorf("appending snapshot stream: %w", err)
 	}
 
