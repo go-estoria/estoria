@@ -7,14 +7,14 @@ import (
 	"github.com/go-estoria/estoria/typeid"
 )
 
-// An EventSourcedAggregate is an aggregate that is managed using event sourcing.
-type EventSourcedAggregate[E estoria.Entity] struct {
+// An Aggregate is an aggregate that is managed using event sourcing.
+type Aggregate[E estoria.Entity] struct {
 	// the aggregate's state (unpersisted/unapplied events)
 	state estoria.AggregateState[E]
 }
 
 // Append appends events to the aggregate's unpersisted events.
-func (a *EventSourcedAggregate[E]) Append(events ...*estoria.AggregateEvent) error {
+func (a *Aggregate[E]) Append(events ...*estoria.AggregateEvent) error {
 	slog.Debug("appending events to aggregate", "aggregate_id", a.ID(), "events", len(events))
 	a.state.EnqueueForSave(events)
 
@@ -23,13 +23,13 @@ func (a *EventSourcedAggregate[E]) Append(events ...*estoria.AggregateEvent) err
 
 // Entity returns the aggregate's underlying entity.
 // The entity is the domain model whose state the aggregate manages.
-func (a *EventSourcedAggregate[E]) Entity() E {
+func (a *Aggregate[E]) Entity() E {
 	return a.state.Entity()
 }
 
 // ID returns the aggregate's ID.
 // The ID is the ID of the entity that the aggregate represents.
-func (a *EventSourcedAggregate[E]) ID() typeid.UUID {
+func (a *Aggregate[E]) ID() typeid.UUID {
 	return a.state.Entity().EntityID()
 }
 
@@ -39,13 +39,13 @@ func (a *EventSourcedAggregate[E]) ID() typeid.UUID {
 // State management is useful when implementing custom aggregate store
 // functionality; it is typically not needed when using an aggregate store
 // to load and save aggregates.
-func (a *EventSourcedAggregate[E]) State() *estoria.AggregateState[E] {
+func (a *Aggregate[E]) State() *estoria.AggregateState[E] {
 	return &a.state
 }
 
 // Version returns the aggregate's version.
 // The version is the number of events that have been applied to the aggregate.
 // An aggregate with no events has a version of 0.
-func (a *EventSourcedAggregate[E]) Version() int64 {
+func (a *Aggregate[E]) Version() int64 {
 	return a.state.Version()
 }
