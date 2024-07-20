@@ -20,7 +20,7 @@ type EventSourcedStore[E estoria.Entity] struct {
 	eventWriter eventstore.StreamWriter
 
 	newEntity            estoria.EntityFactory[E]
-	eventDataFactories   map[string]func() estoria.EntityEvent
+	entityEventFactories map[string]func() estoria.EntityEvent
 	entityEventMarshaler estoria.Marshaler[estoria.EntityEvent, *estoria.EntityEvent]
 
 	log *slog.Logger
@@ -38,20 +38,20 @@ func NewEventSourcedStore[E estoria.Entity](
 		eventReader:          eventStore,
 		eventWriter:          eventStore,
 		newEntity:            entityFactory,
-		eventDataFactories:   make(map[string]func() estoria.EntityEvent),
+		entityEventFactories: make(map[string]func() estoria.EntityEvent),
 		entityEventMarshaler: estoria.JSONMarshaler[estoria.EntityEvent]{},
 		log:                  slog.Default().WithGroup("aggregatestore"),
 	}
 
 	entity := store.newEntity(uuid.UUID{})
 	for _, prototype := range entity.EventTypes() {
-		if _, ok := store.eventDataFactories[prototype.EventType()]; ok {
+		if _, ok := store.entityEventFactories[prototype.EventType()]; ok {
 			return nil, fmt.Errorf("duplicate event type %s for entity %T",
 				prototype.EventType(),
 				entity.EntityID().TypeName())
 		}
 
-		store.eventDataFactories[prototype.EventType()] = prototype.New
+		store.entityEventFactories[prototype.EventType()] = prototype.New
 	}
 
 	for _, opt := range opts {
@@ -142,7 +142,7 @@ func (s *EventSourcedStore[E]) Hydrate(ctx context.Context, aggregate estoria.Ag
 			return fmt.Errorf("reading event: %w", err)
 		}
 
-		newEntityEvent, ok := s.eventDataFactories[evt.ID.TypeName()]
+		newEntityEvent, ok := s.entityEventFactories[evt.ID.TypeName()]
 		if !ok {
 			return fmt.Errorf("no entity event factory for event type %s", evt.ID.TypeName())
 		}

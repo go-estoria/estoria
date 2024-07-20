@@ -18,7 +18,7 @@ type Entity interface {
 	EventTypes() []EntityEvent
 
 	// ApplyEvent applies an event to the entity, potentially changing its state.
-	ApplyEvent(ctx context.Context, eventData EntityEvent) error
+	ApplyEvent(ctx context.Context, event EntityEvent) error
 }
 
 // EntityEvent is an event that can be applied to an entity to change its state.
