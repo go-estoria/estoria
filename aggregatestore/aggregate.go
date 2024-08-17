@@ -2,8 +2,10 @@ package aggregatestore
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
+	"time"
 
 	"github.com/go-estoria/estoria"
 	"github.com/go-estoria/estoria/typeid"
@@ -16,7 +18,7 @@ type Aggregate[E estoria.Entity] struct {
 }
 
 // Append appends events to the aggregate's unpersisted events.
-func (a *Aggregate[E]) Append(events ...*estoria.AggregateEvent) error {
+func (a *Aggregate[E]) Append(events ...*AggregateEvent) error {
 	slog.Debug("appending events to aggregate", "aggregate_id", a.ID(), "events", len(events))
 	a.state.EnqueueForPersistence(events)
 
@@ -41,7 +43,7 @@ func (a *Aggregate[E]) ID() typeid.UUID {
 // State management is useful when implementing custom aggregate store
 // functionality; it is typically not needed when using an aggregate store
 // to load and save aggregates.
-func (a *Aggregate[E]) State() estoria.AggregateState[E] {
+func (a *Aggregate[E]) State() *AggregateState[E] {
 	return &a.state
 }
 
@@ -71,10 +73,10 @@ type AggregateState[E estoria.Entity] struct {
 	version int64
 
 	// appended to the aggregate but not yet persisted
-	unpersistedEvents []*estoria.AggregateEvent
+	unpersistedEvents []*AggregateEvent
 
 	// events loaded from persistence or newly stored but not yet applied to the entity
-	unappliedEvents []*estoria.AggregateEvent
+	unappliedEvents []*AggregateEvent
 }
 
 // ApplyNext applies the next entity event in the apply queue to the entity.
@@ -82,7 +84,7 @@ type AggregateState[E estoria.Entity] struct {
 // there are no events in the apply queue, ErrNoUnappliedEvents is returned.
 func (a *AggregateState[E]) ApplyNext(ctx context.Context) error {
 	if len(a.unappliedEvents) == 0 {
-		return estoria.ErrNoUnappliedEvents
+		return ErrNoUnappliedEvents
 	}
 
 	if err := a.entity.ApplyEvent(ctx, a.unappliedEvents[0].EntityEvent); err != nil {
@@ -107,11 +109,11 @@ func (a *AggregateState[E]) ClearUnappliedEvents() {
 
 // EnqueueForApplication enqueues the given entity event to be applied to
 // the aggregate's entity during subsequent calls to ApplyNext.
-func (a *AggregateState[E]) EnqueueForApplication(event *estoria.AggregateEvent) {
+func (a *AggregateState[E]) EnqueueForApplication(event *AggregateEvent) {
 	a.unappliedEvents = append(a.unappliedEvents, event)
 }
 
-func (a *AggregateState[E]) EnqueueForPersistence(events []*estoria.AggregateEvent) {
+func (a *AggregateState[E]) EnqueueForPersistence(events []*AggregateEvent) {
 	a.unpersistedEvents = append(a.unpersistedEvents, events...)
 }
 
@@ -129,18 +131,36 @@ func (a *AggregateState[E]) SetEntityAtVersion(entity E, version int64) {
 // UnappliedEvents returns the unapplied events for the aggregate.
 // These are events that have been loaded from persistence or newly stored
 // but not yet applied to the aggregate's entity.
-func (a *AggregateState[E]) UnappliedEvents() []*estoria.AggregateEvent {
+func (a *AggregateState[E]) UnappliedEvents() []*AggregateEvent {
 	return a.unappliedEvents
 }
 
 // UnpersistedEvents returns the unpersisted events for the aggregate.
 // These are events that have been appended to the aggregate but not yet saved.
 // They are thus not yet applied to the aggregate's entity.
-func (a *AggregateState[E]) UnpersistedEvents() []*estoria.AggregateEvent {
+func (a *AggregateState[E]) UnpersistedEvents() []*AggregateEvent {
 	return a.unpersistedEvents
 }
 
 // Version returns the aggregate's version.
 func (a *AggregateState[E]) Version() int64 {
 	return a.version
+}
+
+// ErrNoUnappliedEvents indicates that there are no unapplied events for the aggregate.
+// This error is returned by ApplyNext when there are no events in the apply queue.
+// It should be handled by the caller as a normal condition.
+var ErrNoUnappliedEvents = errors.New("no unapplied events")
+
+// An AggregateEvent is an event that that applies to an aggregate
+// to change its state. It consists of a unique ID, a timestamp, and
+// an either an entity event, which holds data specific to and event
+// representinig an incremental change to the underlying entity, or
+// a replacement entity, which holds the entire state of the entity
+// after the event is applied.
+type AggregateEvent struct {
+	ID          typeid.UUID
+	Version     int64
+	Timestamp   time.Time
+	EntityEvent estoria.EntityEvent
 }

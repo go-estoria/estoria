@@ -41,7 +41,7 @@ type InMemoryCache[E estoria.Entity] struct {
 var _ aggregatestore.AggregateCache[estoria.Entity] = &InMemoryCache[estoria.Entity]{}
 
 type cacheEntry[E estoria.Entity] struct {
-	aggregate estoria.Aggregate[E]
+	aggregate *aggregatestore.Aggregate[E]
 	added     time.Time
 	lastUsed  time.Time
 }
@@ -85,7 +85,7 @@ func (c *InMemoryCache[E]) Stop() error {
 	return nil
 }
 
-func (c *InMemoryCache[E]) GetAggregate(_ context.Context, id typeid.UUID) (estoria.Aggregate[E], error) {
+func (c *InMemoryCache[E]) GetAggregate(_ context.Context, id typeid.UUID) (*aggregatestore.Aggregate[E], error) {
 	entry := c.get(id)
 	if entry == nil {
 		return nil, nil
@@ -96,7 +96,7 @@ func (c *InMemoryCache[E]) GetAggregate(_ context.Context, id typeid.UUID) (esto
 	return entry.aggregate, nil
 }
 
-func (c *InMemoryCache[E]) PutAggregate(_ context.Context, aggregate estoria.Aggregate[E]) error {
+func (c *InMemoryCache[E]) PutAggregate(_ context.Context, aggregate *aggregatestore.Aggregate[E]) error {
 	now := time.Now()
 	c.put(aggregate.ID(), &cacheEntry[E]{
 		aggregate: aggregate,
