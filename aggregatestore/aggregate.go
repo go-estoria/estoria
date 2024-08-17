@@ -74,7 +74,7 @@ type AggregateState[E estoria.Entity] struct {
 	unpersistedEvents []*estoria.AggregateEvent
 
 	// events loaded from persistence or newly stored but not yet applied to the entity
-	unappliedEvents []estoria.EntityEvent
+	unappliedEvents []*estoria.AggregateEvent
 }
 
 // ApplyNext applies the next entity event in the apply queue to the entity.
@@ -85,7 +85,7 @@ func (a *AggregateState[E]) ApplyNext(ctx context.Context) error {
 		return estoria.ErrNoUnappliedEvents
 	}
 
-	if err := a.entity.ApplyEvent(ctx, a.unappliedEvents[0]); err != nil {
+	if err := a.entity.ApplyEvent(ctx, a.unappliedEvents[0].EntityEvent); err != nil {
 		return fmt.Errorf("applying event: %w", err)
 	}
 
@@ -107,7 +107,7 @@ func (a *AggregateState[E]) ClearUnappliedEvents() {
 
 // EnqueueForApplication enqueues the given entity event to be applied to
 // the aggregate's entity during subsequent calls to ApplyNext.
-func (a *AggregateState[E]) EnqueueForApplication(event estoria.EntityEvent) {
+func (a *AggregateState[E]) EnqueueForApplication(event *estoria.AggregateEvent) {
 	a.unappliedEvents = append(a.unappliedEvents, event)
 }
 
@@ -129,7 +129,7 @@ func (a *AggregateState[E]) SetEntityAtVersion(entity E, version int64) {
 // UnappliedEvents returns the unapplied events for the aggregate.
 // These are events that have been loaded from persistence or newly stored
 // but not yet applied to the aggregate's entity.
-func (a *AggregateState[E]) UnappliedEvents() []estoria.EntityEvent {
+func (a *AggregateState[E]) UnappliedEvents() []*estoria.AggregateEvent {
 	return a.unappliedEvents
 }
 

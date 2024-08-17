@@ -32,12 +32,10 @@ type AggregateState[E Entity] interface {
 	ApplyNext(ctx context.Context) error
 	ClearUnappliedEvents()
 	ClearUnpersistedEvents()
-	EnqueueForApplication(event EntityEvent)
+	EnqueueForApplication(event *AggregateEvent)
 	EnqueueForPersistence(events []*AggregateEvent)
-	Entity() E
 	SetEntityAtVersion(entity E, version int64)
-	Version() int64
-	UnappliedEvents() []EntityEvent
+	UnappliedEvents() []*AggregateEvent
 	UnpersistedEvents() []*AggregateEvent
 }
 

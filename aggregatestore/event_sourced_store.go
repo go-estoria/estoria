@@ -153,7 +153,12 @@ func (s *EventSourcedStore[E]) Hydrate(ctx context.Context, aggregate estoria.Ag
 		}
 
 		// queue and apply the event immediately
-		aggregate.State().EnqueueForApplication(entityEvent)
+		aggregate.State().EnqueueForApplication(&estoria.AggregateEvent{
+			ID:          evt.ID,
+			Version:     evt.StreamVersion,
+			Timestamp:   evt.Timestamp,
+			EntityEvent: entityEvent,
+		})
 		if err := aggregate.State().ApplyNext(ctx); errors.Is(err, estoria.ErrNoUnappliedEvents) {
 			break
 		} else if err != nil {
@@ -209,7 +214,7 @@ func (s *EventSourcedStore[E]) Save(ctx context.Context, aggregate estoria.Aggre
 
 	// queue the events for application
 	for _, unpersistedEvent := range unpersistedEvents {
-		aggregate.State().EnqueueForApplication(unpersistedEvent.EntityEvent)
+		aggregate.State().EnqueueForApplication(unpersistedEvent)
 	}
 
 	aggregate.State().ClearUnpersistedEvents()
