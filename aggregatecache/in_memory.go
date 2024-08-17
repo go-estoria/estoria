@@ -31,6 +31,7 @@ type CacheEvictionPolicy struct {
 	MaxSize int
 }
 
+// InMemoryCache is an aggregate cache that stores aggregates in memory.
 type InMemoryCache[E estoria.Entity] struct {
 	cancel         context.CancelFunc
 	entries        map[typeid.UUID]*cacheEntry[E]
@@ -47,6 +48,8 @@ type cacheEntry[E estoria.Entity] struct {
 }
 
 // NewInMemoryCache creates a new in-memory cache.
+// By default, the cache will grow unbounded and no evictions will occur.
+// Use the WithEvictionPolicy option to configure an eviction policy.
 func NewInMemoryCache[E estoria.Entity](opts ...InMemoryCacheOption[E]) *InMemoryCache[E] {
 	cache := &InMemoryCache[E]{
 		evictionPolicy: CacheEvictionPolicy{},
@@ -59,6 +62,9 @@ func NewInMemoryCache[E estoria.Entity](opts ...InMemoryCacheOption[E]) *InMemor
 	return cache
 }
 
+// Start starts the cache's eviction polling loop, which will periodically check for and
+// evict items based on the configured eviction policy. If no eviction interval is set, periodic
+// evictions will be disabled, and calling Start() will result in a no-op.
 func (c *InMemoryCache[E]) Start(ctx context.Context) error {
 	if c.evictionPolicy.EvictionInterval == 0 {
 		slog.Warn("no cache eviction interval set, periodic evictions disabled")
@@ -84,6 +90,8 @@ func (c *InMemoryCache[E]) Start(ctx context.Context) error {
 	return nil
 }
 
+// Stop stops the cache's eviction polling loop.
+// If the eviction loop is not running, calling Stop() will result in a no-op.
 func (c *InMemoryCache[E]) Stop() error {
 	if c.cancel != nil {
 		c.cancel()
@@ -92,6 +100,7 @@ func (c *InMemoryCache[E]) Stop() error {
 	return nil
 }
 
+// GetAggregate retrieves an aggregate from the cache by its ID.
 func (c *InMemoryCache[E]) GetAggregate(_ context.Context, id typeid.UUID) (*aggregatestore.Aggregate[E], error) {
 	entry := c.get(id)
 	if entry == nil {
@@ -103,6 +112,7 @@ func (c *InMemoryCache[E]) GetAggregate(_ context.Context, id typeid.UUID) (*agg
 	return entry.aggregate, nil
 }
 
+// PutAggregate puts an aggregate in the cache by its ID.
 func (c *InMemoryCache[E]) PutAggregate(_ context.Context, aggregate *aggregatestore.Aggregate[E]) error {
 	now := time.Now()
 	c.put(aggregate.ID(), &cacheEntry[E]{
