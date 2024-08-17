@@ -25,8 +25,9 @@ type PrecreateHook func() error
 
 type PreloadHook func(ctx context.Context, id typeid.UUID) error
 
-type Hook[E estoria.Entity] func(ctx context.Context, aggregate estoria.Aggregate[E]) error
+type Hook[E estoria.Entity] func(ctx context.Context, aggregate *Aggregate[E]) error
 
+// A HookableStore wraps an aggregate store and provides lifecycle hooks for aggregate store operations.
 type HookableStore[E estoria.Entity] struct {
 	inner          Store[E]
 	precreateHooks []PrecreateHook
@@ -37,6 +38,7 @@ type HookableStore[E estoria.Entity] struct {
 
 var _ Store[estoria.Entity] = (*HookableStore[estoria.Entity])(nil)
 
+// NewHookableStore creates a new HookableStore.
 func NewHookableStore[E estoria.Entity](
 	inner Store[E],
 ) *HookableStore[E] {
@@ -49,20 +51,23 @@ func NewHookableStore[E estoria.Entity](
 	}
 }
 
+// AddPrecreateHook adds a pre-create hook.
 func (s *HookableStore[E]) AddPrecreateHook(hook PrecreateHook) {
 	s.precreateHooks = append(s.precreateHooks, hook)
 }
 
+// AddPreloadHook adds a preload hook.
 func (s *HookableStore[E]) AddPreloadHook(hook PreloadHook) {
 	s.preloadHooks = append(s.preloadHooks, hook)
 }
 
+// AddHook adds a lifecycle hook.
 func (s *HookableStore[E]) AddHook(stage HookStage, hook Hook[E]) {
 	s.hooks[stage] = append(s.hooks[stage], hook)
 }
 
 // NewAggregate creates a new aggregate.
-func (s *HookableStore[E]) New(id uuid.UUID) (estoria.Aggregate[E], error) {
+func (s *HookableStore[E]) New(id uuid.UUID) (*Aggregate[E], error) {
 	s.log.Debug("creating new aggregate")
 	for _, hook := range s.precreateHooks {
 		if err := hook(); err != nil {
@@ -84,7 +89,8 @@ func (s *HookableStore[E]) New(id uuid.UUID) (estoria.Aggregate[E], error) {
 	return aggregate, nil
 }
 
-func (s *HookableStore[E]) Load(ctx context.Context, id typeid.UUID, opts LoadOptions) (estoria.Aggregate[E], error) {
+// Load loads an aggregate by ID.
+func (s *HookableStore[E]) Load(ctx context.Context, id typeid.UUID, opts LoadOptions) (*Aggregate[E], error) {
 	s.log.Debug("loading aggregate", "aggregate_id", id)
 	for _, hook := range s.preloadHooks {
 		if err := hook(ctx, id); err != nil {
@@ -107,7 +113,7 @@ func (s *HookableStore[E]) Load(ctx context.Context, id typeid.UUID, opts LoadOp
 }
 
 // Hydrate hydrates an aggregate.
-func (s *HookableStore[E]) Hydrate(ctx context.Context, aggregate estoria.Aggregate[E], opts HydrateOptions) error {
+func (s *HookableStore[E]) Hydrate(ctx context.Context, aggregate *Aggregate[E], opts HydrateOptions) error {
 	s.log.Debug("hydrating aggregate", "aggregate_id", aggregate.ID(), "from_version", aggregate.Version(), "to_version", opts.ToVersion)
 	for _, hook := range s.hooks[BeforeHydrate] {
 		if err := hook(ctx, aggregate); err != nil {
@@ -130,7 +136,7 @@ func (s *HookableStore[E]) Hydrate(ctx context.Context, aggregate estoria.Aggreg
 }
 
 // Save saves an aggregate.
-func (s *HookableStore[E]) Save(ctx context.Context, aggregate estoria.Aggregate[E], opts SaveOptions) error {
+func (s *HookableStore[E]) Save(ctx context.Context, aggregate *Aggregate[E], opts SaveOptions) error {
 	s.log.Debug("saving aggregate", "aggregate_id", aggregate.ID())
 	for _, hook := range s.hooks[BeforeSave] {
 		if err := hook(ctx, aggregate); err != nil {

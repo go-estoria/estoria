@@ -1,4 +1,4 @@
-package aggregatestore
+package aggregatecache
 
 import (
 	"context"
@@ -31,6 +31,7 @@ type CacheEvictionPolicy struct {
 	MaxSize int
 }
 
+// InMemoryCache is an aggregate cache that stores aggregates in memory.
 type InMemoryCache[E estoria.Entity] struct {
 	cancel         context.CancelFunc
 	entries        map[typeid.UUID]*cacheEntry[E]
@@ -41,17 +42,29 @@ type InMemoryCache[E estoria.Entity] struct {
 var _ aggregatestore.AggregateCache[estoria.Entity] = &InMemoryCache[estoria.Entity]{}
 
 type cacheEntry[E estoria.Entity] struct {
-	aggregate estoria.Aggregate[E]
+	aggregate *aggregatestore.Aggregate[E]
 	added     time.Time
 	lastUsed  time.Time
 }
 
-func NewInMemoryCache[E estoria.Entity](opts ...InMemoryCacheOption) *InMemoryCache[E] {
-	return &InMemoryCache[E]{
+// NewInMemoryCache creates a new in-memory cache.
+// By default, the cache will grow unbounded and no evictions will occur.
+// Use the WithEvictionPolicy option to configure an eviction policy.
+func NewInMemoryCache[E estoria.Entity](opts ...InMemoryCacheOption[E]) *InMemoryCache[E] {
+	cache := &InMemoryCache[E]{
 		evictionPolicy: CacheEvictionPolicy{},
 	}
+
+	for _, opt := range opts {
+		opt(cache)
+	}
+
+	return cache
 }
 
+// Start starts the cache's eviction polling loop, which will periodically check for and
+// evict items based on the configured eviction policy. If no eviction interval is set, periodic
+// evictions will be disabled, and calling Start() will result in a no-op.
 func (c *InMemoryCache[E]) Start(ctx context.Context) error {
 	if c.evictionPolicy.EvictionInterval == 0 {
 		slog.Warn("no cache eviction interval set, periodic evictions disabled")
@@ -77,6 +90,8 @@ func (c *InMemoryCache[E]) Start(ctx context.Context) error {
 	return nil
 }
 
+// Stop stops the cache's eviction polling loop.
+// If the eviction loop is not running, calling Stop() will result in a no-op.
 func (c *InMemoryCache[E]) Stop() error {
 	if c.cancel != nil {
 		c.cancel()
@@ -85,7 +100,8 @@ func (c *InMemoryCache[E]) Stop() error {
 	return nil
 }
 
-func (c *InMemoryCache[E]) GetAggregate(_ context.Context, id typeid.UUID) (estoria.Aggregate[E], error) {
+// GetAggregate retrieves an aggregate from the cache by its ID.
+func (c *InMemoryCache[E]) GetAggregate(_ context.Context, id typeid.UUID) (*aggregatestore.Aggregate[E], error) {
 	entry := c.get(id)
 	if entry == nil {
 		return nil, nil
@@ -96,7 +112,8 @@ func (c *InMemoryCache[E]) GetAggregate(_ context.Context, id typeid.UUID) (esto
 	return entry.aggregate, nil
 }
 
-func (c *InMemoryCache[E]) PutAggregate(_ context.Context, aggregate estoria.Aggregate[E]) error {
+// PutAggregate puts an aggregate in the cache by its ID.
+func (c *InMemoryCache[E]) PutAggregate(_ context.Context, aggregate *aggregatestore.Aggregate[E]) error {
 	now := time.Now()
 	c.put(aggregate.ID(), &cacheEntry[E]{
 		aggregate: aggregate,
@@ -174,10 +191,10 @@ func (c *InMemoryCache[E]) evictTTL() {
 	}
 }
 
-type InMemoryCacheOption func(*InMemoryCache[estoria.Entity])
+type InMemoryCacheOption[E estoria.Entity] func(*InMemoryCache[E])
 
-func WithEvictionPolicy(policy CacheEvictionPolicy) InMemoryCacheOption {
-	return func(c *InMemoryCache[estoria.Entity]) {
+func WithEvictionPolicy[E estoria.Entity](policy CacheEvictionPolicy) InMemoryCacheOption[E] {
+	return func(c *InMemoryCache[E]) {
 		c.evictionPolicy = policy
 	}
 }

@@ -69,8 +69,8 @@ func NewEventSourcedStore[E estoria.Entity](
 
 // New creates a new aggregate.
 // If an ID is provided, the aggregate is created with that ID.
-func (s *EventSourcedStore[E]) New(id uuid.UUID) (estoria.Aggregate[E], error) {
-	aggregate := &EventSourcedAggregate[E]{}
+func (s *EventSourcedStore[E]) New(id uuid.UUID) (*Aggregate[E], error) {
+	aggregate := &Aggregate[E]{}
 	aggregate.State().SetEntityAtVersion(s.newEntity(id), 0)
 
 	s.log.Debug("created new aggregate", "aggregate_id", aggregate.ID())
@@ -78,7 +78,7 @@ func (s *EventSourcedStore[E]) New(id uuid.UUID) (estoria.Aggregate[E], error) {
 }
 
 // Load loads an aggregate by its ID.
-func (s *EventSourcedStore[E]) Load(ctx context.Context, id typeid.UUID, opts LoadOptions) (estoria.Aggregate[E], error) {
+func (s *EventSourcedStore[E]) Load(ctx context.Context, id typeid.UUID, opts LoadOptions) (*Aggregate[E], error) {
 	s.log.Debug("loading aggregate from event store", "aggregate_id", id)
 
 	aggregate, err := s.New(id.UUID())
@@ -98,7 +98,7 @@ func (s *EventSourcedStore[E]) Load(ctx context.Context, id typeid.UUID, opts Lo
 }
 
 // Hydrate hydrates an aggregate.
-func (s *EventSourcedStore[E]) Hydrate(ctx context.Context, aggregate estoria.Aggregate[E], opts HydrateOptions) error {
+func (s *EventSourcedStore[E]) Hydrate(ctx context.Context, aggregate *Aggregate[E], opts HydrateOptions) error {
 	log := s.log.With("aggregate_id", aggregate.ID())
 	log.Debug("hydrating aggregate from event store", "from_version", aggregate.Version(), "to_version", opts.ToVersion)
 
@@ -153,8 +153,13 @@ func (s *EventSourcedStore[E]) Hydrate(ctx context.Context, aggregate estoria.Ag
 		}
 
 		// queue and apply the event immediately
-		aggregate.State().EnqueueForApplication(entityEvent)
-		if err := aggregate.State().ApplyNext(ctx); errors.Is(err, estoria.ErrNoUnappliedEvents) {
+		aggregate.State().WillApply(&AggregateEvent{
+			ID:          evt.ID,
+			Version:     evt.StreamVersion,
+			Timestamp:   evt.Timestamp,
+			EntityEvent: entityEvent,
+		})
+		if err := aggregate.State().ApplyNext(ctx); errors.Is(err, ErrNoUnappliedEvents) {
 			break
 		} else if err != nil {
 			return fmt.Errorf("applying event: %w", err)
@@ -167,7 +172,7 @@ func (s *EventSourcedStore[E]) Hydrate(ctx context.Context, aggregate estoria.Ag
 }
 
 // Save saves an aggregate.
-func (s *EventSourcedStore[E]) Save(ctx context.Context, aggregate estoria.Aggregate[E], opts SaveOptions) error {
+func (s *EventSourcedStore[E]) Save(ctx context.Context, aggregate *Aggregate[E], opts SaveOptions) error {
 	unpersistedEvents := aggregate.State().UnpersistedEvents()
 	s.log.Debug("saving aggregate to event store", "aggregate_id", aggregate.ID(), "events", len(unpersistedEvents))
 
@@ -176,7 +181,7 @@ func (s *EventSourcedStore[E]) Save(ctx context.Context, aggregate estoria.Aggre
 		return nil
 	}
 
-	events := make([]*eventstore.EventStoreEvent, len(unpersistedEvents))
+	events := make([]*eventstore.Event, len(unpersistedEvents))
 	for i, unpersistedEvent := range unpersistedEvents {
 		nextVersion := aggregate.Version() + int64(i) + 1
 
@@ -191,7 +196,7 @@ func (s *EventSourcedStore[E]) Save(ctx context.Context, aggregate estoria.Aggre
 			return fmt.Errorf("serializing event data: %w", err)
 		}
 
-		events[i] = &eventstore.EventStoreEvent{
+		events[i] = &eventstore.Event{
 			ID:            unpersistedEvent.ID,
 			StreamID:      aggregate.ID(),
 			StreamVersion: nextVersion,
@@ -209,10 +214,10 @@ func (s *EventSourcedStore[E]) Save(ctx context.Context, aggregate estoria.Aggre
 
 	// queue the events for application
 	for _, unpersistedEvent := range unpersistedEvents {
-		aggregate.State().EnqueueForApplication(unpersistedEvent.EntityEvent)
+		aggregate.State().WillApply(unpersistedEvent)
 	}
 
-	aggregate.State().ClearUnpersistedEvents()
+	aggregate.State().ClearUnsavedEvents()
 
 	if opts.SkipApply {
 		return nil
@@ -220,7 +225,7 @@ func (s *EventSourcedStore[E]) Save(ctx context.Context, aggregate estoria.Aggre
 
 	// apply the events to the aggregate
 	for {
-		if err := aggregate.State().ApplyNext(ctx); errors.Is(err, estoria.ErrNoUnappliedEvents) {
+		if err := aggregate.State().ApplyNext(ctx); errors.Is(err, ErrNoUnappliedEvents) {
 			return nil
 		} else if err != nil {
 			return fmt.Errorf("applying event: %w", err)
