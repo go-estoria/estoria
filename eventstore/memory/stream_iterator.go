@@ -16,10 +16,10 @@ type StreamIterator struct {
 	direction eventstore.ReadStreamDirection
 	limit     int64
 	retrieved int64
-	marshaler estoria.Marshaler[eventstore.EventStoreEvent, *eventstore.EventStoreEvent]
+	marshaler estoria.Marshaler[eventstore.Event, *eventstore.Event]
 }
 
-func (i *StreamIterator) Next(ctx context.Context) (*eventstore.EventStoreEvent, error) {
+func (i *StreamIterator) Next(ctx context.Context) (*eventstore.Event, error) {
 	if i.direction == eventstore.Forward && i.cursor >= int64(len(i.events)) {
 		return nil, io.EOF
 	} else if i.direction == eventstore.Reverse && i.cursor < 0 {
@@ -37,7 +37,7 @@ func (i *StreamIterator) Next(ctx context.Context) (*eventstore.EventStoreEvent,
 
 	i.retrieved++
 
-	event := &eventstore.EventStoreEvent{}
+	event := &eventstore.Event{}
 	if err := i.marshaler.Unmarshal(doc.Data, event); err != nil {
 		return nil, err
 	}

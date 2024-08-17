@@ -24,7 +24,7 @@ type StreamReader interface {
 // An StreamIterator reads events from a stream.
 type StreamIterator interface {
 	// Next reads the next event from the stream. It returns io.EOF when there are no more events.
-	Next(ctx context.Context) (*EventStoreEvent, error)
+	Next(ctx context.Context) (*Event, error)
 }
 
 // ReadStreamOptions are options for reading an event stream.
@@ -60,7 +60,7 @@ const (
 type StreamWriter interface {
 	// AppendStream appends events to an event stream.
 	// The expected version of the stream can be specified in the options.
-	AppendStream(ctx context.Context, streamID typeid.UUID, events []*EventStoreEvent, opts AppendStreamOptions) error
+	AppendStream(ctx context.Context, streamID typeid.UUID, events []*Event, opts AppendStreamOptions) error
 }
 
 // AppendStreamOptions are options for appending events to a stream.
@@ -75,8 +75,8 @@ type AppendStreamOptions struct {
 // ErrStreamVersionMismatch is returned when the expected stream version does not match the actual stream version.
 var ErrStreamVersionMismatch = errors.New("stream version mismatch")
 
-// An EventStoreEvent can be appended to and loaded from an event store.
-type EventStoreEvent struct {
+// An Event can be appended to and loaded from an event store.
+type Event struct {
 	ID            typeid.UUID
 	StreamID      typeid.UUID
 	StreamVersion int64

@@ -15,7 +15,7 @@ import (
 type EventStore struct {
 	events    map[string][]*eventStoreDocument
 	mu        sync.RWMutex
-	marshaler estoria.Marshaler[eventstore.EventStoreEvent, *eventstore.EventStoreEvent]
+	marshaler estoria.Marshaler[eventstore.Event, *eventstore.Event]
 	outbox    *Outbox
 }
 
@@ -23,7 +23,7 @@ type EventStore struct {
 func NewEventStore(opts ...EventStoreOption) *EventStore {
 	eventStore := &EventStore{
 		events:    map[string][]*eventStoreDocument{},
-		marshaler: estoria.JSONMarshaler[eventstore.EventStoreEvent]{},
+		marshaler: estoria.JSONMarshaler[eventstore.Event]{},
 	}
 
 	for _, opt := range opts {
@@ -34,7 +34,7 @@ func NewEventStore(opts ...EventStoreOption) *EventStore {
 }
 
 // AppendStream appends events to a stream.
-func (s *EventStore) AppendStream(ctx context.Context, streamID typeid.UUID, events []*eventstore.EventStoreEvent, opts eventstore.AppendStreamOptions) error {
+func (s *EventStore) AppendStream(ctx context.Context, streamID typeid.UUID, events []*eventstore.Event, opts eventstore.AppendStreamOptions) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
