@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"slices"
 	"sync"
 
 	"github.com/go-estoria/estoria"
@@ -14,7 +13,7 @@ import (
 
 // EventStore is an in-memory event store. It should not be used in production applications.
 type EventStore struct {
-	events    map[string][]*eventstore.EventStoreEvent
+	events    map[string][]*eventStoreDocument
 	mu        sync.RWMutex
 	marshaler estoria.Marshaler[eventstore.EventStoreEvent, *eventstore.EventStoreEvent]
 	outbox    *Outbox
@@ -23,7 +22,7 @@ type EventStore struct {
 // NewEventStore creates a new in-memory event store.
 func NewEventStore(opts ...EventStoreOption) *EventStore {
 	eventStore := &EventStore{
-		events:    map[string][]*eventstore.EventStoreEvent{},
+		events:    map[string][]*eventStoreDocument{},
 		marshaler: estoria.JSONMarshaler[eventstore.EventStoreEvent]{},
 	}
 
@@ -41,7 +40,7 @@ func (s *EventStore) AppendStream(ctx context.Context, streamID typeid.UUID, eve
 
 	stream, ok := s.events[streamID.String()]
 	if !ok {
-		s.events[streamID.String()] = []*eventstore.EventStoreEvent{}
+		s.events[streamID.String()] = []*eventStoreDocument{}
 		stream = s.events[streamID.String()]
 	}
 
@@ -49,20 +48,21 @@ func (s *EventStore) AppendStream(ctx context.Context, streamID typeid.UUID, eve
 		return eventstore.ErrStreamVersionMismatch
 	}
 
-	tx := []*eventstore.EventStoreEvent{}
+	tx := []*eventStoreDocument{}
 	for _, event := range events {
-		if slices.ContainsFunc(stream, func(e *eventstore.EventStoreEvent) bool {
-			return event.ID.String() == e.ID.String()
-		}) {
-			return ErrEventExists{EventID: event.ID}
+		data, err := s.marshaler.Marshal(event)
+		if err != nil {
+			return fmt.Errorf("marshaling event: %w", err)
 		}
 
-		tx = append(tx, event)
+		tx = append(tx, &eventStoreDocument{
+			Data: data,
+		})
 	}
 
 	if s.outbox != nil {
 		slog.Debug("handling events with outbox", "tx", "inherited", "events", len(tx))
-		if err := s.outbox.HandleEvents(ctx, tx); err != nil {
+		if err := s.outbox.HandleEvents(ctx, events); err != nil {
 			return fmt.Errorf("handling events: %w", err)
 		}
 	}
@@ -102,6 +102,7 @@ func (s *EventStore) ReadStream(ctx context.Context, streamID typeid.UUID, opts 
 		cursor:    cursor,
 		direction: opts.Direction,
 		limit:     limit,
+		marshaler: s.marshaler,
 	}, nil
 }
 
@@ -123,4 +124,8 @@ type ErrEventExists struct {
 // Error returns the error message.
 func (e ErrEventExists) Error() string {
 	return fmt.Sprintf("event already exists: %s", e.EventID)
+}
+
+type eventStoreDocument struct {
+	Data []byte
 }
