@@ -46,10 +46,17 @@ type cacheEntry[E estoria.Entity] struct {
 	lastUsed  time.Time
 }
 
-func NewInMemoryCache[E estoria.Entity](opts ...InMemoryCacheOption) *InMemoryCache[E] {
-	return &InMemoryCache[E]{
+// NewInMemoryCache creates a new in-memory cache.
+func NewInMemoryCache[E estoria.Entity](opts ...InMemoryCacheOption[E]) *InMemoryCache[E] {
+	cache := &InMemoryCache[E]{
 		evictionPolicy: CacheEvictionPolicy{},
 	}
+
+	for _, opt := range opts {
+		opt(cache)
+	}
+
+	return cache
 }
 
 func (c *InMemoryCache[E]) Start(ctx context.Context) error {
@@ -174,10 +181,10 @@ func (c *InMemoryCache[E]) evictTTL() {
 	}
 }
 
-type InMemoryCacheOption func(*InMemoryCache[estoria.Entity])
+type InMemoryCacheOption[E estoria.Entity] func(*InMemoryCache[E])
 
-func WithEvictionPolicy(policy CacheEvictionPolicy) InMemoryCacheOption {
-	return func(c *InMemoryCache[estoria.Entity]) {
+func WithEvictionPolicy[E estoria.Entity](policy CacheEvictionPolicy) InMemoryCacheOption[E] {
+	return func(c *InMemoryCache[E]) {
 		c.evictionPolicy = policy
 	}
 }
