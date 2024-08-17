@@ -153,7 +153,7 @@ func (s *EventSourcedStore[E]) Hydrate(ctx context.Context, aggregate *Aggregate
 		}
 
 		// queue and apply the event immediately
-		aggregate.State().EnqueueForApplication(&AggregateEvent{
+		aggregate.State().WillApply(&AggregateEvent{
 			ID:          evt.ID,
 			Version:     evt.StreamVersion,
 			Timestamp:   evt.Timestamp,
@@ -214,10 +214,10 @@ func (s *EventSourcedStore[E]) Save(ctx context.Context, aggregate *Aggregate[E]
 
 	// queue the events for application
 	for _, unpersistedEvent := range unpersistedEvents {
-		aggregate.State().EnqueueForApplication(unpersistedEvent)
+		aggregate.State().WillApply(unpersistedEvent)
 	}
 
-	aggregate.State().ClearUnpersistedEvents()
+	aggregate.State().ClearUnsavedEvents()
 
 	if opts.SkipApply {
 		return nil

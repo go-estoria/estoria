@@ -27,6 +27,7 @@ type PreloadHook func(ctx context.Context, id typeid.UUID) error
 
 type Hook[E estoria.Entity] func(ctx context.Context, aggregate *Aggregate[E]) error
 
+// A HookableStore wraps an aggregate store and provides lifecycle hooks for aggregate store operations.
 type HookableStore[E estoria.Entity] struct {
 	inner          Store[E]
 	precreateHooks []PrecreateHook
@@ -37,6 +38,7 @@ type HookableStore[E estoria.Entity] struct {
 
 var _ Store[estoria.Entity] = (*HookableStore[estoria.Entity])(nil)
 
+// NewHookableStore creates a new HookableStore.
 func NewHookableStore[E estoria.Entity](
 	inner Store[E],
 ) *HookableStore[E] {
@@ -49,14 +51,17 @@ func NewHookableStore[E estoria.Entity](
 	}
 }
 
+// AddPrecreateHook adds a pre-create hook.
 func (s *HookableStore[E]) AddPrecreateHook(hook PrecreateHook) {
 	s.precreateHooks = append(s.precreateHooks, hook)
 }
 
+// AddPreloadHook adds a preload hook.
 func (s *HookableStore[E]) AddPreloadHook(hook PreloadHook) {
 	s.preloadHooks = append(s.preloadHooks, hook)
 }
 
+// AddHook adds a lifecycle hook.
 func (s *HookableStore[E]) AddHook(stage HookStage, hook Hook[E]) {
 	s.hooks[stage] = append(s.hooks[stage], hook)
 }
@@ -84,6 +89,7 @@ func (s *HookableStore[E]) New(id uuid.UUID) (*Aggregate[E], error) {
 	return aggregate, nil
 }
 
+// Load loads an aggregate by ID.
 func (s *HookableStore[E]) Load(ctx context.Context, id typeid.UUID, opts LoadOptions) (*Aggregate[E], error) {
 	s.log.Debug("loading aggregate", "aggregate_id", id)
 	for _, hook := range s.preloadHooks {
