@@ -138,7 +138,7 @@ func (s *EventSourcedStore[E]) Hydrate(ctx context.Context, aggregate *Aggregate
 	for numRead := 0; ; numRead++ {
 		evt, err := stream.Next(ctx)
 		if err == io.EOF {
-			log.Debug("end of event stream", "events_read", numRead, "hydrated_version", aggregate.Version())
+			log.Debug("end of event stream", "events_read", numRead)
 			break
 		} else if err != nil {
 			return fmt.Errorf("reading event: %w", err)
@@ -154,7 +154,7 @@ func (s *EventSourcedStore[E]) Hydrate(ctx context.Context, aggregate *Aggregate
 			return fmt.Errorf("deserializing event data: %w", err)
 		}
 
-		// queue and apply the event immediately
+		// enqueue and apply the event immediately
 		aggregate.State().WillApply(&AggregateEvent{
 			ID:          evt.ID,
 			Version:     evt.StreamVersion,
@@ -162,7 +162,7 @@ func (s *EventSourcedStore[E]) Hydrate(ctx context.Context, aggregate *Aggregate
 			EntityEvent: entityEvent,
 		})
 		if err := aggregate.State().ApplyNext(ctx); errors.Is(err, ErrNoUnappliedEvents) {
-			break
+			return fmt.Errorf("unexpected end of event stream while hydrating aggregate")
 		} else if err != nil {
 			return fmt.Errorf("applying event: %w", err)
 		}
@@ -175,34 +175,34 @@ func (s *EventSourcedStore[E]) Hydrate(ctx context.Context, aggregate *Aggregate
 
 // Save saves an aggregate.
 func (s *EventSourcedStore[E]) Save(ctx context.Context, aggregate *Aggregate[E], opts SaveOptions) error {
-	unpersistedEvents := aggregate.State().UnpersistedEvents()
-	s.log.Debug("saving aggregate to event store", "aggregate_id", aggregate.ID(), "events", len(unpersistedEvents))
+	unsavedEvents := aggregate.State().UnsavedEvents()
+	s.log.Debug("saving aggregate to event store", "aggregate_id", aggregate.ID(), "events", len(unsavedEvents))
 
-	if len(unpersistedEvents) == 0 {
+	if len(unsavedEvents) == 0 {
 		s.log.Debug("no events to save")
 		return nil
 	}
 
-	events := make([]*eventstore.Event, len(unpersistedEvents))
-	for i, unpersistedEvent := range unpersistedEvents {
+	events := make([]*eventstore.Event, len(unsavedEvents))
+	for i, unsavedEvent := range unsavedEvents {
 		nextVersion := aggregate.Version() + int64(i) + 1
 
-		if unpersistedEvent.Version > 0 && unpersistedEvent.Version != nextVersion {
+		if unsavedEvent.Version > 0 && unsavedEvent.Version != nextVersion {
 			return fmt.Errorf("event version mismatch: next is %d, event specifies %d",
 				aggregate.Version()+int64(i)+1,
-				unpersistedEvent.Version)
+				unsavedEvent.Version)
 		}
 
-		data, err := s.entityEventMarshaler.Marshal(&unpersistedEvent.EntityEvent)
+		data, err := s.entityEventMarshaler.Marshal(&unsavedEvent.EntityEvent)
 		if err != nil {
 			return fmt.Errorf("serializing event data: %w", err)
 		}
 
 		events[i] = &eventstore.Event{
-			ID:            unpersistedEvent.ID,
+			ID:            unsavedEvent.ID,
 			StreamID:      aggregate.ID(),
 			StreamVersion: nextVersion,
-			Timestamp:     unpersistedEvent.Timestamp,
+			Timestamp:     unsavedEvent.Timestamp,
 			Data:          data,
 		}
 	}
@@ -215,8 +215,8 @@ func (s *EventSourcedStore[E]) Save(ctx context.Context, aggregate *Aggregate[E]
 	}
 
 	// queue the events for application
-	for _, unpersistedEvent := range unpersistedEvents {
-		aggregate.State().WillApply(unpersistedEvent)
+	for _, unsavedEvent := range unsavedEvents {
+		aggregate.State().WillApply(unsavedEvent)
 	}
 
 	aggregate.State().ClearUnsavedEvents()
