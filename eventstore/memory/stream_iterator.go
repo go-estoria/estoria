@@ -2,6 +2,7 @@ package memory
 
 import (
 	"context"
+	"fmt"
 	"io"
 
 	"github.com/go-estoria/estoria"
@@ -20,7 +21,9 @@ type StreamIterator struct {
 }
 
 func (i *StreamIterator) Next(ctx context.Context) (*eventstore.Event, error) {
-	if i.direction == eventstore.Forward && i.cursor >= int64(len(i.events)) {
+	if i.events == nil {
+		return nil, fmt.Errorf("stream %s has been closed", i.streamID)
+	} else if i.direction == eventstore.Forward && i.cursor >= int64(len(i.events)) {
 		return nil, io.EOF
 	} else if i.direction == eventstore.Reverse && i.cursor < 0 {
 		return nil, io.EOF
@@ -43,4 +46,9 @@ func (i *StreamIterator) Next(ctx context.Context) (*eventstore.Event, error) {
 	}
 
 	return event, nil
+}
+
+func (i *StreamIterator) Close(ctx context.Context) error {
+	i.events = nil
+	return nil
 }

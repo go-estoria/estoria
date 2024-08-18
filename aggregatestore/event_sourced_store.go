@@ -132,6 +132,8 @@ func (s *EventSourcedStore[E]) Hydrate(ctx context.Context, aggregate *Aggregate
 		return fmt.Errorf("reading event stream: %w", err)
 	}
 
+	defer stream.Close(ctx)
+
 	// apply the events to the aggregate
 	for numRead := 0; ; numRead++ {
 		evt, err := stream.Next(ctx)

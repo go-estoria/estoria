@@ -25,6 +25,9 @@ type StreamReader interface {
 type StreamIterator interface {
 	// Next reads the next event from the stream. It returns io.EOF when there are no more events.
 	Next(ctx context.Context) (*Event, error)
+
+	// Close closes the stream iterator.
+	Close(ctx context.Context) error
 }
 
 // ReadStreamOptions are options for reading an event stream.
