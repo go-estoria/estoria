@@ -109,6 +109,13 @@ func (s *EventStore) ReadStream(ctx context.Context, streamID typeid.UUID, opts 
 // An EventStoreOption configures an EventStore.
 type EventStoreOption func(*EventStore)
 
+// WithEventMarshaler configures the event store to use a custom event marshaler.
+func WithEventMarshaler(marshaler estoria.Marshaler[eventstore.Event, *eventstore.Event]) EventStoreOption {
+	return func(s *EventStore) {
+		s.marshaler = marshaler
+	}
+}
+
 // WithOutbox configures the event store to use an outbox.
 func WithOutbox(outbox *Outbox) EventStoreOption {
 	return func(s *EventStore) {
