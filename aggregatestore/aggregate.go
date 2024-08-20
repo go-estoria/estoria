@@ -136,10 +136,10 @@ func (a *AggregateState[E]) UnappliedEvents() []*AggregateEvent {
 	return a.unappliedEvents
 }
 
-// UnpersistedEvents returns the unsaved events for the aggregate.
+// UnsavedEvents returns the unsaved events for the aggregate.
 // These are events that have been appended to the aggregate but not yet saved.
 // They are thus not yet applied to the aggregate's entity.
-func (a *AggregateState[E]) UnpersistedEvents() []*AggregateEvent {
+func (a *AggregateState[E]) UnsavedEvents() []*AggregateEvent {
 	return a.unsavedEvents
 }
 
