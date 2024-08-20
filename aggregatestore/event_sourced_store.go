@@ -105,14 +105,14 @@ func (s *EventSourcedStore[E]) Hydrate(ctx context.Context, aggregate *Aggregate
 		return errors.New("event store has no event stream reader")
 	}
 
-	log := s.log.With("aggregate_id", aggregate.ID())
-	log.Debug("hydrating aggregate from event store", "from_version", aggregate.Version(), "to_version", opts.ToVersion)
-
 	if aggregate == nil {
 		return fmt.Errorf("aggregate is nil")
 	} else if opts.ToVersion < 0 {
 		return fmt.Errorf("invalid target version")
 	}
+
+	log := s.log.With("aggregate_id", aggregate.ID())
+	log.Debug("hydrating aggregate from event store", "from_version", aggregate.Version(), "to_version", opts.ToVersion)
 
 	readOpts := eventstore.ReadStreamOptions{
 		Offset:    aggregate.Version(),
@@ -120,10 +120,10 @@ func (s *EventSourcedStore[E]) Hydrate(ctx context.Context, aggregate *Aggregate
 	}
 
 	if opts.ToVersion > 0 {
-		if aggregate.Version() == opts.ToVersion {
+		if v := aggregate.Version(); v == opts.ToVersion {
 			log.Debug("aggregate already at target version, nothing to hydrate", "version", opts.ToVersion)
 			return nil
-		} else if v := aggregate.Version(); v > opts.ToVersion {
+		} else if v > opts.ToVersion {
 			return fmt.Errorf("cannot hydrate aggregate to lower version (%d) than current version (%d)", opts.ToVersion, v)
 		}
 
