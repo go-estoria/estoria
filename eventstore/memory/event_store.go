@@ -21,17 +21,19 @@ type EventStore struct {
 }
 
 // NewEventStore creates a new in-memory event store.
-func NewEventStore(opts ...EventStoreOption) *EventStore {
+func NewEventStore(opts ...EventStoreOption) (*EventStore, error) {
 	eventStore := &EventStore{
 		events:    map[string][]*eventStoreDocument{},
 		marshaler: estoria.JSONMarshaler[eventstore.Event]{},
 	}
 
 	for _, opt := range opts {
-		opt(eventStore)
+		if err := opt(eventStore); err != nil {
+			return nil, fmt.Errorf("applying option: %w", err)
+		}
 	}
 
-	return eventStore
+	return eventStore, nil
 }
 
 // AppendStream appends events to a stream.
@@ -78,9 +80,7 @@ func (s *EventStore) AppendStream(ctx context.Context, streamID typeid.UUID, eve
 
 	if s.outbox != nil {
 		slog.Debug("handling events with outbox", "tx", "inherited", "events", len(tx))
-		if err := s.outbox.HandleEvents(ctx, preparedEvents); err != nil {
-			return fmt.Errorf("handling events: %w", err)
-		}
+		s.outbox.HandleEvents(ctx, preparedEvents)
 	}
 
 	s.events[streamID.String()] = append(stream, tx...)
@@ -123,19 +123,29 @@ func (s *EventStore) ReadStream(ctx context.Context, streamID typeid.UUID, opts 
 }
 
 // An EventStoreOption configures an EventStore.
-type EventStoreOption func(*EventStore)
+type EventStoreOption func(*EventStore) error
 
 // WithEventMarshaler configures the event store to use a custom event marshaler.
 func WithEventMarshaler(marshaler estoria.Marshaler[eventstore.Event, *eventstore.Event]) EventStoreOption {
-	return func(s *EventStore) {
+	return func(s *EventStore) error {
+		if marshaler == nil {
+			return fmt.Errorf("marshaler cannot be nil")
+		}
+
 		s.marshaler = marshaler
+		return nil
 	}
 }
 
 // WithOutbox configures the event store to use an outbox.
 func WithOutbox(outbox *Outbox) EventStoreOption {
-	return func(s *EventStore) {
+	return func(s *EventStore) error {
+		if outbox == nil {
+			return fmt.Errorf("outbox cannot be nil")
+		}
+
 		s.outbox = outbox
+		return nil
 	}
 }
 

@@ -3,6 +3,7 @@ package memory
 import (
 	"context"
 	"fmt"
+	"io"
 	"log/slog"
 	"strings"
 	"sync"
@@ -42,7 +43,7 @@ func (o *Outbox) RegisterHandlers(eventType estoria.EntityEvent, handlers ...out
 }
 
 // HandleEvents adds an outbox item for each event.
-func (o *Outbox) HandleEvents(ctx context.Context, events []*eventstore.Event) error {
+func (o *Outbox) HandleEvents(ctx context.Context, events []*eventstore.Event) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	slog.Debug("inserting events into outbox", "tx", "inherited", "events", len(events))
@@ -63,8 +64,6 @@ func (o *Outbox) HandleEvents(ctx context.Context, events []*eventstore.Event) e
 
 		o.items = append(o.items, item)
 	}
-
-	return nil
 }
 
 // MarkHandled updates the handler result for the outbox item.
@@ -115,7 +114,7 @@ func (i *OutboxIterator) Next(ctx context.Context) (outbox.OutboxItem, error) {
 	}
 
 	if i.cursor >= len(i.outbox.items) {
-		return nil, nil
+		return nil, io.EOF
 	}
 
 	item := i.outbox.items[i.cursor]

@@ -11,6 +11,62 @@ import (
 	"github.com/go-estoria/estoria/typeid"
 )
 
+func TestEventStore_NewEventStore(t *testing.T) {
+	for _, tt := range []struct {
+		name    string
+		opts    []memory.EventStoreOption
+		wantErr error
+	}{
+		{
+			name: "with default options, creates a new event store without error",
+		},
+		{
+			name: "with a non-nil outbox, creates a new event store without error",
+			opts: []memory.EventStoreOption{
+				memory.WithOutbox(memory.NewOutbox()),
+			},
+		},
+		{
+			name: "with a non-nil custom marshaler, creates a new event store without error",
+			opts: []memory.EventStoreOption{
+				memory.WithEventMarshaler(failMarshaler{}),
+			},
+		},
+		{
+			name: "with a non-nil outbox and custom marshaler, creates a new event store without error",
+			opts: []memory.EventStoreOption{
+				memory.WithOutbox(memory.NewOutbox()),
+				memory.WithEventMarshaler(failMarshaler{}),
+			},
+		},
+		{
+			name:    "returns an error if a nil outbox is provided",
+			opts:    []memory.EventStoreOption{memory.WithOutbox(nil)},
+			wantErr: errors.New("applying option: outbox cannot be nil"),
+		},
+		{
+			name:    "returns an error if a nil marshaler is provided",
+			opts:    []memory.EventStoreOption{memory.WithEventMarshaler(nil)},
+			wantErr: errors.New("applying option: marshaler cannot be nil"),
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			gotStore, gotErr := memory.NewEventStore(tt.opts...)
+			if tt.wantErr != nil {
+				if gotErr == nil || gotErr.Error() != tt.wantErr.Error() {
+					t.Errorf("unexpected NewEventStore() error: wanted %v got %v", tt.wantErr, gotErr)
+				}
+
+				return
+			}
+
+			if gotStore == nil {
+				t.Fatalf("unexpected nil event store")
+			}
+		})
+	}
+}
+
 func TestEventStore_AppendStream(t *testing.T) {
 	streamID := typeid.Must(typeid.NewUUID("streamtype")).(typeid.UUID)
 	eventID := typeid.Must(typeid.NewUUID("eventtype")).(typeid.UUID)
@@ -52,7 +108,7 @@ func TestEventStore_AppendStream(t *testing.T) {
 			},
 		},
 		{
-			name:         "with default options, appends batches of events to stream without error",
+			name:         "with default options, appends batches of events to a stream without error",
 			haveStreamID: streamID,
 			haveAppendEvents: []eventSetWithOpts{
 				{
@@ -92,6 +148,35 @@ func TestEventStore_AppendStream(t *testing.T) {
 						{
 							ID:   typeid.Must(typeid.NewUUID("event2")).(typeid.UUID),
 							Data: []byte("event 7 data"),
+						},
+					},
+				},
+			},
+		},
+		{
+			name: "when an outbox is provided, appends events to the outbox",
+			haveEventStoreOpts: []memory.EventStoreOption{
+				memory.WithOutbox(memory.NewOutbox()),
+			},
+			haveStreamID: streamID,
+			haveAppendEvents: []eventSetWithOpts{
+				{
+					events: []*eventstore.WritableEvent{
+						{
+							ID:   typeid.Must(typeid.NewUUID("event1")).(typeid.UUID),
+							Data: []byte("event 1 data"),
+						},
+					},
+				},
+				{
+					events: []*eventstore.WritableEvent{
+						{
+							ID:   typeid.Must(typeid.NewUUID("event2")).(typeid.UUID),
+							Data: []byte("event 2 data"),
+						},
+						{
+							ID:   typeid.Must(typeid.NewUUID("event3")).(typeid.UUID),
+							Data: []byte("event 3 data"),
 						},
 					},
 				},
@@ -186,7 +271,10 @@ func TestEventStore_AppendStream(t *testing.T) {
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			store := memory.NewEventStore(tt.haveEventStoreOpts...)
+			store, err := memory.NewEventStore(tt.haveEventStoreOpts...)
+			if err != nil {
+				t.Fatalf("NewEventStore() error: %v", err)
+			}
 
 			totalEvents := 0
 			for i, eventSet := range tt.haveAppendEvents {
