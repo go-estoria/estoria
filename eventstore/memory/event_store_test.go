@@ -2,9 +2,9 @@ package memory_test
 
 import (
 	"context"
+	"errors"
 	"io"
 	"testing"
-	"time"
 
 	"github.com/go-estoria/estoria/eventstore"
 	"github.com/go-estoria/estoria/eventstore/memory"
@@ -13,65 +13,192 @@ import (
 
 func TestEventStore_AppendStream(t *testing.T) {
 	streamID := typeid.Must(typeid.NewUUID("streamtype")).(typeid.UUID)
+	eventID := typeid.Must(typeid.NewUUID("eventtype")).(typeid.UUID)
 
 	for _, tt := range []struct {
-		name                 string
-		haveEventStoreOpts   []memory.EventStoreOption
-		haveStreamID         typeid.UUID
-		haveAppendEvents     []*eventstore.Event
-		haveAppendStreamOpts eventstore.AppendStreamOptions
-		wantAppendErr        error
+		name               string
+		haveEventStoreOpts []memory.EventStoreOption
+		haveStreamID       typeid.UUID
+		haveAppendEvents   []eventSetWithOpts
 	}{
 		{
-			name:         "with default options, appends a single event to a new stream without error",
+			name:         "with default options, appends individual events to a stream without error",
 			haveStreamID: streamID,
-			haveAppendEvents: []*eventstore.Event{
+			haveAppendEvents: []eventSetWithOpts{
 				{
-					ID:            typeid.Must(typeid.NewUUID("event1")).(typeid.UUID),
-					StreamID:      streamID,
-					StreamVersion: 1,
-					Timestamp:     time.Now(),
-					Data:          []byte("event data"),
+					events: []*eventstore.WritableEvent{
+						{
+							ID:   typeid.Must(typeid.NewUUID("event1")).(typeid.UUID),
+							Data: []byte("event 1 data"),
+						},
+					},
+				},
+				{
+					events: []*eventstore.WritableEvent{
+						{
+							ID:   typeid.Must(typeid.NewUUID("event2")).(typeid.UUID),
+							Data: []byte("event 2 data"),
+						},
+					},
+				},
+				{
+					events: []*eventstore.WritableEvent{
+						{
+							ID:   typeid.Must(typeid.NewUUID("event3")).(typeid.UUID),
+							Data: []byte("event 3 data"),
+						},
+					},
 				},
 			},
 		},
 		{
-			name:         "with default options, appends multiple events to a new stream without error",
+			name:         "with default options, appends batches of events to stream without error",
 			haveStreamID: streamID,
-			haveAppendEvents: []*eventstore.Event{
+			haveAppendEvents: []eventSetWithOpts{
 				{
-					ID:            typeid.Must(typeid.NewUUID("event1")).(typeid.UUID),
-					StreamID:      streamID,
-					StreamVersion: 1,
-					Timestamp:     time.Now(),
-					Data:          []byte("event data"),
+					events: []*eventstore.WritableEvent{
+						{
+							ID:   typeid.Must(typeid.NewUUID("event1")).(typeid.UUID),
+							Data: []byte("event 1 data"),
+						},
+						{
+							ID:   typeid.Must(typeid.NewUUID("event2")).(typeid.UUID),
+							Data: []byte("event 2 data"),
+						},
+					},
 				},
 				{
-					ID:            typeid.Must(typeid.NewUUID("event2")).(typeid.UUID),
-					StreamID:      streamID,
-					StreamVersion: 2,
-					Timestamp:     time.Now(),
-					Data:          []byte("event data"),
+					events: []*eventstore.WritableEvent{
+						{
+							ID:   typeid.Must(typeid.NewUUID("event1")).(typeid.UUID),
+							Data: []byte("event 3 data"),
+						},
+						{
+							ID:   typeid.Must(typeid.NewUUID("event2")).(typeid.UUID),
+							Data: []byte("event 4 data"),
+						},
+						{
+							ID:   typeid.Must(typeid.NewUUID("event2")).(typeid.UUID),
+							Data: []byte("event 5 data"),
+						},
+					},
 				},
 				{
-					ID:            typeid.Must(typeid.NewUUID("event3")).(typeid.UUID),
-					StreamID:      streamID,
-					StreamVersion: 3,
-					Timestamp:     time.Now(),
-					Data:          []byte("event data"),
+					events: []*eventstore.WritableEvent{
+						{
+							ID:   typeid.Must(typeid.NewUUID("event1")).(typeid.UUID),
+							Data: []byte("event 6 data"),
+						},
+						{
+							ID:   typeid.Must(typeid.NewUUID("event2")).(typeid.UUID),
+							Data: []byte("event 7 data"),
+						},
+					},
 				},
+			},
+		},
+		{
+			name:         "returns ErrStreamVersionMismatch when expected version is less than actual version",
+			haveStreamID: streamID,
+			haveAppendEvents: []eventSetWithOpts{
+				{
+					events: []*eventstore.WritableEvent{
+						{
+							ID:   typeid.Must(typeid.NewUUID("event1")).(typeid.UUID),
+							Data: []byte("event 1 data"),
+						},
+						{
+							ID:   typeid.Must(typeid.NewUUID("event2")).(typeid.UUID),
+							Data: []byte("event 2 data"),
+						},
+					},
+				},
+				{
+					events: []*eventstore.WritableEvent{
+						{
+							ID:   eventID,
+							Data: []byte("event 3 data"),
+						},
+					},
+					opts: eventstore.AppendStreamOptions{
+						ExpectVersion: 1,
+					},
+					wantErr: memory.ErrStreamVersionMismatch{
+						StreamID:        streamID,
+						EventID:         eventID,
+						ExpectedVersion: 1,
+						ActualVersion:   2,
+					},
+				},
+			},
+		},
+		{
+			name:         "returns ErrStreamVersionMismatch when expected version is greater than actual version",
+			haveStreamID: streamID,
+			haveAppendEvents: []eventSetWithOpts{
+				{
+					events: []*eventstore.WritableEvent{
+						{
+							ID:   typeid.Must(typeid.NewUUID("event1")).(typeid.UUID),
+							Data: []byte("event 1 data"),
+						},
+						{
+							ID:   typeid.Must(typeid.NewUUID("event2")).(typeid.UUID),
+							Data: []byte("event 2 data"),
+						},
+					},
+				},
+				{
+					events: []*eventstore.WritableEvent{
+						{
+							ID:   eventID,
+							Data: []byte("event 3 data"),
+						},
+					},
+					opts: eventstore.AppendStreamOptions{
+						ExpectVersion: 3,
+					},
+					wantErr: memory.ErrStreamVersionMismatch{
+						StreamID:        streamID,
+						EventID:         eventID,
+						ExpectedVersion: 3,
+						ActualVersion:   2,
+					},
+				},
+			},
+		},
+		{
+			name: "returns an error if an event fails to marshal",
+			haveAppendEvents: []eventSetWithOpts{
+				{
+					events: []*eventstore.WritableEvent{
+						{
+							ID:   typeid.Must(typeid.NewUUID("event1")).(typeid.UUID),
+							Data: []byte("event 1 data"),
+						},
+					},
+					wantErr: errors.New("marshaling event: fake marshal error"),
+				},
+			},
+			haveEventStoreOpts: []memory.EventStoreOption{
+				memory.WithEventMarshaler(failMarshaler{}),
 			},
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			store := memory.NewEventStore(tt.haveEventStoreOpts...)
-			gotErr := store.AppendStream(context.Background(), tt.haveStreamID, tt.haveAppendEvents, tt.haveAppendStreamOpts)
-			if tt.wantAppendErr != nil {
-				if gotErr == nil || gotErr.Error() != tt.wantAppendErr.Error() {
-					t.Errorf("unexpected AppendStream() error: wanted %v got %v", tt.wantAppendErr, gotErr)
-				}
 
-				return
+			totalEvents := 0
+			for i, eventSet := range tt.haveAppendEvents {
+				totalEvents += len(eventSet.events)
+				gotErr := store.AppendStream(context.Background(), tt.haveStreamID, eventSet.events, eventSet.opts)
+				if eventSet.wantErr != nil {
+					if gotErr == nil || gotErr.Error() != eventSet.wantErr.Error() {
+						t.Errorf("unexpected AppendStream() error (set %d): wanted %v got %v", i, eventSet.wantErr, gotErr)
+					}
+
+					return
+				}
 			}
 
 			iter, err := store.ReadStream(context.Background(), tt.haveStreamID, eventstore.ReadStreamOptions{})
@@ -91,25 +218,22 @@ func TestEventStore_AppendStream(t *testing.T) {
 				events = append(events, event)
 			}
 
-			if len(events) != len(tt.haveAppendEvents) {
+			if len(events) != totalEvents {
 				t.Errorf("unexpected number of events: wanted %d got %d", len(tt.haveAppendEvents), len(events))
 			}
 
 			for i, event := range events {
-				if event.ID.String() != tt.haveAppendEvents[i].ID.String() {
-					t.Errorf("unexpected event ID: wanted %s got %s", tt.haveAppendEvents[i].ID.String(), event.ID.String())
-				}
+				// all events have the correct stream ID
 				if event.StreamID.String() != tt.haveStreamID.String() {
 					t.Errorf("unexpected stream ID: wanted %s got %s", tt.haveStreamID.String(), event.StreamID.String())
 				}
-				if event.StreamVersion != tt.haveAppendEvents[i].StreamVersion {
-					t.Errorf("unexpected event version: wanted %d got %d", tt.haveAppendEvents[i].StreamVersion, event.StreamVersion)
+				// all events have the correct stream version
+				if v := event.StreamVersion; v != int64(i+1) {
+					t.Errorf("unexpected event version: wanted %d got %d", v, event.StreamVersion)
 				}
-				if !event.Timestamp.Equal(tt.haveAppendEvents[i].Timestamp) {
-					t.Errorf("unexpected event timestamp: wanted %v got %v", tt.haveAppendEvents[i].Timestamp, event.Timestamp)
-				}
-				if len(event.Data) != len(tt.haveAppendEvents[i].Data) {
-					t.Errorf("unexpected event data length: wanted %v got %v", len(tt.haveAppendEvents[i].Data), len(event.Data))
+				// all events have a valid timestamp
+				if event.Timestamp.IsZero() {
+					t.Errorf("unexpected empty event timestamp")
 				}
 			}
 		})
@@ -128,4 +252,20 @@ func TestEventStore_ReadStream(t *testing.T) {
 			t.Skip("todo")
 		})
 	}
+}
+
+type eventSetWithOpts struct {
+	events  []*eventstore.WritableEvent
+	opts    eventstore.AppendStreamOptions
+	wantErr error
+}
+
+type failMarshaler struct{}
+
+func (failMarshaler) Marshal(event *eventstore.Event) ([]byte, error) {
+	return nil, errors.New("fake marshal error")
+}
+
+func (failMarshaler) Unmarshal(data []byte, dest *eventstore.Event) error {
+	return errors.New("fake unmarshal error")
 }

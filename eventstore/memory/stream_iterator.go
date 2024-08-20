@@ -10,7 +10,7 @@ import (
 	"github.com/go-estoria/estoria/typeid"
 )
 
-type StreamIterator struct {
+type streamIterator struct {
 	streamID  typeid.UUID
 	events    []*eventStoreDocument
 	cursor    int64
@@ -20,7 +20,7 @@ type StreamIterator struct {
 	marshaler estoria.Marshaler[eventstore.Event, *eventstore.Event]
 }
 
-func (i *StreamIterator) Next(ctx context.Context) (*eventstore.Event, error) {
+func (i *streamIterator) Next(ctx context.Context) (*eventstore.Event, error) {
 	if i.events == nil {
 		return nil, fmt.Errorf("stream %s has been closed", i.streamID)
 	} else if i.direction == eventstore.Forward && i.cursor >= int64(len(i.events)) {
@@ -48,7 +48,7 @@ func (i *StreamIterator) Next(ctx context.Context) (*eventstore.Event, error) {
 	return event, nil
 }
 
-func (i *StreamIterator) Close(ctx context.Context) error {
+func (i *streamIterator) Close(ctx context.Context) error {
 	i.events = nil
 	return nil
 }

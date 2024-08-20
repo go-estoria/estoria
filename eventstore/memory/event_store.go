@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+	"time"
 
 	"github.com/go-estoria/estoria"
 	"github.com/go-estoria/estoria/eventstore"
@@ -34,7 +35,7 @@ func NewEventStore(opts ...EventStoreOption) *EventStore {
 }
 
 // AppendStream appends events to a stream.
-func (s *EventStore) AppendStream(ctx context.Context, streamID typeid.UUID, events []*eventstore.Event, opts eventstore.AppendStreamOptions) error {
+func (s *EventStore) AppendStream(ctx context.Context, streamID typeid.UUID, events []*eventstore.WritableEvent, opts eventstore.AppendStreamOptions) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -45,16 +46,31 @@ func (s *EventStore) AppendStream(ctx context.Context, streamID typeid.UUID, eve
 	}
 
 	if opts.ExpectVersion > 0 && opts.ExpectVersion != int64(len(stream)) {
-		return eventstore.ErrStreamVersionMismatch
+		return ErrStreamVersionMismatch{
+			StreamID:        streamID,
+			EventID:         events[0].ID,
+			ExpectedVersion: opts.ExpectVersion,
+			ActualVersion:   int64(len(stream)),
+		}
 	}
 
+	preparedEvents := []*eventstore.Event{}
 	tx := []*eventStoreDocument{}
-	for _, event := range events {
+	for i, writableEvent := range events {
+		event := &eventstore.Event{
+			ID:            writableEvent.ID,
+			StreamID:      streamID,
+			StreamVersion: int64(len(stream) + i + 1),
+			Timestamp:     time.Now(),
+			Data:          writableEvent.Data,
+		}
+
 		data, err := s.marshaler.Marshal(event)
 		if err != nil {
 			return fmt.Errorf("marshaling event: %w", err)
 		}
 
+		preparedEvents = append(preparedEvents, event)
 		tx = append(tx, &eventStoreDocument{
 			Data: data,
 		})
@@ -62,7 +78,7 @@ func (s *EventStore) AppendStream(ctx context.Context, streamID typeid.UUID, eve
 
 	if s.outbox != nil {
 		slog.Debug("handling events with outbox", "tx", "inherited", "events", len(tx))
-		if err := s.outbox.HandleEvents(ctx, events); err != nil {
+		if err := s.outbox.HandleEvents(ctx, preparedEvents); err != nil {
 			return fmt.Errorf("handling events: %w", err)
 		}
 	}
@@ -96,7 +112,7 @@ func (s *EventStore) ReadStream(ctx context.Context, streamID typeid.UUID, opts 
 		limit = opts.Count
 	}
 
-	return &StreamIterator{
+	return &streamIterator{
 		streamID:  streamID,
 		events:    stream,
 		cursor:    cursor,
@@ -123,14 +139,26 @@ func WithOutbox(outbox *Outbox) EventStoreOption {
 	}
 }
 
-// ErrEventExists is returned when attempting to append an event that already exists.
-type ErrEventExists struct {
-	EventID typeid.UUID
+// ErrStreamVersionMismatch is returned when the expected stream version does not match the actual stream version.
+type ErrStreamVersionMismatch struct {
+	StreamID        typeid.UUID
+	EventID         typeid.UUID
+	ExpectedVersion int64
+	ActualVersion   int64
 }
 
 // Error returns the error message.
-func (e ErrEventExists) Error() string {
-	return fmt.Sprintf("event already exists: %s", e.EventID)
+func (e ErrStreamVersionMismatch) Error() string {
+	return fmt.Sprintf("stream %s version mismatch for event %s: expected %d, actual %d",
+		e.StreamID,
+		e.EventID,
+		e.ExpectedVersion,
+		e.ActualVersion)
+}
+
+func (e ErrStreamVersionMismatch) Is(err error) bool {
+	_, ok := err.(ErrStreamVersionMismatch)
+	return ok
 }
 
 type eventStoreDocument struct {

@@ -193,7 +193,7 @@ func (s *EventSourcedStore[E]) Save(ctx context.Context, aggregate *Aggregate[E]
 		return nil
 	}
 
-	events := make([]*eventstore.Event, len(unsavedEvents))
+	events := make([]*eventstore.WritableEvent, len(unsavedEvents))
 
 	for i, unsavedEvent := range unsavedEvents {
 		nextVersion := aggregate.Version() + int64(i) + 1
@@ -206,12 +206,9 @@ func (s *EventSourcedStore[E]) Save(ctx context.Context, aggregate *Aggregate[E]
 			return fmt.Errorf("serializing event data: %w", err)
 		}
 
-		events[i] = &eventstore.Event{
-			ID:            unsavedEvent.ID,
-			StreamID:      aggregate.ID(),
-			StreamVersion: nextVersion,
-			Timestamp:     unsavedEvent.Timestamp,
-			Data:          data,
+		events[i] = &eventstore.WritableEvent{
+			ID:   unsavedEvent.ID,
+			Data: data,
 		}
 	}
 
