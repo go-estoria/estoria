@@ -18,22 +18,22 @@ func TestEventStore_NewEventStore(t *testing.T) {
 		wantErr error
 	}{
 		{
-			name: "with default options, creates a new event store without error",
+			name: "with default options, creates a new event store",
 		},
 		{
-			name: "with a non-nil outbox, creates a new event store without error",
+			name: "with a non-nil outbox, creates a new event store",
 			opts: []memory.EventStoreOption{
 				memory.WithOutbox(memory.NewOutbox()),
 			},
 		},
 		{
-			name: "with a non-nil custom marshaler, creates a new event store without error",
+			name: "with a non-nil custom marshaler, creates a new event store",
 			opts: []memory.EventStoreOption{
 				memory.WithEventMarshaler(failMarshaler{}),
 			},
 		},
 		{
-			name: "with a non-nil outbox and custom marshaler, creates a new event store without error",
+			name: "with a non-nil outbox and custom marshaler, creates a new event store",
 			opts: []memory.EventStoreOption{
 				memory.WithOutbox(memory.NewOutbox()),
 				memory.WithEventMarshaler(failMarshaler{}),
@@ -78,77 +78,47 @@ func TestEventStore_AppendStream(t *testing.T) {
 		haveAppendEvents   []eventSetWithOpts
 	}{
 		{
-			name:         "with default options, appends individual events to a stream without error",
+			name:         "with default options, appends individual events to a stream",
 			haveStreamID: streamID,
 			haveAppendEvents: []eventSetWithOpts{
 				{
 					events: []*eventstore.WritableEvent{
-						{
-							ID:   typeid.Must(typeid.NewUUID("event1")).(typeid.UUID),
-							Data: []byte("event 1 data"),
-						},
+						{ID: typeid.Must(typeid.NewUUID("event1")).(typeid.UUID), Data: []byte("event 1 data")},
 					},
 				},
 				{
 					events: []*eventstore.WritableEvent{
-						{
-							ID:   typeid.Must(typeid.NewUUID("event2")).(typeid.UUID),
-							Data: []byte("event 2 data"),
-						},
+						{ID: typeid.Must(typeid.NewUUID("event2")).(typeid.UUID), Data: []byte("event 2 data")},
 					},
 				},
 				{
 					events: []*eventstore.WritableEvent{
-						{
-							ID:   typeid.Must(typeid.NewUUID("event3")).(typeid.UUID),
-							Data: []byte("event 3 data"),
-						},
+						{ID: typeid.Must(typeid.NewUUID("event3")).(typeid.UUID), Data: []byte("event 3 data")},
 					},
 				},
 			},
 		},
 		{
-			name:         "with default options, appends batches of events to a stream without error",
+			name:         "with default options, appends batches of events to a stream",
 			haveStreamID: streamID,
 			haveAppendEvents: []eventSetWithOpts{
 				{
 					events: []*eventstore.WritableEvent{
-						{
-							ID:   typeid.Must(typeid.NewUUID("event1")).(typeid.UUID),
-							Data: []byte("event 1 data"),
-						},
-						{
-							ID:   typeid.Must(typeid.NewUUID("event2")).(typeid.UUID),
-							Data: []byte("event 2 data"),
-						},
+						{ID: typeid.Must(typeid.NewUUID("event1")).(typeid.UUID), Data: []byte("event 1 data")},
+						{ID: typeid.Must(typeid.NewUUID("event2")).(typeid.UUID), Data: []byte("event 2 data")},
 					},
 				},
 				{
 					events: []*eventstore.WritableEvent{
-						{
-							ID:   typeid.Must(typeid.NewUUID("event1")).(typeid.UUID),
-							Data: []byte("event 3 data"),
-						},
-						{
-							ID:   typeid.Must(typeid.NewUUID("event2")).(typeid.UUID),
-							Data: []byte("event 4 data"),
-						},
-						{
-							ID:   typeid.Must(typeid.NewUUID("event2")).(typeid.UUID),
-							Data: []byte("event 5 data"),
-						},
+						{ID: typeid.Must(typeid.NewUUID("event1")).(typeid.UUID), Data: []byte("event 3 data")},
+						{ID: typeid.Must(typeid.NewUUID("event2")).(typeid.UUID), Data: []byte("event 4 data")},
+						{ID: typeid.Must(typeid.NewUUID("event2")).(typeid.UUID), Data: []byte("event 5 data")},
 					},
 				},
 				{
 					events: []*eventstore.WritableEvent{
-						{
-							ID:   typeid.Must(typeid.NewUUID("event1")).(typeid.UUID),
-							Data: []byte("event 6 data"),
-						},
-						{
-							ID:   typeid.Must(typeid.NewUUID("event2")).(typeid.UUID),
-							Data: []byte("event 7 data"),
-						},
+						{ID: typeid.Must(typeid.NewUUID("event1")).(typeid.UUID), Data: []byte("event 6 data")},
+						{ID: typeid.Must(typeid.NewUUID("event2")).(typeid.UUID), Data: []byte("event 7 data")},
 					},
 				},
 			},
@@ -162,22 +132,13 @@ func TestEventStore_AppendStream(t *testing.T) {
 			haveAppendEvents: []eventSetWithOpts{
 				{
 					events: []*eventstore.WritableEvent{
-						{
-							ID:   typeid.Must(typeid.NewUUID("event1")).(typeid.UUID),
-							Data: []byte("event 1 data"),
-						},
+						{ID: typeid.Must(typeid.NewUUID("event1")).(typeid.UUID), Data: []byte("event 1 data")},
 					},
 				},
 				{
 					events: []*eventstore.WritableEvent{
-						{
-							ID:   typeid.Must(typeid.NewUUID("event2")).(typeid.UUID),
-							Data: []byte("event 2 data"),
-						},
-						{
-							ID:   typeid.Must(typeid.NewUUID("event3")).(typeid.UUID),
-							Data: []byte("event 3 data"),
-						},
+						{ID: typeid.Must(typeid.NewUUID("event2")).(typeid.UUID), Data: []byte("event 2 data")},
+						{ID: typeid.Must(typeid.NewUUID("event3")).(typeid.UUID), Data: []byte("event 3 data")},
 					},
 				},
 			},
@@ -188,22 +149,13 @@ func TestEventStore_AppendStream(t *testing.T) {
 			haveAppendEvents: []eventSetWithOpts{
 				{
 					events: []*eventstore.WritableEvent{
-						{
-							ID:   typeid.Must(typeid.NewUUID("event1")).(typeid.UUID),
-							Data: []byte("event 1 data"),
-						},
-						{
-							ID:   typeid.Must(typeid.NewUUID("event2")).(typeid.UUID),
-							Data: []byte("event 2 data"),
-						},
+						{ID: typeid.Must(typeid.NewUUID("event1")).(typeid.UUID), Data: []byte("event 1 data")},
+						{ID: typeid.Must(typeid.NewUUID("event2")).(typeid.UUID), Data: []byte("event 2 data")},
 					},
 				},
 				{
 					events: []*eventstore.WritableEvent{
-						{
-							ID:   eventID,
-							Data: []byte("event 3 data"),
-						},
+						{ID: eventID, Data: []byte("event 3 data")},
 					},
 					opts: eventstore.AppendStreamOptions{
 						ExpectVersion: 1,
@@ -223,22 +175,13 @@ func TestEventStore_AppendStream(t *testing.T) {
 			haveAppendEvents: []eventSetWithOpts{
 				{
 					events: []*eventstore.WritableEvent{
-						{
-							ID:   typeid.Must(typeid.NewUUID("event1")).(typeid.UUID),
-							Data: []byte("event 1 data"),
-						},
-						{
-							ID:   typeid.Must(typeid.NewUUID("event2")).(typeid.UUID),
-							Data: []byte("event 2 data"),
-						},
+						{ID: typeid.Must(typeid.NewUUID("event1")).(typeid.UUID), Data: []byte("event 1 data")},
+						{ID: typeid.Must(typeid.NewUUID("event2")).(typeid.UUID), Data: []byte("event 2 data")},
 					},
 				},
 				{
 					events: []*eventstore.WritableEvent{
-						{
-							ID:   eventID,
-							Data: []byte("event 3 data"),
-						},
+						{ID: eventID, Data: []byte("event 3 data")},
 					},
 					opts: eventstore.AppendStreamOptions{
 						ExpectVersion: 3,
@@ -257,10 +200,7 @@ func TestEventStore_AppendStream(t *testing.T) {
 			haveAppendEvents: []eventSetWithOpts{
 				{
 					events: []*eventstore.WritableEvent{
-						{
-							ID:   typeid.Must(typeid.NewUUID("event1")).(typeid.UUID),
-							Data: []byte("event 1 data"),
-						},
+						{ID: typeid.Must(typeid.NewUUID("event1")).(typeid.UUID), Data: []byte("event 1 data")},
 					},
 					wantErr: errors.New("marshaling event: fake marshal error"),
 				},
@@ -330,14 +270,220 @@ func TestEventStore_AppendStream(t *testing.T) {
 
 func TestEventStore_ReadStream(t *testing.T) {
 	for _, tt := range []struct {
-		name string
+		name               string
+		haveEvents         []*eventstore.WritableEvent
+		haveStreamID       typeid.UUID
+		haveReadStreamOpts eventstore.ReadStreamOptions
+		wantEvents         []*eventstore.Event
+		wantErr            error
 	}{
 		{
-			name: "",
+			name: "returns a stream iterator for an existing stream",
+			haveEvents: []*eventstore.WritableEvent{
+				{ID: typeid.Must(typeid.NewUUID("event1")).(typeid.UUID), Data: []byte("event 1 data")},
+				{ID: typeid.Must(typeid.NewUUID("event2")).(typeid.UUID), Data: []byte("event 2 data")},
+				{ID: typeid.Must(typeid.NewUUID("event3")).(typeid.UUID), Data: []byte("event 3 data")},
+			},
+			haveStreamID: typeid.Must(typeid.NewUUID("streamtype")).(typeid.UUID),
+			wantEvents: []*eventstore.Event{
+				{StreamVersion: 1, Data: []byte("event 1 data")},
+				{StreamVersion: 2, Data: []byte("event 2 data")},
+				{StreamVersion: 3, Data: []byte("event 3 data")},
+			},
+		},
+		{
+			name: "returns a stream iterator for an existing stream with an initial offset",
+			haveEvents: []*eventstore.WritableEvent{
+				{ID: typeid.Must(typeid.NewUUID("event1")).(typeid.UUID), Data: []byte("event 1 data")},
+				{ID: typeid.Must(typeid.NewUUID("event2")).(typeid.UUID), Data: []byte("event 2 data")},
+				{ID: typeid.Must(typeid.NewUUID("event3")).(typeid.UUID), Data: []byte("event 3 data")},
+			},
+			haveStreamID: typeid.Must(typeid.NewUUID("streamtype")).(typeid.UUID),
+			haveReadStreamOpts: eventstore.ReadStreamOptions{
+				Offset: 1,
+			},
+			wantEvents: []*eventstore.Event{
+				{StreamVersion: 2, Data: []byte("event 2 data")},
+				{StreamVersion: 3, Data: []byte("event 3 data")},
+			},
+		},
+		{
+			name: "returns a stream iterator for an existing stream with a maximum count",
+			haveEvents: []*eventstore.WritableEvent{
+				{ID: typeid.Must(typeid.NewUUID("event1")).(typeid.UUID), Data: []byte("event 1 data")},
+				{ID: typeid.Must(typeid.NewUUID("event2")).(typeid.UUID), Data: []byte("event 2 data")},
+				{ID: typeid.Must(typeid.NewUUID("event3")).(typeid.UUID), Data: []byte("event 3 data")},
+			},
+			haveStreamID: typeid.Must(typeid.NewUUID("streamtype")).(typeid.UUID),
+			haveReadStreamOpts: eventstore.ReadStreamOptions{
+				Count: 2,
+			},
+			wantEvents: []*eventstore.Event{
+				{StreamVersion: 1, Data: []byte("event 1 data")},
+				{StreamVersion: 2, Data: []byte("event 2 data")},
+			},
+		},
+		{
+			name: "returns a stream iterator for an existing stream with an initial offset and maximum count",
+			haveEvents: []*eventstore.WritableEvent{
+				{ID: typeid.Must(typeid.NewUUID("event1")).(typeid.UUID), Data: []byte("event 1 data")},
+				{ID: typeid.Must(typeid.NewUUID("event2")).(typeid.UUID), Data: []byte("event 2 data")},
+				{ID: typeid.Must(typeid.NewUUID("event3")).(typeid.UUID), Data: []byte("event 3 data")},
+				{ID: typeid.Must(typeid.NewUUID("event4")).(typeid.UUID), Data: []byte("event 4 data")},
+				{ID: typeid.Must(typeid.NewUUID("event5")).(typeid.UUID), Data: []byte("event 5 data")},
+			},
+			haveStreamID: typeid.Must(typeid.NewUUID("streamtype")).(typeid.UUID),
+			haveReadStreamOpts: eventstore.ReadStreamOptions{
+				Offset: 2,
+				Count:  2,
+			},
+			wantEvents: []*eventstore.Event{
+				{StreamVersion: 3, Data: []byte("event 3 data")},
+				{StreamVersion: 4, Data: []byte("event 4 data")},
+			},
+		},
+		{
+			name: "returns a stream iterator for an existing stream in reverse order",
+			haveEvents: []*eventstore.WritableEvent{
+				{ID: typeid.Must(typeid.NewUUID("event1")).(typeid.UUID), Data: []byte("event 1 data")},
+				{ID: typeid.Must(typeid.NewUUID("event2")).(typeid.UUID), Data: []byte("event 2 data")},
+				{ID: typeid.Must(typeid.NewUUID("event3")).(typeid.UUID), Data: []byte("event 3 data")},
+			},
+			haveStreamID: typeid.Must(typeid.NewUUID("streamtype")).(typeid.UUID),
+			haveReadStreamOpts: eventstore.ReadStreamOptions{
+				Direction: eventstore.Reverse,
+			},
+			wantEvents: []*eventstore.Event{
+				{StreamVersion: 3, Data: []byte("event 3 data")},
+				{StreamVersion: 2, Data: []byte("event 2 data")},
+				{StreamVersion: 1, Data: []byte("event 1 data")},
+			},
+		},
+		{
+			name: "returns a stream iterator for an existing stream in reverse order with an initial offset",
+			haveEvents: []*eventstore.WritableEvent{
+				{ID: typeid.Must(typeid.NewUUID("event1")).(typeid.UUID), Data: []byte("event 1 data")},
+				{ID: typeid.Must(typeid.NewUUID("event2")).(typeid.UUID), Data: []byte("event 2 data")},
+				{ID: typeid.Must(typeid.NewUUID("event3")).(typeid.UUID), Data: []byte("event 3 data")},
+			},
+			haveStreamID: typeid.Must(typeid.NewUUID("streamtype")).(typeid.UUID),
+			haveReadStreamOpts: eventstore.ReadStreamOptions{
+				Direction: eventstore.Reverse,
+				Offset:    1,
+			},
+			wantEvents: []*eventstore.Event{
+				{StreamVersion: 2, Data: []byte("event 2 data")},
+				{StreamVersion: 1, Data: []byte("event 1 data")},
+			},
+		},
+		{
+			name: "returns a stream iterator for an existing stream in reverse order with a maximum count",
+			haveEvents: []*eventstore.WritableEvent{
+				{ID: typeid.Must(typeid.NewUUID("event1")).(typeid.UUID), Data: []byte("event 1 data")},
+				{ID: typeid.Must(typeid.NewUUID("event2")).(typeid.UUID), Data: []byte("event 2 data")},
+				{ID: typeid.Must(typeid.NewUUID("event3")).(typeid.UUID), Data: []byte("event 3 data")},
+			},
+			haveStreamID: typeid.Must(typeid.NewUUID("streamtype")).(typeid.UUID),
+			haveReadStreamOpts: eventstore.ReadStreamOptions{
+				Direction: eventstore.Reverse,
+				Count:     2,
+			},
+			wantEvents: []*eventstore.Event{
+				{StreamVersion: 3, Data: []byte("event 3 data")},
+				{StreamVersion: 2, Data: []byte("event 2 data")},
+			},
+		},
+		{
+			name: "returns a stream iterator for an existing stream in reverse order with an initial offset and maximum count",
+			haveEvents: []*eventstore.WritableEvent{
+				{ID: typeid.Must(typeid.NewUUID("event1")).(typeid.UUID), Data: []byte("event 1 data")},
+				{ID: typeid.Must(typeid.NewUUID("event2")).(typeid.UUID), Data: []byte("event 2 data")},
+				{ID: typeid.Must(typeid.NewUUID("event3")).(typeid.UUID), Data: []byte("event 3 data")},
+				{ID: typeid.Must(typeid.NewUUID("event4")).(typeid.UUID), Data: []byte("event 4 data")},
+				{ID: typeid.Must(typeid.NewUUID("event5")).(typeid.UUID), Data: []byte("event 5 data")},
+			},
+			haveStreamID: typeid.Must(typeid.NewUUID("streamtype")).(typeid.UUID),
+			haveReadStreamOpts: eventstore.ReadStreamOptions{
+				Direction: eventstore.Reverse,
+				Offset:    2,
+				Count:     2,
+			},
+			wantEvents: []*eventstore.Event{
+				{StreamVersion: 3, Data: []byte("event 3 data")},
+				{StreamVersion: 2, Data: []byte("event 2 data")},
+			},
+		},
+		{
+			name:         "returns ErrStreamNotFound for a non-existent stream",
+			haveStreamID: typeid.Must(typeid.NewUUID("streamtype")).(typeid.UUID),
+			wantEvents: []*eventstore.Event{
+				{StreamVersion: 1, Data: []byte("event 1 data")},
+				{StreamVersion: 2, Data: []byte("event 2 data")},
+				{StreamVersion: 3, Data: []byte("event 3 data")},
+			},
+			wantErr: eventstore.ErrStreamNotFound,
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			t.Skip("todo")
+			store, err := memory.NewEventStore()
+			if err != nil {
+				t.Fatalf("NewEventStore() error: %v", err)
+			}
+
+			if err = store.AppendStream(context.Background(), tt.haveStreamID, tt.haveEvents, eventstore.AppendStreamOptions{}); err != nil {
+				t.Fatalf("AppendStream() error: %v", err)
+			}
+
+			iter, err := store.ReadStream(context.Background(), tt.haveStreamID, tt.haveReadStreamOpts)
+			if tt.wantErr != nil {
+				if err == nil || err.Error() != tt.wantErr.Error() {
+					t.Errorf("unexpected ReadStream() error: wanted %v got %v", tt.wantErr, err)
+				}
+
+				return
+			}
+
+			if err != nil {
+				t.Fatalf("ReadStream() error: %v", err)
+			}
+
+			var events []*eventstore.Event
+			for {
+				event, err := iter.Next(context.Background())
+				if err == io.EOF {
+					break
+				} else if err != nil {
+					t.Fatalf("Next() error: %v", err)
+				}
+
+				events = append(events, event)
+			}
+
+			if len(events) != len(tt.wantEvents) {
+				t.Fatalf("unexpected number of events: wanted %d got %d", len(tt.wantEvents), len(events))
+			}
+
+			for i, event := range events {
+
+				if len(event.Data) != len(tt.wantEvents[i].Data) {
+					t.Errorf("unexpected event data: wanted %s got %s", tt.wantEvents[i].Data, event.Data)
+				}
+
+				// all events have the correct stream ID
+				if event.StreamID.String() != tt.haveStreamID.String() {
+					t.Errorf("unexpected stream ID: wanted %s got %s", tt.haveStreamID.String(), event.StreamID.String())
+				}
+
+				// all events have the correct stream version
+				if event.StreamVersion != tt.wantEvents[i].StreamVersion {
+					t.Errorf("unexpected event version: wanted %d got %d", tt.wantEvents[i].StreamVersion, event.StreamVersion)
+				}
+
+				// all events have a valid timestamp
+				if event.Timestamp.IsZero() {
+					t.Errorf("unexpected empty event timestamp")
+				}
+			}
 		})
 	}
 }
