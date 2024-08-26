@@ -53,7 +53,7 @@ func NewSnapshottingStore[E estoria.Entity](
 	store SnapshotStore,
 	policy SnapshotPolicy,
 	opts ...SnapshottingStoreOption[E],
-) *SnapshottingStore[E] {
+) (*SnapshottingStore[E], error) {
 	aggregateStore := &SnapshottingStore[E]{
 		inner:     inner,
 		reader:    store,
@@ -64,10 +64,12 @@ func NewSnapshottingStore[E estoria.Entity](
 	}
 
 	for _, opt := range opts {
-		opt(aggregateStore)
+		if err := opt(aggregateStore); err != nil {
+			return nil, fmt.Errorf("applying option: %w", err)
+		}
 	}
 
-	return aggregateStore
+	return aggregateStore, nil
 }
 
 // NewAggregate creates a new aggregate.
