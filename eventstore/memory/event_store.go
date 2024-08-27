@@ -2,6 +2,7 @@ package memory
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sync"
@@ -29,7 +30,7 @@ func NewEventStore(opts ...EventStoreOption) (*EventStore, error) {
 
 	for _, opt := range opts {
 		if err := opt(eventStore); err != nil {
-			return nil, fmt.Errorf("applying option: %w", err)
+			return nil, eventstore.InitializationError{Err: fmt.Errorf("applying option: %w", err)}
 		}
 	}
 
@@ -48,7 +49,7 @@ func (s *EventStore) AppendStream(ctx context.Context, streamID typeid.UUID, eve
 	}
 
 	if opts.ExpectVersion > 0 && opts.ExpectVersion != int64(len(stream)) {
-		return ErrStreamVersionMismatch{
+		return eventstore.StreamVersionMismatchError{
 			StreamID:        streamID,
 			EventID:         events[0].ID,
 			ExpectedVersion: opts.ExpectVersion,
@@ -70,7 +71,7 @@ func (s *EventStore) AppendStream(ctx context.Context, streamID typeid.UUID, eve
 
 		data, err := s.marshaler.Marshal(event)
 		if err != nil {
-			return fmt.Errorf("marshaling event: %w", err)
+			return eventstore.EventMarshalingError{StreamID: streamID, EventID: event.ID, Err: err}
 		}
 
 		preparedEvents = append(preparedEvents, event)
@@ -90,13 +91,13 @@ func (s *EventStore) AppendStream(ctx context.Context, streamID typeid.UUID, eve
 }
 
 // ReadStream reads events from a stream.
-func (s *EventStore) ReadStream(ctx context.Context, streamID typeid.UUID, opts eventstore.ReadStreamOptions) (eventstore.StreamIterator, error) {
+func (s *EventStore) ReadStream(_ context.Context, streamID typeid.UUID, opts eventstore.ReadStreamOptions) (eventstore.StreamIterator, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
 	stream, ok := s.events[streamID.String()]
 	if !ok || len(stream) == 0 {
-		return nil, eventstore.ErrStreamNotFound
+		return nil, eventstore.StreamNotFoundError{StreamID: streamID}
 	}
 
 	cursor := int64(0)
@@ -134,7 +135,7 @@ type EventStoreOption func(*EventStore) error
 func WithEventMarshaler(marshaler estoria.Marshaler[eventstore.Event, *eventstore.Event]) EventStoreOption {
 	return func(s *EventStore) error {
 		if marshaler == nil {
-			return fmt.Errorf("marshaler cannot be nil")
+			return errors.New("marshaler cannot be nil")
 		}
 
 		s.marshaler = marshaler
@@ -146,34 +147,12 @@ func WithEventMarshaler(marshaler estoria.Marshaler[eventstore.Event, *eventstor
 func WithOutbox(outbox *Outbox) EventStoreOption {
 	return func(s *EventStore) error {
 		if outbox == nil {
-			return fmt.Errorf("outbox cannot be nil")
+			return errors.New("outbox cannot be nil")
 		}
 
 		s.outbox = outbox
 		return nil
 	}
-}
-
-// ErrStreamVersionMismatch is returned when the expected stream version does not match the actual stream version.
-type ErrStreamVersionMismatch struct {
-	StreamID        typeid.UUID
-	EventID         typeid.UUID
-	ExpectedVersion int64
-	ActualVersion   int64
-}
-
-// Error returns the error message.
-func (e ErrStreamVersionMismatch) Error() string {
-	return fmt.Sprintf("stream %s version mismatch for event %s: expected %d, actual %d",
-		e.StreamID,
-		e.EventID,
-		e.ExpectedVersion,
-		e.ActualVersion)
-}
-
-func (e ErrStreamVersionMismatch) Is(err error) bool {
-	_, ok := err.(ErrStreamVersionMismatch)
-	return ok
 }
 
 type eventStoreDocument struct {

@@ -3,7 +3,6 @@ package memory_test
 import (
 	"context"
 	"errors"
-	"fmt"
 	"io"
 	"testing"
 
@@ -44,12 +43,12 @@ func TestEventStore_NewEventStore(t *testing.T) {
 		{
 			name:    "returns an error if a nil outbox is provided",
 			opts:    []memory.EventStoreOption{memory.WithOutbox(nil)},
-			wantErr: errors.New("applying option: outbox cannot be nil"),
+			wantErr: eventstore.InitializationError{Err: errors.New("applying option: outbox cannot be nil")},
 		},
 		{
 			name:    "returns an error if a nil marshaler is provided",
 			opts:    []memory.EventStoreOption{memory.WithEventMarshaler(nil)},
-			wantErr: errors.New("applying option: marshaler cannot be nil"),
+			wantErr: eventstore.InitializationError{Err: errors.New("applying option: marshaler cannot be nil")},
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
@@ -200,7 +199,7 @@ func TestEventStore_AppendStream(t *testing.T) {
 			},
 		},
 		{
-			name:         "returns ErrStreamVersionMismatch when expected version is less than actual version",
+			name:         "returns StreamVersionMismatchError when expected version is less than actual version",
 			haveStreamID: streamIDs[0],
 			haveEvents: []eventsForStream{
 				{
@@ -220,7 +219,7 @@ func TestEventStore_AppendStream(t *testing.T) {
 			haveAppendOpts: eventstore.AppendStreamOptions{
 				ExpectVersion: 1,
 			},
-			wantErr: memory.ErrStreamVersionMismatch{
+			wantErr: eventstore.StreamVersionMismatchError{
 				StreamID:        streamIDs[0],
 				EventID:         eventIDs[1],
 				ExpectedVersion: 1,
@@ -228,7 +227,7 @@ func TestEventStore_AppendStream(t *testing.T) {
 			},
 		},
 		{
-			name: "returns ErrStreamVersionMismatch when expected version is greater than actual version",
+			name: "returns StreamVersionMismatchError when expected version is greater than actual version",
 			haveEvents: []eventsForStream{
 				{
 					streamID: streamIDs[0],
@@ -247,7 +246,7 @@ func TestEventStore_AppendStream(t *testing.T) {
 			haveAppendOpts: eventstore.AppendStreamOptions{
 				ExpectVersion: 4,
 			},
-			wantErr: memory.ErrStreamVersionMismatch{
+			wantErr: eventstore.StreamVersionMismatchError{
 				StreamID:        streamIDs[0],
 				EventID:         eventIDs[3],
 				ExpectedVersion: 4,
@@ -259,10 +258,14 @@ func TestEventStore_AppendStream(t *testing.T) {
 			haveEventStoreOpts: []memory.EventStoreOption{
 				memory.WithEventMarshaler(failMarshaler{}),
 			},
+			haveStreamID: streamIDs[0],
 			haveAppendEvents: []*eventstore.WritableEvent{
 				{ID: eventIDs[0], Data: []byte("event 1 data")},
 			},
-			wantErr: errors.New("marshaling event: fake marshal error"),
+			wantErr: eventstore.EventMarshalingError{
+				StreamID: streamIDs[0],
+				Err:      errors.New("fake marshal error"),
+			},
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
@@ -287,6 +290,35 @@ func TestEventStore_AppendStream(t *testing.T) {
 			if tt.wantErr != nil {
 				if gotErr == nil || gotErr.Error() != tt.wantErr.Error() {
 					t.Errorf("unexpected AppendStream() error: wanted %v got %v", tt.wantErr, gotErr)
+				}
+
+				switch err := tt.wantErr.(type) {
+				case eventstore.InitializationError:
+					t.Logf("InitializationError: %v", err)
+				case eventstore.StreamVersionMismatchError:
+					t.Logf("StreamVersionMismatchError: %v", err)
+					if err.StreamID.String() != tt.haveStreamID.String() {
+						t.Errorf("unexpected stream ID: wanted %s got %s", tt.haveStreamID.String(), err.StreamID.String())
+					}
+					if err.EventID.String() != tt.haveAppendEvents[0].ID.String() {
+						t.Errorf("unexpected event ID: wanted %s got %s", tt.haveAppendEvents[0].ID.String(), err.EventID.String())
+					}
+					if err.ExpectedVersion != tt.haveAppendOpts.ExpectVersion {
+						t.Errorf("unexpected expected version: wanted %d got %d", tt.haveAppendOpts.ExpectVersion, err.ExpectedVersion)
+					}
+					if err.ActualVersion != int64(totalEvents) {
+						t.Errorf("unexpected actual version: wanted %d got %d", totalEvents, err.ActualVersion)
+					}
+				case eventstore.EventMarshalingError:
+					t.Logf("EventMarshalingError: %v", err)
+					if err.StreamID.String() != tt.haveStreamID.String() {
+						t.Errorf("unexpected stream ID: wanted %s got %s", tt.haveStreamID.String(), err.StreamID.String())
+					}
+				case eventstore.EventUnmarshalingError:
+					t.Logf("EventUnmarshalingError: %v", err)
+					if err.StreamID.String() != tt.haveStreamID.String() {
+						t.Errorf("unexpected stream ID: wanted %s got %s", tt.haveStreamID.String(), err.StreamID.String())
+					}
 				}
 
 				return
@@ -535,9 +567,9 @@ func TestEventStore_ReadStream(t *testing.T) {
 			},
 		},
 		{
-			name:         "returns ErrStreamNotFound for a non-existent stream",
-			haveStreamID: typeid.Must(typeid.NewUUID("streamtype")).(typeid.UUID),
-			wantErr:      eventstore.ErrStreamNotFound,
+			name:         "returns StreamNotFoundError for a non-existent stream",
+			haveStreamID: streamIDs[0],
+			wantErr:      eventstore.StreamNotFoundError{StreamID: streamIDs[0]},
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
@@ -557,6 +589,14 @@ func TestEventStore_ReadStream(t *testing.T) {
 			if tt.wantErr != nil {
 				if err == nil || err.Error() != tt.wantErr.Error() {
 					t.Errorf("unexpected ReadStream() error: wanted %v got %v", tt.wantErr, err)
+				}
+
+				switch err := tt.wantErr.(type) {
+				case eventstore.StreamNotFoundError:
+					t.Logf("StreamNotFoundError: %v", err)
+					if err.StreamID.String() != tt.haveStreamID.String() {
+						t.Errorf("unexpected stream ID: wanted %s got %s", tt.haveStreamID.String(), err.StreamID.String())
+					}
 				}
 
 				return
@@ -620,27 +660,15 @@ func TestEventStore_ReadStream(t *testing.T) {
 
 type failMarshaler struct{}
 
-func (failMarshaler) Marshal(event *eventstore.Event) ([]byte, error) {
+func (failMarshaler) Marshal(_ *eventstore.Event) ([]byte, error) {
 	return nil, errors.New("fake marshal error")
 }
 
-func (failMarshaler) Unmarshal(data []byte, dest *eventstore.Event) error {
+func (failMarshaler) Unmarshal(_ []byte, _ *eventstore.Event) error {
 	return errors.New("fake unmarshal error")
 }
 
 type eventsForStream struct {
 	streamID typeid.UUID
 	events   []*eventstore.WritableEvent
-}
-
-func randomEvents(count int) []*eventstore.WritableEvent {
-	events := make([]*eventstore.WritableEvent, count)
-	for i := range count {
-		events[i] = &eventstore.WritableEvent{
-			ID:   typeid.Must(typeid.NewUUID(fmt.Sprintf("eventtype%d", i))).(typeid.UUID),
-			Data: []byte(fmt.Sprintf("event data %d", i)),
-		}
-	}
-
-	return events
 }

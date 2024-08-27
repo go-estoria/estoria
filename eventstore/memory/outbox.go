@@ -67,7 +67,7 @@ func (o *Outbox) HandleEvents(_ context.Context, events []*eventstore.Event) {
 }
 
 // MarkHandled updates the handler result for the outbox item.
-func (o *Outbox) MarkHandled(ctx context.Context, itemID uuid.UUID, result outbox.HandlerResult) error {
+func (o *Outbox) MarkHandled(_ context.Context, itemID uuid.UUID, result outbox.HandlerResult) error {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 
@@ -104,7 +104,7 @@ type OutboxIterator struct {
 }
 
 // Next returns the next outbox entry.
-func (i *OutboxIterator) Next(ctx context.Context) (outbox.OutboxItem, error) {
+func (i *OutboxIterator) Next(_ context.Context) (outbox.OutboxItem, error) {
 	i.outbox.mu.Lock()
 	defer i.outbox.mu.Unlock()
 
@@ -129,7 +129,6 @@ type outboxItem struct {
 	eventID   typeid.UUID
 	eventData []byte
 	handlers  outbox.HandlerResultMap
-	mu        sync.RWMutex
 }
 
 func (e *outboxItem) ID() uuid.UUID {

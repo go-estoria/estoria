@@ -2,7 +2,7 @@ package eventstore
 
 import (
 	"context"
-	"errors"
+	"fmt"
 	"time"
 
 	"github.com/go-estoria/estoria/typeid"
@@ -75,9 +75,6 @@ type AppendStreamOptions struct {
 	ExpectVersion int64
 }
 
-// ErrStreamVersionMismatch is returned when the expected stream version does not match the actual stream version.
-var ErrStreamVersionMismatch = errors.New("stream version mismatch")
-
 // An Event is an event that has been read from an event store.
 type Event struct {
 	ID            typeid.UUID
@@ -93,5 +90,63 @@ type WritableEvent struct {
 	Data []byte
 }
 
-// ErrStreamNotFound is returned when a stream is not found.
-var ErrStreamNotFound = errors.New("stream not found")
+type StreamNotFoundError struct {
+	StreamID typeid.UUID
+}
+
+func (e StreamNotFoundError) Error() string {
+	return "stream not found: " + e.StreamID.String()
+}
+
+type EventMarshalingError struct {
+	StreamID typeid.UUID
+	EventID  typeid.UUID
+	Err      error
+}
+
+func (e EventMarshalingError) Error() string {
+	return "marshaling event: " + e.Err.Error()
+}
+
+type EventUnmarshalingError struct {
+	StreamID typeid.UUID
+	EventID  typeid.UUID
+	Err      error
+}
+
+func (e EventUnmarshalingError) Error() string {
+	return "unmarshaling event: " + e.Err.Error()
+}
+
+// StreamVersionMismatchError is returned when the expected stream version does not match the actual stream version.
+type StreamVersionMismatchError struct {
+	StreamID        typeid.UUID
+	EventID         typeid.UUID
+	ExpectedVersion int64
+	ActualVersion   int64
+}
+
+// Error returns the error message.
+func (e StreamVersionMismatchError) Error() string {
+	return fmt.Sprintf("stream version mismatch: expected version %d, got version %d",
+		e.ExpectedVersion,
+		e.ActualVersion)
+}
+
+// InitializationError is returned when an event store fails to initialize.
+type InitializationError struct {
+	Err error
+}
+
+// Error returns the error message.
+func (e InitializationError) Error() string {
+	return "initializing event store: " + e.Err.Error()
+}
+
+type StreamIteratorClosedError struct {
+	StreamID typeid.UUID
+}
+
+func (e StreamIteratorClosedError) Error() string {
+	return "stream is closed: " + e.StreamID.String()
+}

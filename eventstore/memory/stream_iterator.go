@@ -2,7 +2,6 @@ package memory
 
 import (
 	"context"
-	"fmt"
 	"io"
 
 	"github.com/go-estoria/estoria"
@@ -21,13 +20,14 @@ type streamIterator struct {
 }
 
 func (i *streamIterator) Next(_ context.Context) (*eventstore.Event, error) {
-	if i.events == nil {
-		return nil, fmt.Errorf("stream %s has been closed", i.streamID)
-	} else if i.direction == eventstore.Forward && i.cursor >= int64(len(i.events)) {
+	switch {
+	case i == nil, i.events == nil:
+		return nil, eventstore.StreamIteratorClosedError{StreamID: i.streamID}
+	case i.direction == eventstore.Forward && i.cursor >= int64(len(i.events)):
 		return nil, io.EOF
-	} else if i.direction == eventstore.Reverse && i.cursor < 0 {
+	case i.direction == eventstore.Reverse && i.cursor < 0:
 		return nil, io.EOF
-	} else if i.limit > 0 && i.retrieved >= i.limit {
+	case i.limit > 0 && i.retrieved >= i.limit:
 		return nil, io.EOF
 	}
 
@@ -43,13 +43,13 @@ func (i *streamIterator) Next(_ context.Context) (*eventstore.Event, error) {
 
 	event := &eventstore.Event{}
 	if err := i.marshaler.Unmarshal(doc.Data, event); err != nil {
-		return nil, err
+		return nil, eventstore.EventUnmarshalingError{StreamID: i.streamID, Err: err}
 	}
 
 	return event, nil
 }
 
-func (i *streamIterator) Close(ctx context.Context) error {
+func (i *streamIterator) Close(_ context.Context) error {
 	i.events = nil
 	return nil
 }
