@@ -91,6 +91,9 @@ func (s *EventStore) AppendStream(ctx context.Context, streamID typeid.UUID, eve
 
 // ReadStream reads events from a stream.
 func (s *EventStore) ReadStream(ctx context.Context, streamID typeid.UUID, opts eventstore.ReadStreamOptions) (eventstore.StreamIterator, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
 	stream, ok := s.events[streamID.String()]
 	if !ok || len(stream) == 0 {
 		return nil, eventstore.ErrStreamNotFound
