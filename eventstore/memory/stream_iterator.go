@@ -20,7 +20,7 @@ type streamIterator struct {
 	marshaler estoria.Marshaler[eventstore.Event, *eventstore.Event]
 }
 
-func (i *streamIterator) Next(ctx context.Context) (*eventstore.Event, error) {
+func (i *streamIterator) Next(_ context.Context) (*eventstore.Event, error) {
 	if i.events == nil {
 		return nil, fmt.Errorf("stream %s has been closed", i.streamID)
 	} else if i.direction == eventstore.Forward && i.cursor >= int64(len(i.events)) {
@@ -32,6 +32,7 @@ func (i *streamIterator) Next(ctx context.Context) (*eventstore.Event, error) {
 	}
 
 	doc := i.events[i.cursor]
+
 	if i.direction == eventstore.Reverse {
 		i.cursor--
 	} else {

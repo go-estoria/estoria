@@ -13,6 +13,7 @@ import (
 )
 
 func TestEventStore_NewEventStore(t *testing.T) {
+	t.Parallel()
 	for _, tt := range []struct {
 		name    string
 		opts    []memory.EventStoreOption
@@ -52,6 +53,7 @@ func TestEventStore_NewEventStore(t *testing.T) {
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			gotStore, gotErr := memory.NewEventStore(tt.opts...)
 			if tt.wantErr != nil {
 				if gotErr == nil || gotErr.Error() != tt.wantErr.Error() {
@@ -264,6 +266,7 @@ func TestEventStore_AppendStream(t *testing.T) {
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			store, err := memory.NewEventStore(tt.haveEventStoreOpts...)
 			if err != nil {
 				t.Fatalf("NewEventStore() error: %v", err)
@@ -538,6 +541,7 @@ func TestEventStore_ReadStream(t *testing.T) {
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			store, err := memory.NewEventStore()
 			if err != nil {
 				t.Fatalf("NewEventStore() error: %v", err)
@@ -631,7 +635,7 @@ type eventsForStream struct {
 
 func randomEvents(count int) []*eventstore.WritableEvent {
 	events := make([]*eventstore.WritableEvent, count)
-	for i := 0; i < count; i++ {
+	for i := range count {
 		events[i] = &eventstore.WritableEvent{
 			ID:   typeid.Must(typeid.NewUUID(fmt.Sprintf("eventtype%d", i))).(typeid.UUID),
 			Data: []byte(fmt.Sprintf("event data %d", i)),

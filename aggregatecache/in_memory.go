@@ -178,14 +178,14 @@ func (c *InMemoryCache[E]) evictLRU() {
 }
 
 func (c *InMemoryCache[E]) evictTTL() {
-	for id, entry := range c.entries {
+	for aggregateID, entry := range c.entries {
 		if c.evictionPolicy.MaxAge > 0 && time.Since(entry.added) > c.evictionPolicy.MaxAge {
-			delete(c.entries, id)
+			delete(c.entries, aggregateID)
 			continue
 		}
 
 		if c.evictionPolicy.MaxIdle > 0 && time.Since(entry.lastUsed) > c.evictionPolicy.MaxIdle {
-			delete(c.entries, id)
+			delete(c.entries, aggregateID)
 			continue
 		}
 	}

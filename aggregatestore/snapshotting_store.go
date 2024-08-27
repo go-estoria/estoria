@@ -141,6 +141,7 @@ func (s *SnapshottingStore[E]) Save(ctx context.Context, aggregate *Aggregate[E]
 	}
 
 	now := time.Now()
+
 	for {
 		err := aggregate.State().ApplyNext(ctx)
 		if errors.Is(err, ErrNoUnappliedEvents) {
@@ -151,7 +152,9 @@ func (s *SnapshottingStore[E]) Save(ctx context.Context, aggregate *Aggregate[E]
 
 		if s.policy.ShouldSnapshot(aggregate.ID(), aggregate.Version(), now) {
 			slog.Debug("taking snapshot", "aggregate_id", aggregate.ID(), "version", aggregate.Version())
+
 			entity := aggregate.Entity()
+
 			data, err := s.marshaler.Marshal(&entity)
 			if err != nil {
 				slog.Error("failed to marshal snapshot", "error", err)

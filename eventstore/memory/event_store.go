@@ -57,6 +57,7 @@ func (s *EventStore) AppendStream(ctx context.Context, streamID typeid.UUID, eve
 	}
 
 	preparedEvents := []*eventstore.Event{}
+
 	tx := []*eventStoreDocument{}
 	for i, writableEvent := range events {
 		event := &eventstore.Event{
@@ -73,6 +74,7 @@ func (s *EventStore) AppendStream(ctx context.Context, streamID typeid.UUID, eve
 		}
 
 		preparedEvents = append(preparedEvents, event)
+
 		tx = append(tx, &eventStoreDocument{
 			Data: data,
 		})
@@ -101,9 +103,9 @@ func (s *EventStore) ReadStream(ctx context.Context, streamID typeid.UUID, opts 
 
 	if opts.Offset > 0 {
 		if opts.Direction == eventstore.Reverse {
-			cursor -= int64(opts.Offset)
+			cursor -= opts.Offset
 		} else {
-			cursor += int64(opts.Offset)
+			cursor += opts.Offset
 		}
 	}
 
