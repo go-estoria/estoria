@@ -63,7 +63,7 @@ func (s *CachedStore[E]) Hydrate(ctx context.Context, aggregate *Aggregate[E], o
 // Save saves an aggregate.
 func (s *CachedStore[E]) Save(ctx context.Context, aggregate *Aggregate[E], opts SaveOptions) error {
 	if err := s.inner.Save(ctx, aggregate, opts); err != nil {
-		return err
+		return SaveAggregateError{AggregateID: aggregate.ID(), Operation: "saving to inner store", Err: err}
 	}
 
 	if err := s.cache.PutAggregate(ctx, aggregate); err != nil {

@@ -2,7 +2,6 @@ package aggregatestore
 
 import (
 	"context"
-	"fmt"
 	"log/slog"
 
 	"github.com/go-estoria/estoria"
@@ -39,9 +38,7 @@ type HookableStore[E estoria.Entity] struct {
 var _ Store[estoria.Entity] = (*HookableStore[estoria.Entity])(nil)
 
 // NewHookableStore creates a new HookableStore.
-func NewHookableStore[E estoria.Entity](
-	inner Store[E],
-) *HookableStore[E] {
+func NewHookableStore[E estoria.Entity](inner Store[E]) *HookableStore[E] {
 	return &HookableStore[E]{
 		inner:          inner,
 		precreateHooks: make([]PrecreateHook, 0),
@@ -71,18 +68,18 @@ func (s *HookableStore[E]) New(id uuid.UUID) (*Aggregate[E], error) {
 	s.log.Debug("creating new aggregate")
 	for _, hook := range s.precreateHooks {
 		if err := hook(); err != nil {
-			return nil, fmt.Errorf("precreate hook failed: %w", err)
+			return nil, CreateAggregateError{Operation: "pre-create hook", Err: err}
 		}
 	}
 
 	aggregate, err := s.inner.New(id)
 	if err != nil {
-		return nil, err
+		return nil, CreateAggregateError{Operation: "creating aggregate using inner store", Err: err}
 	}
 
 	for _, hook := range s.hooks[AfterCreate] {
 		if err := hook(context.Background(), aggregate); err != nil {
-			return nil, fmt.Errorf("post-create hook failed: %w", err)
+			return nil, CreateAggregateError{Operation: "post-create hook", Err: err}
 		}
 	}
 
@@ -94,18 +91,18 @@ func (s *HookableStore[E]) Load(ctx context.Context, id typeid.UUID, opts LoadOp
 	s.log.Debug("loading aggregate", "aggregate_id", id)
 	for _, hook := range s.preloadHooks {
 		if err := hook(ctx, id); err != nil {
-			return nil, fmt.Errorf("preload hook failed: %w", err)
+			return nil, LoadAggregateError{AggregateID: id, Operation: "pre-load hook", Err: err}
 		}
 	}
 
 	aggregate, err := s.inner.Load(ctx, id, opts)
 	if err != nil {
-		return nil, err
+		return nil, LoadAggregateError{AggregateID: id, Operation: "loading aggregate using inner store", Err: err}
 	}
 
 	for _, hook := range s.hooks[AfterLoad] {
 		if err := hook(ctx, aggregate); err != nil {
-			return nil, fmt.Errorf("post-load hook failed: %w", err)
+			return nil, LoadAggregateError{AggregateID: id, Operation: "post-load hook", Err: err}
 		}
 	}
 
@@ -117,18 +114,18 @@ func (s *HookableStore[E]) Hydrate(ctx context.Context, aggregate *Aggregate[E],
 	s.log.Debug("hydrating aggregate", "aggregate_id", aggregate.ID(), "from_version", aggregate.Version(), "to_version", opts.ToVersion)
 	for _, hook := range s.hooks[BeforeHydrate] {
 		if err := hook(ctx, aggregate); err != nil {
-			return fmt.Errorf("pre-hydrate hook failed: %w", err)
+			return HydrateAggregateError{AggregateID: aggregate.ID(), Operation: "pre-hydrate hook", Err: err}
 		}
 	}
 
 	err := s.inner.Hydrate(ctx, aggregate, opts)
 	if err != nil {
-		return err
+		return HydrateAggregateError{AggregateID: aggregate.ID(), Operation: "hydrating aggregate using inner store", Err: err}
 	}
 
 	for _, hook := range s.hooks[AfterHydrate] {
 		if err := hook(ctx, aggregate); err != nil {
-			return fmt.Errorf("post-hydrate hook failed: %w", err)
+			return HydrateAggregateError{AggregateID: aggregate.ID(), Operation: "post-hydrate hook", Err: err}
 		}
 	}
 
@@ -140,17 +137,17 @@ func (s *HookableStore[E]) Save(ctx context.Context, aggregate *Aggregate[E], op
 	s.log.Debug("saving aggregate", "aggregate_id", aggregate.ID())
 	for _, hook := range s.hooks[BeforeSave] {
 		if err := hook(ctx, aggregate); err != nil {
-			return fmt.Errorf("pre-save hook failed: %w", err)
+			return SaveAggregateError{AggregateID: aggregate.ID(), Operation: "pre-save hook", Err: err}
 		}
 	}
 
 	if err := s.inner.Save(ctx, aggregate, opts); err != nil {
-		return err
+		return SaveAggregateError{AggregateID: aggregate.ID(), Operation: "saving aggregate using inner store", Err: err}
 	}
 
 	for _, hook := range s.hooks[AfterSave] {
 		if err := hook(ctx, aggregate); err != nil {
-			return fmt.Errorf("post-save hook failed: %w", err)
+			return SaveAggregateError{AggregateID: aggregate.ID(), Operation: "post-save hook", Err: err}
 		}
 	}
 

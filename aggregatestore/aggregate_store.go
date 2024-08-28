@@ -2,7 +2,6 @@ package aggregatestore
 
 import (
 	"context"
-	"errors"
 
 	"github.com/go-estoria/estoria"
 	"github.com/go-estoria/estoria/typeid"
@@ -47,12 +46,90 @@ type HydrateOptions struct {
 // SaveOptions are options for saving an aggregate.
 type SaveOptions struct {
 	// SkipApply skips applying the events to the entity.
-	// This is useful in situations where it is desireable to delay the application of events,
+	// This is useful in situations where it is desirable to delay the application of events,
 	// such as when wrapping the aggregate store with additional functionality.
 	//
 	// Default: false
 	SkipApply bool
 }
 
-// ErrAggregateNotFound is returned when an aggregate is not found.
-var ErrAggregateNotFound = errors.New("aggregate not found")
+type AggregateNotFoundError struct {
+	AggregateID typeid.UUID
+}
+
+func (e AggregateNotFoundError) Error() string {
+	return "aggregate not found: " + e.AggregateID.String()
+}
+
+type InitializeAggregateStoreError struct {
+	Operation string
+	Err       error
+}
+
+func (e InitializeAggregateStoreError) Error() string {
+	if e.Operation == "" {
+		return e.Err.Error()
+	}
+
+	return e.Operation + ": " + e.Err.Error()
+}
+
+// A CreateAggregateError is an error that occurred while creating an aggregate.
+type CreateAggregateError struct {
+	AggregateID typeid.UUID
+	Operation   string
+	Err         error
+}
+
+func (e CreateAggregateError) Error() string {
+	if e.Operation == "" {
+		return e.Err.Error()
+	}
+
+	return e.Operation + ": " + e.Err.Error()
+}
+
+// A LoadAggregateError is an error that occurred while loading an aggregate.
+type LoadAggregateError struct {
+	AggregateID typeid.UUID
+	Operation   string
+	Err         error
+}
+
+func (e LoadAggregateError) Error() string {
+	if e.Operation == "" {
+		return e.Err.Error()
+	}
+
+	return e.Operation + ": " + e.Err.Error()
+}
+
+// A HydrateAggregateError is an error that occurred while hydrating an aggregate.
+type HydrateAggregateError struct {
+	AggregateID typeid.UUID
+	Operation   string
+	Err         error
+}
+
+func (e HydrateAggregateError) Error() string {
+	if e.Operation == "" {
+		return e.Err.Error()
+	}
+
+	return e.Operation + ": " + e.Err.Error()
+}
+
+// A SaveAggregateError is an error that occurred while saving an aggregate.
+type SaveAggregateError struct {
+	AggregateID typeid.UUID
+	Operation   string
+	Err         error
+}
+
+func (e SaveAggregateError) Error() string {
+	if e.Operation == "" {
+		return e.Err.Error()
+	}
+
+	return e.Operation + ": " + e.Err.Error()
+}
