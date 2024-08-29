@@ -476,7 +476,75 @@ func TestEventSourcedStore_HydrateAggregate(t *testing.T) {
 	for _, tt := range []struct {
 		name string
 	}{
-		{},
+		{
+			name: "hydrates an aggregate from version 0 to the latest version using default options",
+		},
+		{
+			name: "hydrates an aggregate from version 0 to a specific version",
+		},
+		{
+			name: "hydrates an aggregate from version 0 to version 1",
+		},
+		{
+			name: "hydrates an aggregate from version 0 to version N-1",
+		},
+		{
+			name: "hydrates an aggregate from version 1 to the latest version using default options",
+		},
+		{
+			name: "hydrates an aggregate from version 1 to a specific version",
+		},
+		{
+			name: "hydrates an aggregate from version 1 to version 2",
+		},
+		{
+			name: "hydrates an aggregate from version 1 to version N-1",
+		},
+		{
+			name: "hydrates an aggregate from a specific version to the latest version using default options",
+		},
+		{
+			name: "hydrates an aggregate from a specific version to another specific version",
+		},
+		{
+			name: "hydrates an aggregate from a specific version to version N-1",
+		},
+		{
+			name: "hydrates an aggregate from version N-1 to the latest version using default options",
+		},
+		{
+			name: "is a no-op when the aggregate is already at the target version",
+		},
+		{
+			name: "returns an error when the event stream reader is nil",
+		},
+		{
+			name: "returns an error when the aggregate is nil",
+		},
+		{
+			name: "returns an error when the target version is invalid",
+		},
+		{
+			name: "returns an error when the aggregate is at a more recent version than the target version",
+		},
+		{
+			name: "returns an error when the event stream is not found",
+		},
+		{
+			name: "returns an error when unable to obtain an event stream iterator",
+		},
+		{
+			name: "returns an error when unable to read an event from the event stream",
+		},
+		{
+			name: "returns an error when encountering an unregistered event type",
+		},
+		{
+			name: "returns an error when unable to unmarshal an event store event",
+		},
+		{
+			name: "returns an error when unable to apply an event to the aggregate",
+		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 
