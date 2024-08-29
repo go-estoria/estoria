@@ -50,7 +50,7 @@ func NewEventSourcedStore[E estoria.Entity](
 		if _, ok := store.entityEventPrototypes[prototype.EventType()]; ok {
 			return nil, InitializeAggregateStoreError{
 				Operation: "registering entity event prototype",
-				Err: fmt.Errorf("duplicate event type %s for entity %T",
+				Err: fmt.Errorf("duplicate event type %s for entity %s",
 					prototype.EventType(),
 					entity.EntityID().TypeName()),
 			}
@@ -75,6 +75,10 @@ func NewEventSourcedStore[E estoria.Entity](
 // New creates a new aggregate.
 // If an ID is provided, the aggregate is created with that ID.
 func (s *EventSourcedStore[E]) New(id uuid.UUID) (*Aggregate[E], error) {
+	if id.IsNil() {
+		return nil, CreateAggregateError{Err: errors.New("aggregate ID is nil")}
+	}
+
 	aggregate := &Aggregate[E]{}
 	aggregate.State().SetEntityAtVersion(s.newEntity(id), 0)
 
@@ -161,7 +165,7 @@ func (s *EventSourcedStore[E]) Hydrate(ctx context.Context, aggregate *Aggregate
 			return HydrateAggregateError{
 				AggregateID: aggregate.ID(),
 				Operation:   "obtaining entity prototype",
-				Err:         errors.New("no prototype registered for event type %s" + event.ID.TypeName()),
+				Err:         errors.New("no prototype registered for event type " + event.ID.TypeName()),
 			}
 		}
 
