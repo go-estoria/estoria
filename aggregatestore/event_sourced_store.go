@@ -200,17 +200,23 @@ func (s *EventSourcedStore[E]) Hydrate(ctx context.Context, aggregate *Aggregate
 
 // Save saves an aggregate.
 func (s *EventSourcedStore[E]) Save(ctx context.Context, aggregate *Aggregate[E], opts SaveOptions) error {
-	if s.eventWriter == nil {
+	if aggregate == nil {
+		return SaveAggregateError{Err: errors.New("aggregate is nil")}
+	} else if s.eventWriter == nil {
 		return SaveAggregateError{AggregateID: aggregate.ID(), Err: errors.New("event store has no event stream writer")}
 	}
 
 	unsavedEvents := aggregate.State().UnsavedEvents()
-	s.log.Debug("saving aggregate to event store", "aggregate_id", aggregate.ID(), "events", len(unsavedEvents))
-
 	if len(unsavedEvents) == 0 {
+		if aggregate.Version() == 0 {
+			return SaveAggregateError{AggregateID: aggregate.ID(), Err: errors.New("new aggregate has no events to save")}
+		}
+
 		s.log.Debug("no events to save")
 		return nil
 	}
+
+	s.log.Debug("saving aggregate to event store", "aggregate_id", aggregate.ID(), "events", len(unsavedEvents))
 
 	events := make([]*eventstore.WritableEvent, len(unsavedEvents))
 
@@ -226,7 +232,7 @@ func (s *EventSourcedStore[E]) Save(ctx context.Context, aggregate *Aggregate[E]
 
 		data, err := s.entityEventMarshaler.Marshal(&unsavedEvent.EntityEvent)
 		if err != nil {
-			return SaveAggregateError{AggregateID: aggregate.ID(), Operation: "serializing event data", Err: err}
+			return SaveAggregateError{AggregateID: aggregate.ID(), Operation: "marshaling event data", Err: err}
 		}
 
 		events[i] = &eventstore.WritableEvent{
@@ -258,7 +264,7 @@ func (s *EventSourcedStore[E]) Save(ctx context.Context, aggregate *Aggregate[E]
 		if err := aggregate.State().ApplyNext(ctx); errors.Is(err, ErrNoUnappliedEvents) {
 			return nil
 		} else if err != nil {
-			return SaveAggregateError{AggregateID: aggregate.ID(), Operation: "applying event", Err: err}
+			return SaveAggregateError{AggregateID: aggregate.ID(), Operation: "applying aggregate event", Err: err}
 		}
 	}
 }
