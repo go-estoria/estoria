@@ -108,14 +108,12 @@ func (s *EventSourcedStore[E]) Load(ctx context.Context, id typeid.UUID, opts Lo
 
 // Hydrate hydrates an aggregate.
 func (s *EventSourcedStore[E]) Hydrate(ctx context.Context, aggregate *Aggregate[E], opts HydrateOptions) error {
-	if s.eventReader == nil {
-		return HydrateAggregateError{AggregateID: aggregate.ID(), Err: errors.New("event store has no event stream reader")}
-	}
-
 	if aggregate == nil {
 		return HydrateAggregateError{Err: errors.New("aggregate is nil")}
 	} else if opts.ToVersion < 0 {
 		return HydrateAggregateError{AggregateID: aggregate.ID(), Err: errors.New("invalid target version")}
+	} else if s.eventReader == nil {
+		return HydrateAggregateError{AggregateID: aggregate.ID(), Err: errors.New("event store has no event stream reader")}
 	}
 
 	log := s.log.With("aggregate_id", aggregate.ID())
@@ -142,7 +140,8 @@ func (s *EventSourcedStore[E]) Hydrate(ctx context.Context, aggregate *Aggregate
 
 	// load the aggregate's events
 	stream, err := s.eventReader.ReadStream(ctx, aggregate.ID(), readOpts)
-	if errors.Is(err, eventstore.StreamNotFoundError{}) {
+	notFoundErr := eventstore.StreamNotFoundError{}
+	if errors.As(err, &notFoundErr) {
 		return AggregateNotFoundError{AggregateID: aggregate.ID()}
 	} else if err != nil {
 		return HydrateAggregateError{AggregateID: aggregate.ID(), Operation: "reading event stream", Err: err}
@@ -184,17 +183,16 @@ func (s *EventSourcedStore[E]) Hydrate(ctx context.Context, aggregate *Aggregate
 		if err := aggregate.State().ApplyNext(ctx); errors.Is(err, ErrNoUnappliedEvents) {
 			return HydrateAggregateError{
 				AggregateID: aggregate.ID(),
-				Operation:   "applying event",
+				Operation:   "applying aggregate event",
 				Err:         errors.New("unexpected end of unapplied events while hydrating aggregate"),
 			}
 		} else if err != nil {
-			return HydrateAggregateError{AggregateID: aggregate.ID(), Operation: "applying event", Err: err}
+			return HydrateAggregateError{AggregateID: aggregate.ID(), Operation: "applying aggregate event", Err: err}
 		}
 	}
 
 	s.log.Debug("hydrated aggregate",
 		"aggregate_id", aggregate.ID(),
-		"entity_id", aggregate.Entity().EntityID(),
 		"version", aggregate.Version())
 
 	return nil
