@@ -40,7 +40,7 @@ func (e mockEntity) EventTypes() []estoria.EntityEvent {
 	return e.eventTypes
 }
 
-func (e *mockEntity) ApplyEvent(_ context.Context, event estoria.EntityEvent) error {
+func (e *mockEntity) ApplyEvent(_ context.Context, _ estoria.EntityEvent) error {
 	if e.applyEventErr != nil {
 		return e.applyEventErr
 	}
@@ -171,6 +171,8 @@ func (m mockStreamIterator) Close(_ context.Context) error {
 }
 
 func TestNewEventSourcedStore(t *testing.T) {
+	t.Parallel()
+
 	for _, tt := range []eventSourcedStoreTestCase[*mockEntity]{
 		{
 			name: "creates a new event sourced store with default options",
@@ -284,7 +286,7 @@ func TestNewEventSourcedStore(t *testing.T) {
 				return &mockEntity{ID: typeid.FromUUID("testentity", id)}
 			},
 			haveOpts: []aggregatestore.EventSourcedStoreOption[*mockEntity]{
-				func(store *aggregatestore.EventSourcedStore[*mockEntity]) error {
+				func(_ *aggregatestore.EventSourcedStore[*mockEntity]) error {
 					return errors.New("test error")
 				},
 			},
@@ -295,6 +297,8 @@ func TestNewEventSourcedStore(t *testing.T) {
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
 			gotStore, err := aggregatestore.NewEventSourcedStore(tt.haveEventStore(), tt.haveEntityFactory, tt.haveOpts...)
 
 			if tt.wantErr != nil {
@@ -314,6 +318,8 @@ func TestNewEventSourcedStore(t *testing.T) {
 }
 
 func TestEventSourcedStore_New(t *testing.T) {
+	t.Parallel()
+
 	for _, tt := range []struct {
 		name     string
 		haveUUID uuid.UUID
@@ -330,6 +336,8 @@ func TestEventSourcedStore_New(t *testing.T) {
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
 			store, err := aggregatestore.NewEventSourcedStore(
 				func() eventstore.Store {
 					store, _ := memory.NewEventStore()
@@ -371,6 +379,8 @@ func TestEventSourcedStore_New(t *testing.T) {
 }
 
 func TestEventSourcedStore_LoadAggregate(t *testing.T) {
+	t.Parallel()
+
 	aggregateID := typeid.Must(typeid.NewUUID("mockentity")).(typeid.UUID)
 	for _, tt := range []struct {
 		name              string
@@ -451,6 +461,8 @@ func TestEventSourcedStore_LoadAggregate(t *testing.T) {
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
 			store, err := aggregatestore.NewEventSourcedStore(tt.haveEventStore(), tt.haveEntityFactory)
 			if err != nil {
 				t.Errorf("unexpected error creating store: %v", err)
@@ -483,6 +495,7 @@ func TestEventSourcedStore_LoadAggregate(t *testing.T) {
 			gotEntity := gotAggregate.Entity()
 			if gotEntity == nil {
 				t.Errorf("unexpected nil entity")
+				return
 			}
 			// entity has the correct ID
 			if gotEntity.ID.String() != tt.haveAggregateID.String() {
@@ -497,6 +510,8 @@ func TestEventSourcedStore_LoadAggregate(t *testing.T) {
 }
 
 func TestEventSourcedStore_HydrateAggregate(t *testing.T) {
+	t.Parallel()
+
 	aggregateID := typeid.Must(typeid.NewUUID("mockentity")).(typeid.UUID)
 	for _, tt := range []struct {
 		name              string
@@ -517,8 +532,8 @@ func TestEventSourcedStore_HydrateAggregate(t *testing.T) {
 					{ID: typeid.Must(typeid.NewUUID("mockEntityEventA")).(typeid.UUID), Data: mockEntityEventA{}.marshaledData()},
 					{ID: typeid.Must(typeid.NewUUID("mockEntityEventB")).(typeid.UUID), Data: mockEntityEventB{}.marshaledData()},
 					{ID: typeid.Must(typeid.NewUUID("mockEntityEventC")).(typeid.UUID), Data: mockEntityEventC{}.marshaledData()},
-					{ID: typeid.Must(typeid.NewUUID("mockEntityEventD")).(typeid.UUID), Data: mockEntityEventC{}.marshaledData()},
-					{ID: typeid.Must(typeid.NewUUID("mockEntityEventE")).(typeid.UUID), Data: mockEntityEventC{}.marshaledData()},
+					{ID: typeid.Must(typeid.NewUUID("mockEntityEventD")).(typeid.UUID), Data: mockEntityEventD{}.marshaledData()},
+					{ID: typeid.Must(typeid.NewUUID("mockEntityEventE")).(typeid.UUID), Data: mockEntityEventE{}.marshaledData()},
 				}, eventstore.AppendStreamOptions{})
 				return store
 			},
@@ -545,8 +560,8 @@ func TestEventSourcedStore_HydrateAggregate(t *testing.T) {
 					{ID: typeid.Must(typeid.NewUUID("mockEntityEventA")).(typeid.UUID), Data: mockEntityEventA{}.marshaledData()},
 					{ID: typeid.Must(typeid.NewUUID("mockEntityEventB")).(typeid.UUID), Data: mockEntityEventB{}.marshaledData()},
 					{ID: typeid.Must(typeid.NewUUID("mockEntityEventC")).(typeid.UUID), Data: mockEntityEventC{}.marshaledData()},
-					{ID: typeid.Must(typeid.NewUUID("mockEntityEventD")).(typeid.UUID), Data: mockEntityEventC{}.marshaledData()},
-					{ID: typeid.Must(typeid.NewUUID("mockEntityEventE")).(typeid.UUID), Data: mockEntityEventC{}.marshaledData()},
+					{ID: typeid.Must(typeid.NewUUID("mockEntityEventD")).(typeid.UUID), Data: mockEntityEventD{}.marshaledData()},
+					{ID: typeid.Must(typeid.NewUUID("mockEntityEventE")).(typeid.UUID), Data: mockEntityEventE{}.marshaledData()},
 				}, eventstore.AppendStreamOptions{})
 				return store
 			},
@@ -573,8 +588,8 @@ func TestEventSourcedStore_HydrateAggregate(t *testing.T) {
 					{ID: typeid.Must(typeid.NewUUID("mockEntityEventA")).(typeid.UUID), Data: mockEntityEventA{}.marshaledData()},
 					{ID: typeid.Must(typeid.NewUUID("mockEntityEventB")).(typeid.UUID), Data: mockEntityEventB{}.marshaledData()},
 					{ID: typeid.Must(typeid.NewUUID("mockEntityEventC")).(typeid.UUID), Data: mockEntityEventC{}.marshaledData()},
-					{ID: typeid.Must(typeid.NewUUID("mockEntityEventD")).(typeid.UUID), Data: mockEntityEventC{}.marshaledData()},
-					{ID: typeid.Must(typeid.NewUUID("mockEntityEventE")).(typeid.UUID), Data: mockEntityEventC{}.marshaledData()},
+					{ID: typeid.Must(typeid.NewUUID("mockEntityEventD")).(typeid.UUID), Data: mockEntityEventD{}.marshaledData()},
+					{ID: typeid.Must(typeid.NewUUID("mockEntityEventE")).(typeid.UUID), Data: mockEntityEventE{}.marshaledData()},
 				}, eventstore.AppendStreamOptions{})
 				return store
 			},
@@ -601,8 +616,8 @@ func TestEventSourcedStore_HydrateAggregate(t *testing.T) {
 					{ID: typeid.Must(typeid.NewUUID("mockEntityEventA")).(typeid.UUID), Data: mockEntityEventA{}.marshaledData()},
 					{ID: typeid.Must(typeid.NewUUID("mockEntityEventB")).(typeid.UUID), Data: mockEntityEventB{}.marshaledData()},
 					{ID: typeid.Must(typeid.NewUUID("mockEntityEventC")).(typeid.UUID), Data: mockEntityEventC{}.marshaledData()},
-					{ID: typeid.Must(typeid.NewUUID("mockEntityEventD")).(typeid.UUID), Data: mockEntityEventC{}.marshaledData()},
-					{ID: typeid.Must(typeid.NewUUID("mockEntityEventE")).(typeid.UUID), Data: mockEntityEventC{}.marshaledData()},
+					{ID: typeid.Must(typeid.NewUUID("mockEntityEventD")).(typeid.UUID), Data: mockEntityEventD{}.marshaledData()},
+					{ID: typeid.Must(typeid.NewUUID("mockEntityEventE")).(typeid.UUID), Data: mockEntityEventE{}.marshaledData()},
 				}, eventstore.AppendStreamOptions{})
 				return store
 			},
@@ -629,8 +644,8 @@ func TestEventSourcedStore_HydrateAggregate(t *testing.T) {
 					{ID: typeid.Must(typeid.NewUUID("mockEntityEventA")).(typeid.UUID), Data: mockEntityEventA{}.marshaledData()},
 					{ID: typeid.Must(typeid.NewUUID("mockEntityEventB")).(typeid.UUID), Data: mockEntityEventB{}.marshaledData()},
 					{ID: typeid.Must(typeid.NewUUID("mockEntityEventC")).(typeid.UUID), Data: mockEntityEventC{}.marshaledData()},
-					{ID: typeid.Must(typeid.NewUUID("mockEntityEventD")).(typeid.UUID), Data: mockEntityEventC{}.marshaledData()},
-					{ID: typeid.Must(typeid.NewUUID("mockEntityEventE")).(typeid.UUID), Data: mockEntityEventC{}.marshaledData()},
+					{ID: typeid.Must(typeid.NewUUID("mockEntityEventD")).(typeid.UUID), Data: mockEntityEventD{}.marshaledData()},
+					{ID: typeid.Must(typeid.NewUUID("mockEntityEventE")).(typeid.UUID), Data: mockEntityEventE{}.marshaledData()},
 				}, eventstore.AppendStreamOptions{})
 				return store
 			},
@@ -657,8 +672,8 @@ func TestEventSourcedStore_HydrateAggregate(t *testing.T) {
 					{ID: typeid.Must(typeid.NewUUID("mockEntityEventA")).(typeid.UUID), Data: mockEntityEventA{}.marshaledData()},
 					{ID: typeid.Must(typeid.NewUUID("mockEntityEventB")).(typeid.UUID), Data: mockEntityEventB{}.marshaledData()},
 					{ID: typeid.Must(typeid.NewUUID("mockEntityEventC")).(typeid.UUID), Data: mockEntityEventC{}.marshaledData()},
-					{ID: typeid.Must(typeid.NewUUID("mockEntityEventD")).(typeid.UUID), Data: mockEntityEventC{}.marshaledData()},
-					{ID: typeid.Must(typeid.NewUUID("mockEntityEventE")).(typeid.UUID), Data: mockEntityEventC{}.marshaledData()},
+					{ID: typeid.Must(typeid.NewUUID("mockEntityEventD")).(typeid.UUID), Data: mockEntityEventD{}.marshaledData()},
+					{ID: typeid.Must(typeid.NewUUID("mockEntityEventE")).(typeid.UUID), Data: mockEntityEventE{}.marshaledData()},
 				}, eventstore.AppendStreamOptions{})
 				return store
 			},
@@ -685,8 +700,8 @@ func TestEventSourcedStore_HydrateAggregate(t *testing.T) {
 					{ID: typeid.Must(typeid.NewUUID("mockEntityEventA")).(typeid.UUID), Data: mockEntityEventA{}.marshaledData()},
 					{ID: typeid.Must(typeid.NewUUID("mockEntityEventB")).(typeid.UUID), Data: mockEntityEventB{}.marshaledData()},
 					{ID: typeid.Must(typeid.NewUUID("mockEntityEventC")).(typeid.UUID), Data: mockEntityEventC{}.marshaledData()},
-					{ID: typeid.Must(typeid.NewUUID("mockEntityEventD")).(typeid.UUID), Data: mockEntityEventC{}.marshaledData()},
-					{ID: typeid.Must(typeid.NewUUID("mockEntityEventE")).(typeid.UUID), Data: mockEntityEventC{}.marshaledData()},
+					{ID: typeid.Must(typeid.NewUUID("mockEntityEventD")).(typeid.UUID), Data: mockEntityEventD{}.marshaledData()},
+					{ID: typeid.Must(typeid.NewUUID("mockEntityEventE")).(typeid.UUID), Data: mockEntityEventE{}.marshaledData()},
 				}, eventstore.AppendStreamOptions{})
 				return store
 			},
@@ -713,8 +728,8 @@ func TestEventSourcedStore_HydrateAggregate(t *testing.T) {
 					{ID: typeid.Must(typeid.NewUUID("mockEntityEventA")).(typeid.UUID), Data: mockEntityEventA{}.marshaledData()},
 					{ID: typeid.Must(typeid.NewUUID("mockEntityEventB")).(typeid.UUID), Data: mockEntityEventB{}.marshaledData()},
 					{ID: typeid.Must(typeid.NewUUID("mockEntityEventC")).(typeid.UUID), Data: mockEntityEventC{}.marshaledData()},
-					{ID: typeid.Must(typeid.NewUUID("mockEntityEventD")).(typeid.UUID), Data: mockEntityEventC{}.marshaledData()},
-					{ID: typeid.Must(typeid.NewUUID("mockEntityEventE")).(typeid.UUID), Data: mockEntityEventC{}.marshaledData()},
+					{ID: typeid.Must(typeid.NewUUID("mockEntityEventD")).(typeid.UUID), Data: mockEntityEventD{}.marshaledData()},
+					{ID: typeid.Must(typeid.NewUUID("mockEntityEventE")).(typeid.UUID), Data: mockEntityEventE{}.marshaledData()},
 				}, eventstore.AppendStreamOptions{})
 				return store
 			},
@@ -741,8 +756,8 @@ func TestEventSourcedStore_HydrateAggregate(t *testing.T) {
 					{ID: typeid.Must(typeid.NewUUID("mockEntityEventA")).(typeid.UUID), Data: mockEntityEventA{}.marshaledData()},
 					{ID: typeid.Must(typeid.NewUUID("mockEntityEventB")).(typeid.UUID), Data: mockEntityEventB{}.marshaledData()},
 					{ID: typeid.Must(typeid.NewUUID("mockEntityEventC")).(typeid.UUID), Data: mockEntityEventC{}.marshaledData()},
-					{ID: typeid.Must(typeid.NewUUID("mockEntityEventD")).(typeid.UUID), Data: mockEntityEventC{}.marshaledData()},
-					{ID: typeid.Must(typeid.NewUUID("mockEntityEventE")).(typeid.UUID), Data: mockEntityEventC{}.marshaledData()},
+					{ID: typeid.Must(typeid.NewUUID("mockEntityEventD")).(typeid.UUID), Data: mockEntityEventD{}.marshaledData()},
+					{ID: typeid.Must(typeid.NewUUID("mockEntityEventE")).(typeid.UUID), Data: mockEntityEventE{}.marshaledData()},
 				}, eventstore.AppendStreamOptions{})
 				return store
 			},
@@ -769,8 +784,8 @@ func TestEventSourcedStore_HydrateAggregate(t *testing.T) {
 					{ID: typeid.Must(typeid.NewUUID("mockEntityEventA")).(typeid.UUID), Data: mockEntityEventA{}.marshaledData()},
 					{ID: typeid.Must(typeid.NewUUID("mockEntityEventB")).(typeid.UUID), Data: mockEntityEventB{}.marshaledData()},
 					{ID: typeid.Must(typeid.NewUUID("mockEntityEventC")).(typeid.UUID), Data: mockEntityEventC{}.marshaledData()},
-					{ID: typeid.Must(typeid.NewUUID("mockEntityEventD")).(typeid.UUID), Data: mockEntityEventC{}.marshaledData()},
-					{ID: typeid.Must(typeid.NewUUID("mockEntityEventE")).(typeid.UUID), Data: mockEntityEventC{}.marshaledData()},
+					{ID: typeid.Must(typeid.NewUUID("mockEntityEventD")).(typeid.UUID), Data: mockEntityEventD{}.marshaledData()},
+					{ID: typeid.Must(typeid.NewUUID("mockEntityEventE")).(typeid.UUID), Data: mockEntityEventE{}.marshaledData()},
 				}, eventstore.AppendStreamOptions{})
 				return store
 			},
@@ -797,8 +812,8 @@ func TestEventSourcedStore_HydrateAggregate(t *testing.T) {
 					{ID: typeid.Must(typeid.NewUUID("mockEntityEventA")).(typeid.UUID), Data: mockEntityEventA{}.marshaledData()},
 					{ID: typeid.Must(typeid.NewUUID("mockEntityEventB")).(typeid.UUID), Data: mockEntityEventB{}.marshaledData()},
 					{ID: typeid.Must(typeid.NewUUID("mockEntityEventC")).(typeid.UUID), Data: mockEntityEventC{}.marshaledData()},
-					{ID: typeid.Must(typeid.NewUUID("mockEntityEventD")).(typeid.UUID), Data: mockEntityEventC{}.marshaledData()},
-					{ID: typeid.Must(typeid.NewUUID("mockEntityEventE")).(typeid.UUID), Data: mockEntityEventC{}.marshaledData()},
+					{ID: typeid.Must(typeid.NewUUID("mockEntityEventD")).(typeid.UUID), Data: mockEntityEventD{}.marshaledData()},
+					{ID: typeid.Must(typeid.NewUUID("mockEntityEventE")).(typeid.UUID), Data: mockEntityEventE{}.marshaledData()},
 				}, eventstore.AppendStreamOptions{})
 				return store
 			},
@@ -825,8 +840,8 @@ func TestEventSourcedStore_HydrateAggregate(t *testing.T) {
 					{ID: typeid.Must(typeid.NewUUID("mockEntityEventA")).(typeid.UUID), Data: mockEntityEventA{}.marshaledData()},
 					{ID: typeid.Must(typeid.NewUUID("mockEntityEventB")).(typeid.UUID), Data: mockEntityEventB{}.marshaledData()},
 					{ID: typeid.Must(typeid.NewUUID("mockEntityEventC")).(typeid.UUID), Data: mockEntityEventC{}.marshaledData()},
-					{ID: typeid.Must(typeid.NewUUID("mockEntityEventD")).(typeid.UUID), Data: mockEntityEventC{}.marshaledData()},
-					{ID: typeid.Must(typeid.NewUUID("mockEntityEventE")).(typeid.UUID), Data: mockEntityEventC{}.marshaledData()},
+					{ID: typeid.Must(typeid.NewUUID("mockEntityEventD")).(typeid.UUID), Data: mockEntityEventD{}.marshaledData()},
+					{ID: typeid.Must(typeid.NewUUID("mockEntityEventE")).(typeid.UUID), Data: mockEntityEventE{}.marshaledData()},
 				}, eventstore.AppendStreamOptions{})
 				return store
 			},
@@ -853,8 +868,8 @@ func TestEventSourcedStore_HydrateAggregate(t *testing.T) {
 					{ID: typeid.Must(typeid.NewUUID("mockEntityEventA")).(typeid.UUID), Data: mockEntityEventA{}.marshaledData()},
 					{ID: typeid.Must(typeid.NewUUID("mockEntityEventB")).(typeid.UUID), Data: mockEntityEventB{}.marshaledData()},
 					{ID: typeid.Must(typeid.NewUUID("mockEntityEventC")).(typeid.UUID), Data: mockEntityEventC{}.marshaledData()},
-					{ID: typeid.Must(typeid.NewUUID("mockEntityEventD")).(typeid.UUID), Data: mockEntityEventC{}.marshaledData()},
-					{ID: typeid.Must(typeid.NewUUID("mockEntityEventE")).(typeid.UUID), Data: mockEntityEventC{}.marshaledData()},
+					{ID: typeid.Must(typeid.NewUUID("mockEntityEventD")).(typeid.UUID), Data: mockEntityEventD{}.marshaledData()},
+					{ID: typeid.Must(typeid.NewUUID("mockEntityEventE")).(typeid.UUID), Data: mockEntityEventE{}.marshaledData()},
 				}, eventstore.AppendStreamOptions{})
 				return store
 			},
@@ -881,8 +896,8 @@ func TestEventSourcedStore_HydrateAggregate(t *testing.T) {
 					{ID: typeid.Must(typeid.NewUUID("mockEntityEventA")).(typeid.UUID), Data: mockEntityEventA{}.marshaledData()},
 					{ID: typeid.Must(typeid.NewUUID("mockEntityEventB")).(typeid.UUID), Data: mockEntityEventB{}.marshaledData()},
 					{ID: typeid.Must(typeid.NewUUID("mockEntityEventC")).(typeid.UUID), Data: mockEntityEventC{}.marshaledData()},
-					{ID: typeid.Must(typeid.NewUUID("mockEntityEventD")).(typeid.UUID), Data: mockEntityEventC{}.marshaledData()},
-					{ID: typeid.Must(typeid.NewUUID("mockEntityEventE")).(typeid.UUID), Data: mockEntityEventC{}.marshaledData()},
+					{ID: typeid.Must(typeid.NewUUID("mockEntityEventD")).(typeid.UUID), Data: mockEntityEventD{}.marshaledData()},
+					{ID: typeid.Must(typeid.NewUUID("mockEntityEventE")).(typeid.UUID), Data: mockEntityEventE{}.marshaledData()},
 				}, eventstore.AppendStreamOptions{})
 				return store
 			},
@@ -973,8 +988,8 @@ func TestEventSourcedStore_HydrateAggregate(t *testing.T) {
 					{ID: typeid.Must(typeid.NewUUID("mockEntityEventA")).(typeid.UUID), Data: mockEntityEventA{}.marshaledData()},
 					{ID: typeid.Must(typeid.NewUUID("mockEntityEventB")).(typeid.UUID), Data: mockEntityEventB{}.marshaledData()},
 					{ID: typeid.Must(typeid.NewUUID("mockEntityEventC")).(typeid.UUID), Data: mockEntityEventC{}.marshaledData()},
-					{ID: typeid.Must(typeid.NewUUID("mockEntityEventD")).(typeid.UUID), Data: mockEntityEventC{}.marshaledData()},
-					{ID: typeid.Must(typeid.NewUUID("mockEntityEventE")).(typeid.UUID), Data: mockEntityEventC{}.marshaledData()},
+					{ID: typeid.Must(typeid.NewUUID("mockEntityEventD")).(typeid.UUID), Data: mockEntityEventD{}.marshaledData()},
+					{ID: typeid.Must(typeid.NewUUID("mockEntityEventE")).(typeid.UUID), Data: mockEntityEventE{}.marshaledData()},
 				}, eventstore.AppendStreamOptions{})
 				return store
 			},
@@ -1002,8 +1017,8 @@ func TestEventSourcedStore_HydrateAggregate(t *testing.T) {
 					{ID: typeid.Must(typeid.NewUUID("mockEntityEventA")).(typeid.UUID), Data: mockEntityEventA{}.marshaledData()},
 					{ID: typeid.Must(typeid.NewUUID("mockEntityEventB")).(typeid.UUID), Data: mockEntityEventB{}.marshaledData()},
 					{ID: typeid.Must(typeid.NewUUID("mockEntityEventC")).(typeid.UUID), Data: mockEntityEventC{}.marshaledData()},
-					{ID: typeid.Must(typeid.NewUUID("mockEntityEventD")).(typeid.UUID), Data: mockEntityEventC{}.marshaledData()},
-					{ID: typeid.Must(typeid.NewUUID("mockEntityEventE")).(typeid.UUID), Data: mockEntityEventC{}.marshaledData()},
+					{ID: typeid.Must(typeid.NewUUID("mockEntityEventD")).(typeid.UUID), Data: mockEntityEventD{}.marshaledData()},
+					{ID: typeid.Must(typeid.NewUUID("mockEntityEventE")).(typeid.UUID), Data: mockEntityEventE{}.marshaledData()},
 				}, eventstore.AppendStreamOptions{})
 				return store
 			},
@@ -1032,8 +1047,8 @@ func TestEventSourcedStore_HydrateAggregate(t *testing.T) {
 					{ID: typeid.Must(typeid.NewUUID("mockEntityEventA")).(typeid.UUID), Data: mockEntityEventA{}.marshaledData()},
 					{ID: typeid.Must(typeid.NewUUID("mockEntityEventB")).(typeid.UUID), Data: mockEntityEventB{}.marshaledData()},
 					{ID: typeid.Must(typeid.NewUUID("mockEntityEventC")).(typeid.UUID), Data: mockEntityEventC{}.marshaledData()},
-					{ID: typeid.Must(typeid.NewUUID("mockEntityEventD")).(typeid.UUID), Data: mockEntityEventC{}.marshaledData()},
-					{ID: typeid.Must(typeid.NewUUID("mockEntityEventE")).(typeid.UUID), Data: mockEntityEventC{}.marshaledData()},
+					{ID: typeid.Must(typeid.NewUUID("mockEntityEventD")).(typeid.UUID), Data: mockEntityEventD{}.marshaledData()},
+					{ID: typeid.Must(typeid.NewUUID("mockEntityEventE")).(typeid.UUID), Data: mockEntityEventE{}.marshaledData()},
 				}, eventstore.AppendStreamOptions{})
 				return store
 			},
@@ -1055,8 +1070,8 @@ func TestEventSourcedStore_HydrateAggregate(t *testing.T) {
 					{ID: typeid.Must(typeid.NewUUID("mockEntityEventA")).(typeid.UUID), Data: mockEntityEventA{}.marshaledData()},
 					{ID: typeid.Must(typeid.NewUUID("mockEntityEventB")).(typeid.UUID), Data: mockEntityEventB{}.marshaledData()},
 					{ID: typeid.Must(typeid.NewUUID("mockEntityEventC")).(typeid.UUID), Data: mockEntityEventC{}.marshaledData()},
-					{ID: typeid.Must(typeid.NewUUID("mockEntityEventD")).(typeid.UUID), Data: mockEntityEventC{}.marshaledData()},
-					{ID: typeid.Must(typeid.NewUUID("mockEntityEventE")).(typeid.UUID), Data: mockEntityEventC{}.marshaledData()},
+					{ID: typeid.Must(typeid.NewUUID("mockEntityEventD")).(typeid.UUID), Data: mockEntityEventD{}.marshaledData()},
+					{ID: typeid.Must(typeid.NewUUID("mockEntityEventE")).(typeid.UUID), Data: mockEntityEventE{}.marshaledData()},
 				}, eventstore.AppendStreamOptions{})
 				return store
 			},
@@ -1083,8 +1098,8 @@ func TestEventSourcedStore_HydrateAggregate(t *testing.T) {
 					{ID: typeid.Must(typeid.NewUUID("mockEntityEventA")).(typeid.UUID), Data: mockEntityEventA{}.marshaledData()},
 					{ID: typeid.Must(typeid.NewUUID("mockEntityEventB")).(typeid.UUID), Data: mockEntityEventB{}.marshaledData()},
 					{ID: typeid.Must(typeid.NewUUID("mockEntityEventC")).(typeid.UUID), Data: mockEntityEventC{}.marshaledData()},
-					{ID: typeid.Must(typeid.NewUUID("mockEntityEventD")).(typeid.UUID), Data: mockEntityEventC{}.marshaledData()},
-					{ID: typeid.Must(typeid.NewUUID("mockEntityEventE")).(typeid.UUID), Data: mockEntityEventC{}.marshaledData()},
+					{ID: typeid.Must(typeid.NewUUID("mockEntityEventD")).(typeid.UUID), Data: mockEntityEventD{}.marshaledData()},
+					{ID: typeid.Must(typeid.NewUUID("mockEntityEventE")).(typeid.UUID), Data: mockEntityEventE{}.marshaledData()},
 				}, eventstore.AppendStreamOptions{})
 				return store
 			},
@@ -1112,8 +1127,8 @@ func TestEventSourcedStore_HydrateAggregate(t *testing.T) {
 					{ID: typeid.Must(typeid.NewUUID("mockEntityEventA")).(typeid.UUID), Data: mockEntityEventA{}.marshaledData()},
 					{ID: typeid.Must(typeid.NewUUID("mockEntityEventB")).(typeid.UUID), Data: mockEntityEventB{}.marshaledData()},
 					{ID: typeid.Must(typeid.NewUUID("mockEntityEventC")).(typeid.UUID), Data: mockEntityEventC{}.marshaledData()},
-					{ID: typeid.Must(typeid.NewUUID("mockEntityEventD")).(typeid.UUID), Data: mockEntityEventC{}.marshaledData()},
-					{ID: typeid.Must(typeid.NewUUID("mockEntityEventE")).(typeid.UUID), Data: mockEntityEventC{}.marshaledData()},
+					{ID: typeid.Must(typeid.NewUUID("mockEntityEventD")).(typeid.UUID), Data: mockEntityEventD{}.marshaledData()},
+					{ID: typeid.Must(typeid.NewUUID("mockEntityEventE")).(typeid.UUID), Data: mockEntityEventE{}.marshaledData()},
 				}, eventstore.AppendStreamOptions{})
 				return store
 			},
@@ -1135,6 +1150,8 @@ func TestEventSourcedStore_HydrateAggregate(t *testing.T) {
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
 			store, err := aggregatestore.NewEventSourcedStore(tt.haveEventStore(), tt.haveEntityFactory, tt.haveStoreOpts...)
 			if err != nil {
 				t.Errorf("unexpected error creating store: %v", err)
@@ -1171,6 +1188,7 @@ func TestEventSourcedStore_HydrateAggregate(t *testing.T) {
 			gotEntity := aggregate.Entity()
 			if gotEntity == nil {
 				t.Errorf("unexpected nil entity")
+				return
 			}
 			// entity has the correct ID
 			if gotEntity.ID.String() != tt.wantEntity.ID.String() {
@@ -1185,6 +1203,8 @@ func TestEventSourcedStore_HydrateAggregate(t *testing.T) {
 }
 
 func TestEventSourcedStore_SaveAggregate(t *testing.T) {
+	t.Parallel()
+
 	aggregateID := typeid.Must(typeid.NewUUID("mockentity")).(typeid.UUID)
 	for _, tt := range []struct {
 		name              string
@@ -1575,6 +1595,8 @@ func TestEventSourcedStore_SaveAggregate(t *testing.T) {
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
 			store, err := aggregatestore.NewEventSourcedStore(tt.haveEventStore(), tt.haveEntityFactory, tt.haveStoreOpts...)
 			if err != nil {
 				t.Errorf("unexpected error creating store: %v", err)
@@ -1611,6 +1633,7 @@ func TestEventSourcedStore_SaveAggregate(t *testing.T) {
 			gotEntity := aggregate.Entity()
 			if gotEntity == nil {
 				t.Errorf("unexpected nil entity")
+				return
 			}
 			// entity has the correct ID
 			if gotEntity.ID.String() != tt.wantEntity.ID.String() {

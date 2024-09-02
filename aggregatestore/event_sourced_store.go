@@ -108,11 +108,12 @@ func (s *EventSourcedStore[E]) Load(ctx context.Context, id typeid.UUID, opts Lo
 
 // Hydrate hydrates an aggregate.
 func (s *EventSourcedStore[E]) Hydrate(ctx context.Context, aggregate *Aggregate[E], opts HydrateOptions) error {
-	if aggregate == nil {
+	switch {
+	case aggregate == nil:
 		return HydrateAggregateError{Err: errors.New("aggregate is nil")}
-	} else if opts.ToVersion < 0 {
+	case opts.ToVersion < 0:
 		return HydrateAggregateError{AggregateID: aggregate.ID(), Err: errors.New("invalid target version")}
-	} else if s.eventReader == nil {
+	case s.eventReader == nil:
 		return HydrateAggregateError{AggregateID: aggregate.ID(), Err: errors.New("event store has no event stream reader")}
 	}
 
