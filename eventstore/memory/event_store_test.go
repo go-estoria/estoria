@@ -70,6 +70,7 @@ func TestEventStore_NewEventStore(t *testing.T) {
 }
 
 func TestEventStore_AppendStream(t *testing.T) {
+	t.Parallel()
 	streamIDs := []typeid.UUID{
 		typeid.Must(typeid.NewUUID("streamtype1")).(typeid.UUID),
 		typeid.Must(typeid.NewUUID("streamtype2")).(typeid.UUID),
@@ -366,6 +367,8 @@ func TestEventStore_AppendStream(t *testing.T) {
 }
 
 func TestEventStore_ReadStream(t *testing.T) {
+	t.Parallel()
+
 	// predefined stream IDs used for matching in tests
 	streamIDs := []typeid.UUID{
 		typeid.Must(typeid.NewUUID("streamtype1")).(typeid.UUID),
