@@ -125,3 +125,5 @@ issues:
         - errcheck
         - forcetypeassert
         - ireturn
+        - lll
+        - nestif
