@@ -3,7 +3,6 @@ package aggregatestore
 import (
 	"context"
 	"errors"
-	"fmt"
 	"log/slog"
 	"time"
 
@@ -166,7 +165,7 @@ func (s *SnapshottingStore[E]) Save(ctx context.Context, aggregate *Aggregate[E]
 	opts.SkipApply = true
 
 	if err := s.inner.Save(ctx, aggregate, opts); err != nil {
-		return fmt.Errorf("saving aggregate: %w", err)
+		return SaveAggregateError{AggregateID: aggregate.ID(), Operation: "saving aggregate using inner store", Err: err}
 	}
 
 	now := time.Now()
@@ -176,28 +175,29 @@ func (s *SnapshottingStore[E]) Save(ctx context.Context, aggregate *Aggregate[E]
 		if errors.Is(err, ErrNoUnappliedEvents) {
 			break
 		} else if err != nil {
-			return fmt.Errorf("applying next event: %w", err)
+			return SaveAggregateError{AggregateID: aggregate.ID(), Operation: "applying next aggregate event", Err: err}
 		}
 
-		if s.policy.ShouldSnapshot(aggregate.ID(), aggregate.Version(), now) {
-			slog.Debug("taking snapshot", "aggregate_id", aggregate.ID(), "version", aggregate.Version())
+		if !s.policy.ShouldSnapshot(aggregate.ID(), aggregate.Version(), now) {
+			continue
+		}
 
-			entity := aggregate.Entity()
+		slog.Debug("taking snapshot", "aggregate_id", aggregate.ID(), "version", aggregate.Version())
 
-			data, err := s.marshaler.Marshal(&entity)
-			if err != nil {
-				slog.Error("failed to marshal snapshot", "error", err)
-				continue
-			}
+		entity := aggregate.Entity()
+		data, err := s.marshaler.Marshal(&entity)
+		if err != nil {
+			slog.Error("failed to marshal snapshot", "error", err)
+			continue
+		}
 
-			if err := s.writer.WriteSnapshot(ctx, &snapshotstore.AggregateSnapshot{
-				AggregateID:      aggregate.ID(),
-				AggregateVersion: aggregate.Version(),
-				Data:             data,
-			}); err != nil {
-				slog.Error("failed to write snapshot", "error", err)
-				continue
-			}
+		if err := s.writer.WriteSnapshot(ctx, &snapshotstore.AggregateSnapshot{
+			AggregateID:      aggregate.ID(),
+			AggregateVersion: aggregate.Version(),
+			Data:             data,
+		}); err != nil {
+			slog.Error("failed to write snapshot", "error", err)
+			continue
 		}
 	}
 
