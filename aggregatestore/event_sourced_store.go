@@ -44,6 +44,16 @@ func NewEventSourcedStore[E estoria.Entity](
 		log:                   slog.Default().WithGroup("aggregatestore"),
 	}
 
+	for _, opt := range opts {
+		if err := opt(store); err != nil {
+			return nil, InitializeAggregateStoreError{Operation: "applying option", Err: err}
+		}
+	}
+
+	if store.eventReader == nil && store.eventWriter == nil {
+		return nil, InitializeAggregateStoreError{Err: errors.New("no event stream reader or writer provided")}
+	}
+
 	// register entity event factories
 	entity := store.newEntity(uuid.UUID{})
 	for _, prototype := range entity.EventTypes() {
@@ -57,16 +67,6 @@ func NewEventSourcedStore[E estoria.Entity](
 		}
 
 		store.entityEventPrototypes[prototype.EventType()] = prototype
-	}
-
-	for _, opt := range opts {
-		if err := opt(store); err != nil {
-			return nil, InitializeAggregateStoreError{Operation: "applying option", Err: err}
-		}
-	}
-
-	if store.eventReader == nil && store.eventWriter == nil {
-		return nil, InitializeAggregateStoreError{Err: errors.New("no event stream reader or writer provided")}
 	}
 
 	return store, nil
@@ -272,21 +272,21 @@ func (s *EventSourcedStore[E]) Save(ctx context.Context, aggregate *Aggregate[E]
 
 type EventSourcedStoreOption[E estoria.Entity] func(*EventSourcedStore[E]) error
 
-func WithEntityEventMarshaler[E estoria.Entity](marshaler estoria.Marshaler[estoria.EntityEvent, *estoria.EntityEvent]) EventSourcedStoreOption[E] {
+func WithEventMarshaler[E estoria.Entity](marshaler estoria.Marshaler[estoria.EntityEvent, *estoria.EntityEvent]) EventSourcedStoreOption[E] {
 	return func(s *EventSourcedStore[E]) error {
 		s.entityEventMarshaler = marshaler
 		return nil
 	}
 }
 
-func WithStreamReader[E estoria.Entity](reader eventstore.StreamReader) EventSourcedStoreOption[E] {
+func WithEventStreamReader[E estoria.Entity](reader eventstore.StreamReader) EventSourcedStoreOption[E] {
 	return func(s *EventSourcedStore[E]) error {
 		s.eventReader = reader
 		return nil
 	}
 }
 
-func WithStreamWriter[E estoria.Entity](writer eventstore.StreamWriter) EventSourcedStoreOption[E] {
+func WithEventStreamWriter[E estoria.Entity](writer eventstore.StreamWriter) EventSourcedStoreOption[E] {
 	return func(s *EventSourcedStore[E]) error {
 		s.eventWriter = writer
 		return nil

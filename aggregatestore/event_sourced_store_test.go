@@ -211,7 +211,7 @@ func TestNewEventSourcedStore(t *testing.T) {
 				return &mockEntity{ID: typeid.FromUUID("testentity", id)}
 			},
 			haveOpts: []aggregatestore.EventSourcedStoreOption[*mockEntity]{
-				aggregatestore.WithEntityEventMarshaler[*mockEntity](mockMarshaler{}),
+				aggregatestore.WithEventMarshaler[*mockEntity](mockMarshaler{}),
 			},
 		},
 		{
@@ -224,7 +224,7 @@ func TestNewEventSourcedStore(t *testing.T) {
 				return &mockEntity{ID: typeid.FromUUID("testentity", id)}
 			},
 			haveOpts: []aggregatestore.EventSourcedStoreOption[*mockEntity]{
-				aggregatestore.WithStreamReader[*mockEntity](func() eventstore.Store {
+				aggregatestore.WithEventStreamReader[*mockEntity](func() eventstore.Store {
 					store, _ := memory.NewEventStore()
 					return store
 				}()),
@@ -240,21 +240,31 @@ func TestNewEventSourcedStore(t *testing.T) {
 				return &mockEntity{ID: typeid.FromUUID("testentity", id)}
 			},
 			haveOpts: []aggregatestore.EventSourcedStoreOption[*mockEntity]{
-				aggregatestore.WithStreamWriter[*mockEntity](func() eventstore.Store {
+				aggregatestore.WithEventStreamWriter[*mockEntity](func() eventstore.Store {
 					store, _ := memory.NewEventStore()
 					return store
 				}()),
 			},
 		},
-		// {
-		// 	name: "returns an error when no event store is provided",
-		// 	haveEntityFactory: func(id uuid.UUID) *mockEntity {
-		// 		return &mockEntity{id: typeid.FromUUID("testentity", id)}
-		// 	},
-		// 	wantErr: aggregatestore.InitializeAggregateStoreError{
-		// 		Err: errors.New("no event stream reader or writer provided"),
-		// 	},
-		// },
+		{
+			name: "returns an error when no event store is provided",
+			haveEventStore: func() eventstore.Store {
+				store, _ := memory.NewEventStore()
+				return store
+			},
+			haveEntityFactory: func(id uuid.UUID) *mockEntity {
+				return &mockEntity{ID: typeid.FromUUID("testentity", id)}
+			},
+			haveOpts: []aggregatestore.EventSourcedStoreOption[*mockEntity]{
+				aggregatestore.WithEventStreamReader[*mockEntity](func() eventstore.Store {
+					return nil
+				}()),
+				aggregatestore.WithEventStreamWriter[*mockEntity](func() eventstore.Store {
+					return nil
+				}()),
+			},
+			wantErr: aggregatestore.InitializeAggregateStoreError{Err: errors.New("no event stream reader or writer provided")},
+		},
 		{
 			name: "returns an error when a duplicate entity event prototype is registered",
 			haveEventStore: func() eventstore.Store {
@@ -902,7 +912,7 @@ func TestEventSourcedStore_HydrateAggregate(t *testing.T) {
 				return store
 			},
 			haveStoreOpts: []aggregatestore.EventSourcedStoreOption[*mockEntity]{
-				aggregatestore.WithStreamReader[*mockEntity](nil),
+				aggregatestore.WithEventStreamReader[*mockEntity](nil),
 			},
 			haveEntityFactory: func(id uuid.UUID) *mockEntity {
 				return newMockEntity(typeid.FromUUID("mockentity", id), 5)
@@ -994,7 +1004,7 @@ func TestEventSourcedStore_HydrateAggregate(t *testing.T) {
 				return store
 			},
 			haveStoreOpts: []aggregatestore.EventSourcedStoreOption[*mockEntity]{
-				aggregatestore.WithStreamReader[*mockEntity](mockStreamReader{
+				aggregatestore.WithEventStreamReader[*mockEntity](mockStreamReader{
 					readStreamErr: errors.New("mock error"),
 				}),
 			},
@@ -1026,7 +1036,7 @@ func TestEventSourcedStore_HydrateAggregate(t *testing.T) {
 				return newMockEntity(typeid.FromUUID("mockentity", id), 5)
 			},
 			haveStoreOpts: []aggregatestore.EventSourcedStoreOption[*mockEntity]{
-				aggregatestore.WithStreamReader[*mockEntity](mockStreamReader{
+				aggregatestore.WithEventStreamReader[*mockEntity](mockStreamReader{
 					readStreamIterator: mockStreamIterator{
 						nextErr: errors.New("mock error"),
 					},
@@ -1079,7 +1089,7 @@ func TestEventSourcedStore_HydrateAggregate(t *testing.T) {
 				return newMockEntity(typeid.FromUUID("mockentity", id), 5)
 			},
 			haveStoreOpts: []aggregatestore.EventSourcedStoreOption[*mockEntity]{
-				aggregatestore.WithEntityEventMarshaler[*mockEntity](mockMarshaler{
+				aggregatestore.WithEventMarshaler[*mockEntity](mockMarshaler{
 					unmarshalErr: errors.New("mock error"),
 				}),
 			},
@@ -1456,7 +1466,7 @@ func TestEventSourcedStore_SaveAggregate(t *testing.T) {
 				return newMockEntity(typeid.FromUUID("mockentity", id), 5)
 			},
 			haveStoreOpts: []aggregatestore.EventSourcedStoreOption[*mockEntity]{
-				aggregatestore.WithStreamWriter[*mockEntity](nil),
+				aggregatestore.WithEventStreamWriter[*mockEntity](nil),
 			},
 			haveAggregate: func() *aggregatestore.Aggregate[*mockEntity] {
 				agg := &aggregatestore.Aggregate[*mockEntity]{}
@@ -1515,7 +1525,7 @@ func TestEventSourcedStore_SaveAggregate(t *testing.T) {
 				return newMockEntity(typeid.FromUUID("mockentity", id), 5)
 			},
 			haveStoreOpts: []aggregatestore.EventSourcedStoreOption[*mockEntity]{
-				aggregatestore.WithEntityEventMarshaler[*mockEntity](mockMarshaler{
+				aggregatestore.WithEventMarshaler[*mockEntity](mockMarshaler{
 					marshalErr: errors.New("mock error"),
 				}),
 			},
@@ -1544,7 +1554,7 @@ func TestEventSourcedStore_SaveAggregate(t *testing.T) {
 				return newMockEntity(typeid.FromUUID("mockentity", id), 5)
 			},
 			haveStoreOpts: []aggregatestore.EventSourcedStoreOption[*mockEntity]{
-				aggregatestore.WithStreamWriter[*mockEntity](mockStreamWriter{
+				aggregatestore.WithEventStreamWriter[*mockEntity](mockStreamWriter{
 					appendStreamErr: errors.New("mock error"),
 				}),
 			},
