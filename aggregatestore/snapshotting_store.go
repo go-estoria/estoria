@@ -54,6 +54,15 @@ func NewSnapshottingStore[E estoria.Entity](
 	policy SnapshotPolicy,
 	opts ...SnapshottingStoreOption[E],
 ) (*SnapshottingStore[E], error) {
+	switch {
+	case inner == nil:
+		return nil, InitializeAggregateStoreError{Err: errors.New("inner store is required")}
+	case store == nil:
+		return nil, InitializeAggregateStoreError{Err: errors.New("snapshot store is required")}
+	case policy == nil:
+		return nil, InitializeAggregateStoreError{Err: errors.New("snapshot policy is required")}
+	}
+
 	aggregateStore := &SnapshottingStore[E]{
 		inner:     inner,
 		reader:    store,
@@ -65,7 +74,7 @@ func NewSnapshottingStore[E estoria.Entity](
 
 	for _, opt := range opts {
 		if err := opt(aggregateStore); err != nil {
-			return nil, fmt.Errorf("applying option: %w", err)
+			return nil, InitializeAggregateStoreError{Operation: "applying option", Err: err}
 		}
 	}
 
@@ -98,12 +107,32 @@ func (s *SnapshottingStore[E]) Load(ctx context.Context, aggregateID typeid.UUID
 
 // Hydrate hydrates an aggregate.
 func (s *SnapshottingStore[E]) Hydrate(ctx context.Context, aggregate *Aggregate[E], opts HydrateOptions) error {
+	switch {
+	case aggregate == nil:
+		return HydrateAggregateError{Err: errors.New("aggregate is nil")}
+	case opts.ToVersion < 0:
+		return HydrateAggregateError{AggregateID: aggregate.ID(), Err: errors.New("invalid target version")}
+	case s.reader == nil:
+		return HydrateAggregateError{AggregateID: aggregate.ID(), Err: errors.New("snapshot store has no snapshot reader")}
+	}
+
 	log := s.log.With("aggregate_id", aggregate.ID())
 	log.Debug("hydrating aggregate from snapshot", "from_version", aggregate.Version(), "to_version", opts.ToVersion)
 
-	snap, err := s.reader.ReadSnapshot(ctx, aggregate.ID(), snapshotstore.ReadSnapshotOptions{
-		MaxVersion: opts.ToVersion,
-	})
+	readSnapshotOpts := snapshotstore.ReadSnapshotOptions{}
+	if opts.ToVersion > 0 {
+		if v := aggregate.Version(); v == opts.ToVersion {
+			log.Debug("aggregate already at target version, nothing to hydrate", "version", opts.ToVersion)
+			return s.inner.Hydrate(ctx, aggregate, opts)
+		} else if v > opts.ToVersion {
+			log.Debug("aggregate version is higher than target version, nothing to hydrate", "version", v, "target_version", opts.ToVersion)
+			return s.inner.Hydrate(ctx, aggregate, opts)
+		}
+
+		readSnapshotOpts.MaxVersion = opts.ToVersion
+	}
+
+	snap, err := s.reader.ReadSnapshot(ctx, aggregate.ID(), readSnapshotOpts)
 	if err != nil {
 		slog.Warn("failed to read snapshot", "error", err)
 		return s.inner.Hydrate(ctx, aggregate, opts)
