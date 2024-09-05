@@ -27,6 +27,8 @@ func (a *Aggregate[E]) Append(events ...*AggregateEvent) error {
 
 // Entity returns the aggregate's underlying entity.
 // The entity is the domain model whose state the aggregate manages.
+//
+//nolint:ireturn // the return type is a type parameter
 func (a *Aggregate[E]) Entity() E {
 	return a.state.Entity()
 }
@@ -119,6 +121,8 @@ func (a *AggregateState[E]) WillSave(events []*AggregateEvent) {
 }
 
 // Entity returns the aggregate's entity.
+//
+//nolint:ireturn // the return type is a type parameter
 func (a *AggregateState[E]) Entity() E {
 	return a.entity
 }
@@ -148,7 +152,7 @@ func (a *AggregateState[E]) Version() int64 {
 	return a.version
 }
 
-// An AggregateEvent is an event that that applies to an aggregate to change its state.
+// An AggregateEvent is an event that applies to an aggregate to change its state.
 // It consists of a unique ID, a timestamp, and an entity event, which holds data specific
 // to an event representinig an incremental change to the underlying entity.
 type AggregateEvent struct {

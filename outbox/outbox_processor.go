@@ -118,10 +118,12 @@ func (p *Processor) Handle(ctx context.Context, entry OutboxItem) error {
 
 		if err := handler.Handle(ctx, entry); err != nil {
 			slog.Error("handling outbox item", "handler", handler.Name(), "error", err)
-			p.outbox.MarkHandled(ctx, entry.ID(), HandlerResult{
+			if mhErr := p.outbox.MarkHandled(ctx, entry.ID(), HandlerResult{
 				HandlerName: handler.Name(),
 				Error:       err,
-			})
+			}); mhErr != nil {
+				slog.Error("marking outbox item as handled", "error", mhErr)
+			}
 		} else {
 			p.outbox.MarkHandled(ctx, entry.ID(), HandlerResult{
 				HandlerName: handler.Name(),

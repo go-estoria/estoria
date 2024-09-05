@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"time"
 
 	"github.com/go-estoria/estoria"
 	"github.com/go-estoria/estoria/eventstore"
@@ -84,12 +83,10 @@ func (s *EventStreamStore) WriteSnapshot(ctx context.Context, snap *AggregateSna
 		return fmt.Errorf("marshaling snapshot data for stream event: %w", err)
 	}
 
-	if err := s.eventWriter.AppendStream(ctx, snapshotStreamID, []*eventstore.Event{
+	if err := s.eventWriter.AppendStream(ctx, snapshotStreamID, []*eventstore.WritableEvent{
 		{
-			ID:        eventID,
-			StreamID:  snapshotStreamID,
-			Timestamp: time.Now(),
-			Data:      eventData,
+			ID:   eventID,
+			Data: eventData,
 		},
 	}, eventstore.AppendStreamOptions{}); err != nil {
 		return fmt.Errorf("appending snapshot stream: %w", err)
