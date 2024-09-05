@@ -23,15 +23,15 @@ type mockStore[E estoria.Entity] struct {
 	saveErr           error
 }
 
-func (s *mockStore[E]) New(id uuid.UUID) (*aggregatestore.Aggregate[E], error) {
+func (s *mockStore[E]) New(_ uuid.UUID) (*aggregatestore.Aggregate[E], error) {
 	return s.newAggregate, s.newErr
 }
 
-func (s *mockStore[E]) Load(_ context.Context, id typeid.UUID, opts aggregatestore.LoadOptions) (*aggregatestore.Aggregate[E], error) {
+func (s *mockStore[E]) Load(_ context.Context, _ typeid.UUID, _ aggregatestore.LoadOptions) (*aggregatestore.Aggregate[E], error) {
 	return s.loadedAggregate, s.loadErr
 }
 
-func (s *mockStore[E]) Hydrate(_ context.Context, aggregate *aggregatestore.Aggregate[E], opts aggregatestore.HydrateOptions) error {
+func (s *mockStore[E]) Hydrate(_ context.Context, aggregate *aggregatestore.Aggregate[E], _ aggregatestore.HydrateOptions) error {
 	if aggregate != nil && s.hydratedAggregate != nil {
 		*aggregate = *s.hydratedAggregate
 	}
@@ -39,7 +39,7 @@ func (s *mockStore[E]) Hydrate(_ context.Context, aggregate *aggregatestore.Aggr
 	return s.hydrateErr
 }
 
-func (s *mockStore[E]) Save(_ context.Context, aggregate *aggregatestore.Aggregate[E], opts aggregatestore.SaveOptions) error {
+func (s *mockStore[E]) Save(_ context.Context, aggregate *aggregatestore.Aggregate[E], _ aggregatestore.SaveOptions) error {
 	if aggregate != nil && s.savedAggregate != nil {
 		*aggregate = *s.savedAggregate
 	}
