@@ -54,19 +54,18 @@ func NewEventSourcedStore[E estoria.Entity](
 		return nil, InitializeAggregateStoreError{Err: errors.New("no event stream reader or writer provided")}
 	}
 
-	// register entity event factories
+	// register entity event prototypes
 	entity := store.newEntity(uuid.UUID{})
 	for _, prototype := range entity.EventTypes() {
-		if _, ok := store.entityEventPrototypes[prototype.EventType()]; ok {
-			return nil, InitializeAggregateStoreError{
-				Operation: "registering entity event prototype",
-				Err: fmt.Errorf("duplicate event type %s for entity %s",
-					prototype.EventType(),
-					entity.EntityID().TypeName()),
-			}
+		if _, registered := store.entityEventPrototypes[prototype.EventType()]; !registered {
+			store.entityEventPrototypes[prototype.EventType()] = prototype
+			continue
 		}
 
-		store.entityEventPrototypes[prototype.EventType()] = prototype
+		return nil, InitializeAggregateStoreError{
+			Operation: "registering entity event prototype",
+			Err:       fmt.Errorf("duplicate event type %s for entity %s", prototype.EventType(), entity.EntityID().TypeName()),
+		}
 	}
 
 	return store, nil
