@@ -8,7 +8,7 @@ Event sourcing enables you to model your application as a series of state-changi
 
 Estoria provides composable components for implementing event sourcing in a Go application, including:
 
-- Event-based aggregegate state management
+- Event-based aggregate state management
 - Flexible event store implementations
 - Transactional outbox processing
 - Aggregate snapshotting
