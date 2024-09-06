@@ -679,7 +679,7 @@ func TestSnapshottingStore_Hydrate(t *testing.T) {
 			},
 			haveSnapshotStore: &mockSnapshotStore{},
 			haveAggregate:     nil,
-			wantErr:           aggregatestore.HydrateAggregateError{Err: errors.New("aggregate is nil")},
+			wantErr:           aggregatestore.HydrateAggregateError{Err: aggregatestore.ErrNilAggregate},
 		},
 		{
 			name: "returns an error when the target version is invalid",

@@ -2,7 +2,6 @@ package memory
 
 import (
 	"context"
-	"io"
 
 	"github.com/go-estoria/estoria"
 	"github.com/go-estoria/estoria/eventstore"
@@ -24,11 +23,11 @@ func (i *streamIterator) Next(_ context.Context) (*eventstore.Event, error) {
 	case i == nil, i.events == nil:
 		return nil, eventstore.StreamIteratorClosedError{StreamID: i.streamID}
 	case i.direction == eventstore.Forward && i.cursor >= int64(len(i.events)):
-		return nil, io.EOF
+		return nil, eventstore.ErrEndOfEventStream
 	case i.direction == eventstore.Reverse && i.cursor < 0:
-		return nil, io.EOF
+		return nil, eventstore.ErrEndOfEventStream
 	case i.limit > 0 && i.retrieved >= i.limit:
-		return nil, io.EOF
+		return nil, eventstore.ErrEndOfEventStream
 	}
 
 	doc := i.events[i.cursor]

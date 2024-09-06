@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 
 	"github.com/go-estoria/estoria"
@@ -109,7 +108,7 @@ func (s *EventSourcedStore[E]) Load(ctx context.Context, id typeid.UUID, opts Lo
 func (s *EventSourcedStore[E]) Hydrate(ctx context.Context, aggregate *Aggregate[E], opts HydrateOptions) error {
 	switch {
 	case aggregate == nil:
-		return HydrateAggregateError{Err: errors.New("aggregate is nil")}
+		return HydrateAggregateError{Err: ErrNilAggregate}
 	case opts.ToVersion < 0:
 		return HydrateAggregateError{AggregateID: aggregate.ID(), Err: errors.New("invalid target version")}
 	case s.eventReader == nil:
@@ -140,9 +139,8 @@ func (s *EventSourcedStore[E]) Hydrate(ctx context.Context, aggregate *Aggregate
 
 	// load the aggregate's events
 	stream, err := s.eventReader.ReadStream(ctx, aggregate.ID(), readOpts)
-	notFoundErr := eventstore.StreamNotFoundError{}
-	if errors.As(err, &notFoundErr) {
-		return AggregateNotFoundError{AggregateID: aggregate.ID()}
+	if errors.As(err, &eventstore.StreamNotFoundError{}) {
+		return ErrAggregateNotFound
 	} else if err != nil {
 		return HydrateAggregateError{AggregateID: aggregate.ID(), Operation: "reading event stream", Err: err}
 	}
@@ -150,10 +148,10 @@ func (s *EventSourcedStore[E]) Hydrate(ctx context.Context, aggregate *Aggregate
 	defer stream.Close(ctx)
 
 	// apply the events to the aggregate
-	for numRead := 0; ; numRead++ {
+	for {
 		event, err := stream.Next(ctx)
-		if errors.Is(err, io.EOF) {
-			log.Debug("end of event stream", "events_read", numRead)
+		if errors.Is(err, eventstore.ErrEndOfEventStream) {
+			log.Debug("end of event stream")
 			break
 		} else if err != nil {
 			return HydrateAggregateError{AggregateID: aggregate.ID(), Operation: "reading event", Err: err}
@@ -201,7 +199,7 @@ func (s *EventSourcedStore[E]) Hydrate(ctx context.Context, aggregate *Aggregate
 // Save saves an aggregate.
 func (s *EventSourcedStore[E]) Save(ctx context.Context, aggregate *Aggregate[E], opts SaveOptions) error {
 	if aggregate == nil {
-		return SaveAggregateError{Err: errors.New("aggregate is nil")}
+		return SaveAggregateError{Err: ErrNilAggregate}
 	} else if s.eventWriter == nil {
 		return SaveAggregateError{AggregateID: aggregate.ID(), Err: errors.New("event store has no event stream writer")}
 	}

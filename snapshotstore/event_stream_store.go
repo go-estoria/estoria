@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 
 	"github.com/go-estoria/estoria"
@@ -41,7 +40,7 @@ func (s *EventStreamStore) ReadSnapshot(ctx context.Context, aggregateID typeid.
 	}
 
 	event, err := stream.Next(ctx)
-	if err == io.EOF {
+	if errors.Is(err, eventstore.ErrEndOfEventStream) {
 		return nil, nil
 	} else if err != nil {
 		return nil, fmt.Errorf("reading snapshot event: %w", err)
