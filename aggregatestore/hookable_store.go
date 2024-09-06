@@ -38,11 +38,9 @@ var _ Store[estoria.Entity] = (*HookableStore[estoria.Entity])(nil)
 // NewHookableStore creates a new HookableStore.
 func NewHookableStore[E estoria.Entity](inner Store[E]) *HookableStore[E] {
 	return &HookableStore[E]{
-		inner:          inner,
-		precreateHooks: make([]PrecreateHook, 0),
-		preloadHooks:   make([]PreloadHook, 0),
-		hooks:          make(map[HookStage][]Hook[E]),
-		log:            slog.Default().WithGroup("hookableaggregatestore"),
+		inner: inner,
+		hooks: make(map[HookStage][]Hook[E]),
+		log:   slog.Default().WithGroup("hookableaggregatestore"),
 	}
 }
 
