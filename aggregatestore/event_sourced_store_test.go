@@ -467,7 +467,7 @@ func TestEventSourcedStore_LoadAggregate(t *testing.T) {
 			haveEntityFactory: func(id uuid.UUID) *mockEntity {
 				return newMockEntity(typeid.FromUUID("mockentity", id), 3)
 			},
-			wantErr: errors.New("hydrating aggregate: aggregate not found: " + aggregateID.String()),
+			wantErr: errors.New("hydrating aggregate: aggregate not found"),
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
@@ -938,7 +938,7 @@ func TestEventSourcedStore_HydrateAggregate(t *testing.T) {
 				return nil
 			},
 			haveOpts: aggregatestore.HydrateOptions{},
-			wantErr:  errors.New("aggregate is nil"),
+			wantErr:  aggregatestore.ErrNilAggregate,
 		},
 		{
 			name: "returns an error when the target version is invalid",
@@ -988,7 +988,7 @@ func TestEventSourcedStore_HydrateAggregate(t *testing.T) {
 				agg.State().SetEntityAtVersion(newMockEntity(aggregateID, 5), 0)
 				return agg
 			},
-			wantErr: errors.New("aggregate not found: " + aggregateID.String()),
+			wantErr: errors.New("aggregate not found"),
 		},
 		{
 			name: "returns an error when unable to obtain an event stream iterator",
@@ -1454,7 +1454,7 @@ func TestEventSourcedStore_SaveAggregate(t *testing.T) {
 			haveAggregate: func() *aggregatestore.Aggregate[*mockEntity] {
 				return nil
 			},
-			wantErr: errors.New("aggregate is nil"),
+			wantErr: aggregatestore.ErrNilAggregate,
 		},
 		{
 			name: "returns an error when the event stream writer is nil",

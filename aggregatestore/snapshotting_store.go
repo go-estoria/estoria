@@ -80,7 +80,7 @@ func NewSnapshottingStore[E estoria.Entity](
 	return aggregateStore, nil
 }
 
-// NewAggregate creates a new aggregate.
+// New creates a new aggregate.
 func (s *SnapshottingStore[E]) New(id uuid.UUID) (*Aggregate[E], error) {
 	return s.inner.New(id)
 }
@@ -108,7 +108,7 @@ func (s *SnapshottingStore[E]) Load(ctx context.Context, aggregateID typeid.UUID
 func (s *SnapshottingStore[E]) Hydrate(ctx context.Context, aggregate *Aggregate[E], opts HydrateOptions) error {
 	switch {
 	case aggregate == nil:
-		return HydrateAggregateError{Err: errors.New("aggregate is nil")}
+		return HydrateAggregateError{Err: ErrNilAggregate}
 	case opts.ToVersion < 0:
 		return HydrateAggregateError{AggregateID: aggregate.ID(), Err: errors.New("invalid target version")}
 	case s.reader == nil:

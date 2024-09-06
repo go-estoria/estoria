@@ -23,7 +23,8 @@ type StreamReader interface {
 
 // An StreamIterator reads events from a stream.
 type StreamIterator interface {
-	// Next reads the next event from the stream. It returns io.EOF when there are no more events.
+	// Next reads the next event from the stream.
+	// It returns ErrEndOfEventStream when there are no more events.
 	Next(ctx context.Context) (*Event, error)
 
 	// Close closes the stream iterator.
@@ -150,3 +151,5 @@ type StreamIteratorClosedError struct {
 func (e StreamIteratorClosedError) Error() string {
 	return "stream is closed: " + e.StreamID.String()
 }
+
+var ErrEndOfEventStream = fmt.Errorf("end of event stream")

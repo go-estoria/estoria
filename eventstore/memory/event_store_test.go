@@ -3,7 +3,6 @@ package memory_test
 import (
 	"context"
 	"errors"
-	"io"
 	"testing"
 
 	"github.com/go-estoria/estoria/eventstore"
@@ -335,7 +334,7 @@ func TestEventStore_AppendStream(t *testing.T) {
 			var events []*eventstore.Event
 			for {
 				event, err := iter.Next(context.Background())
-				if err == io.EOF {
+				if errors.Is(err, eventstore.ErrEndOfEventStream) {
 					break
 				} else if err != nil {
 					t.Fatalf("Next() error: %v", err)
@@ -612,7 +611,7 @@ func TestEventStore_ReadStream(t *testing.T) {
 			var gotEvents []*eventstore.Event
 			for {
 				gotEvent, err := iter.Next(context.Background())
-				if err == io.EOF {
+				if errors.Is(err, eventstore.ErrEndOfEventStream) {
 					break
 				} else if err != nil {
 					t.Fatalf("Next() error: %v", err)

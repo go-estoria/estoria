@@ -2,6 +2,7 @@ package aggregatestore
 
 import (
 	"context"
+	"errors"
 
 	"github.com/go-estoria/estoria"
 	"github.com/go-estoria/estoria/typeid"
@@ -9,7 +10,6 @@ import (
 )
 
 // A Store is a read/write store for aggregates.
-// See package `aggregatestore` for implementations.
 type Store[E estoria.Entity] interface {
 	New(id uuid.UUID) (*Aggregate[E], error)
 	Load(ctx context.Context, id typeid.UUID, opts LoadOptions) (*Aggregate[E], error)
@@ -53,13 +53,10 @@ type SaveOptions struct {
 	SkipApply bool
 }
 
-type AggregateNotFoundError struct {
-	AggregateID typeid.UUID
-}
+var ErrNilAggregate = errors.New("aggregate is nil")
 
-func (e AggregateNotFoundError) Error() string {
-	return "aggregate not found: " + e.AggregateID.String()
-}
+// ErrAggregateNotFound indicates that an aggregate was not found in the aggregate store.
+var ErrAggregateNotFound = errors.New("aggregate not found")
 
 type InitializeAggregateStoreError struct {
 	Operation string
