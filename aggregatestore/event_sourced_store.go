@@ -139,7 +139,7 @@ func (s *EventSourcedStore[E]) Hydrate(ctx context.Context, aggregate *Aggregate
 
 	// load the aggregate's events
 	stream, err := s.eventReader.ReadStream(ctx, aggregate.ID(), readOpts)
-	if errors.As(err, &eventstore.StreamNotFoundError{}) {
+	if errors.Is(err, eventstore.ErrStreamNotFound) {
 		return ErrAggregateNotFound
 	} else if err != nil {
 		return HydrateAggregateError{AggregateID: aggregate.ID(), Operation: "reading event stream", Err: err}

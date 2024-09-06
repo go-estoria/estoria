@@ -97,7 +97,7 @@ func (s *EventStore) ReadStream(_ context.Context, streamID typeid.UUID, opts ev
 
 	stream, ok := s.events[streamID.String()]
 	if !ok || len(stream) == 0 {
-		return nil, eventstore.StreamNotFoundError{StreamID: streamID}
+		return nil, eventstore.ErrStreamNotFound
 	}
 
 	cursor := int64(0)
