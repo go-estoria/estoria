@@ -23,7 +23,7 @@ type EventSourcedStore[E estoria.Entity] struct {
 	entityEventPrototypes map[string]estoria.EntityEvent
 	entityEventMarshaler  estoria.Marshaler[estoria.EntityEvent, *estoria.EntityEvent]
 
-	log *slog.Logger
+	log estoria.Logger
 }
 
 var _ Store[estoria.Entity] = (*EventSourcedStore[estoria.Entity])(nil)
@@ -115,8 +115,7 @@ func (s *EventSourcedStore[E]) Hydrate(ctx context.Context, aggregate *Aggregate
 		return HydrateAggregateError{AggregateID: aggregate.ID(), Err: errors.New("event store has no event stream reader")}
 	}
 
-	log := s.log.With("aggregate_id", aggregate.ID())
-	log.Debug("hydrating aggregate from event store", "from_version", aggregate.Version(), "to_version", opts.ToVersion)
+	s.log.Debug("hydrating aggregate from event store", "from_version", aggregate.Version(), "to_version", opts.ToVersion)
 
 	readOpts := eventstore.ReadStreamOptions{
 		Offset:    aggregate.Version(),
@@ -125,7 +124,9 @@ func (s *EventSourcedStore[E]) Hydrate(ctx context.Context, aggregate *Aggregate
 
 	if opts.ToVersion > 0 {
 		if v := aggregate.Version(); v == opts.ToVersion {
-			log.Debug("aggregate already at target version, nothing to hydrate", "version", opts.ToVersion)
+			s.log.Debug("aggregate already at target version, nothing to hydrate",
+				"aggregate_id", aggregate.ID(),
+				"version", opts.ToVersion)
 			return nil
 		} else if v > opts.ToVersion {
 			return HydrateAggregateError{
@@ -151,7 +152,7 @@ func (s *EventSourcedStore[E]) Hydrate(ctx context.Context, aggregate *Aggregate
 	for {
 		event, err := stream.Next(ctx)
 		if errors.Is(err, eventstore.ErrEndOfEventStream) {
-			log.Debug("end of event stream")
+			s.log.Debug("end of event stream", "aggregate_id", aggregate.ID())
 			break
 		} else if err != nil {
 			return HydrateAggregateError{AggregateID: aggregate.ID(), Operation: "reading event", Err: err}

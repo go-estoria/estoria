@@ -258,7 +258,7 @@ func TestCachedStore_Load(t *testing.T) {
 			haveCache: func() aggregatestore.AggregateCache[*mockEntity] {
 				return aggregatecache.NewInMemoryCache[*mockEntity]()
 			},
-			wantErr: errors.New("mock error"),
+			wantErr: errors.New("loading from inner aggregate store: mock error"),
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
@@ -447,7 +447,7 @@ func TestCachedStore_Save(t *testing.T) {
 				agg.State().SetEntityAtVersion(&mockEntity{ID: aggregateID}, 42)
 				return agg
 			},
-			wantErr: errors.New("saving to inner store: mock error"),
+			wantErr: errors.New("saving to inner aggregate store: mock error"),
 		},
 		{
 			name: "does not return an error when failing to add the aggregate to the cache",

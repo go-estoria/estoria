@@ -41,7 +41,7 @@ type SnapshottingStore[E estoria.Entity] struct {
 	writer    SnapshotWriter
 	policy    SnapshotPolicy
 	marshaler estoria.Marshaler[E, *E]
-	log       *slog.Logger
+	log       estoria.Logger
 }
 
 var _ Store[estoria.Entity] = (*SnapshottingStore[estoria.Entity])(nil)
@@ -115,16 +115,23 @@ func (s *SnapshottingStore[E]) Hydrate(ctx context.Context, aggregate *Aggregate
 		return HydrateAggregateError{AggregateID: aggregate.ID(), Err: errors.New("snapshot store has no snapshot reader")}
 	}
 
-	log := s.log.With("aggregate_id", aggregate.ID())
-	log.Debug("hydrating aggregate from snapshot", "from_version", aggregate.Version(), "to_version", opts.ToVersion)
+	s.log.Debug("hydrating aggregate from snapshot",
+		"aggregate_id", aggregate.ID(),
+		"from_version", aggregate.Version(),
+		"to_version", opts.ToVersion)
 
 	readSnapshotOpts := snapshotstore.ReadSnapshotOptions{}
 	if opts.ToVersion > 0 {
 		if v := aggregate.Version(); v == opts.ToVersion {
-			log.Debug("aggregate already at target version, nothing to hydrate", "version", opts.ToVersion)
+			s.log.Debug("aggregate already at target version, nothing to hydrate",
+				"aggregate_id", aggregate.ID(),
+				"version", opts.ToVersion)
 			return s.inner.Hydrate(ctx, aggregate, opts)
 		} else if v > opts.ToVersion {
-			log.Debug("aggregate version is higher than target version, nothing to hydrate", "version", v, "target_version", opts.ToVersion)
+			s.log.Debug("aggregate version is higher than target version, nothing to hydrate",
+				"aggregate_id", aggregate.ID(),
+				"version", v,
+				"target_version", opts.ToVersion)
 			return s.inner.Hydrate(ctx, aggregate, opts)
 		}
 
@@ -151,7 +158,7 @@ func (s *SnapshottingStore[E]) Hydrate(ctx context.Context, aggregate *Aggregate
 		return s.inner.Hydrate(ctx, aggregate, opts)
 	}
 
-	log.Debug("loaded snapshot", "version", snap.AggregateVersion)
+	s.log.Debug("loaded snapshot", "aggregate_id", aggregate.ID(), "version", snap.AggregateVersion)
 	aggregate.State().SetEntityAtVersion(entity, snap.AggregateVersion)
 
 	return s.inner.Hydrate(ctx, aggregate, opts)

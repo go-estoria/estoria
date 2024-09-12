@@ -30,7 +30,7 @@ type HookableStore[E estoria.Entity] struct {
 	precreateHooks []PrecreateHook
 	preloadHooks   []PreloadHook
 	hooks          map[HookStage][]Hook[E]
-	log            *slog.Logger
+	log            estoria.Logger
 }
 
 var _ Store[estoria.Entity] = (*HookableStore[estoria.Entity])(nil)
