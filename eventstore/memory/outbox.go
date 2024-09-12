@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"log/slog"
 	"strings"
 	"sync"
 
@@ -46,7 +45,7 @@ func (o *Outbox) RegisterHandlers(eventType estoria.EntityEvent, handlers ...out
 func (o *Outbox) HandleEvents(_ context.Context, events []*eventstore.Event) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
-	slog.Debug("inserting events into outbox", "tx", "inherited", "events", len(events))
+	estoria.GetLogger().Debug("inserting events into outbox", "tx", "inherited", "events", len(events))
 
 	for _, event := range events {
 		item := &outboxItem{
@@ -110,7 +109,7 @@ func (i *OutboxIterator) Next(_ context.Context) (outbox.OutboxItem, error) {
 
 	for ; i.cursor < len(i.outbox.items) && i.outbox.items[i.cursor].FullyProcessed(); i.cursor++ {
 		// skip items that have been fully processed
-		slog.Debug("skipping fully processed outbox item", "event_id", i.outbox.items[i.cursor].EventID())
+		estoria.GetLogger().Debug("skipping fully processed outbox item", "event_id", i.outbox.items[i.cursor].EventID())
 	}
 
 	if i.cursor >= len(i.outbox.items) {

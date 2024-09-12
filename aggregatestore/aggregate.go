@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log/slog"
 	"time"
 
 	"github.com/go-estoria/estoria"
@@ -19,7 +18,7 @@ type Aggregate[E estoria.Entity] struct {
 
 // Append appends events to the aggregate's unsaved events.
 func (a *Aggregate[E]) Append(events ...*AggregateEvent) error {
-	slog.Debug("appending events to aggregate", "aggregate_id", a.ID(), "events", len(events))
+	estoria.GetLogger().Debug("appending events to aggregate", "aggregate_id", a.ID(), "events", len(events))
 	a.state.WillSave(events)
 
 	return nil
