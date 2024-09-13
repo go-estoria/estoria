@@ -16,7 +16,7 @@ import (
 
 // Outbox is an in-memory outbox for use with the in-memory event store.
 type Outbox struct {
-	items    []outbox.OutboxItem
+	items    []outbox.Item
 	handlers map[string][]string // event type -> []handlernames
 	mu       sync.RWMutex
 }
@@ -24,7 +24,7 @@ type Outbox struct {
 // NewOutbox creates a new in-memory outbox.
 func NewOutbox() *Outbox {
 	return &Outbox{
-		items:    make([]outbox.OutboxItem, 0),
+		items:    make([]outbox.Item, 0),
 		handlers: make(map[string][]string), // event type -> handlers
 	}
 }
@@ -103,7 +103,7 @@ type OutboxIterator struct {
 }
 
 // Next returns the next outbox entry.
-func (i *OutboxIterator) Next(_ context.Context) (outbox.OutboxItem, error) {
+func (i *OutboxIterator) Next(_ context.Context) (outbox.Item, error) {
 	i.outbox.mu.Lock()
 	defer i.outbox.mu.Unlock()
 

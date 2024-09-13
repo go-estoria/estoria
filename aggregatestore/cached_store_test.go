@@ -9,43 +9,7 @@ import (
 	"github.com/go-estoria/estoria/aggregatecache"
 	"github.com/go-estoria/estoria/aggregatestore"
 	"github.com/go-estoria/estoria/typeid"
-	"github.com/gofrs/uuid/v5"
 )
-
-type mockStore[E estoria.Entity] struct {
-	newAggregate      *aggregatestore.Aggregate[E]
-	newErr            error
-	loadedAggregate   *aggregatestore.Aggregate[E]
-	loadErr           error
-	hydratedAggregate *aggregatestore.Aggregate[E]
-	hydrateErr        error
-	savedAggregate    *aggregatestore.Aggregate[E]
-	saveErr           error
-}
-
-func (s *mockStore[E]) New(_ uuid.UUID) (*aggregatestore.Aggregate[E], error) {
-	return s.newAggregate, s.newErr
-}
-
-func (s *mockStore[E]) Load(_ context.Context, _ typeid.UUID, _ aggregatestore.LoadOptions) (*aggregatestore.Aggregate[E], error) {
-	return s.loadedAggregate, s.loadErr
-}
-
-func (s *mockStore[E]) Hydrate(_ context.Context, aggregate *aggregatestore.Aggregate[E], _ aggregatestore.HydrateOptions) error {
-	if aggregate != nil && s.hydratedAggregate != nil {
-		*aggregate = *s.hydratedAggregate
-	}
-
-	return s.hydrateErr
-}
-
-func (s *mockStore[E]) Save(_ context.Context, aggregate *aggregatestore.Aggregate[E], _ aggregatestore.SaveOptions) error {
-	if aggregate != nil && s.savedAggregate != nil {
-		*aggregate = *s.savedAggregate
-	}
-
-	return s.saveErr
-}
 
 type mockCache[E estoria.Entity] struct {
 	getAggregateErr error

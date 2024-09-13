@@ -16,10 +16,10 @@ type Outbox interface {
 }
 
 type Iterator interface {
-	Next(ctx context.Context) (OutboxItem, error)
+	Next(ctx context.Context) (Item, error)
 }
 
-type OutboxItem interface {
+type Item interface {
 	ID() uuid.UUID
 	StreamID() typeid.UUID
 	EventID() typeid.UUID
@@ -57,7 +57,7 @@ func (r HandlerResult) String() string {
 
 type ItemHandler interface {
 	Name() string
-	Handle(ctx context.Context, event OutboxItem) error
+	Handle(ctx context.Context, event Item) error
 }
 
 type Processor struct {
@@ -97,7 +97,7 @@ func (p *Processor) Stop() {
 	p.stop()
 }
 
-func (p *Processor) Handle(ctx context.Context, entry OutboxItem) error {
+func (p *Processor) Handle(ctx context.Context, entry Item) error {
 	if entry.FullyProcessed() {
 		estoria.GetLogger().Debug("nothing to process", "event_id", entry.EventID())
 		return nil
@@ -124,11 +124,11 @@ func (p *Processor) Handle(ctx context.Context, entry OutboxItem) error {
 			}); mhErr != nil {
 				estoria.GetLogger().Error("marking outbox item as handled", "error", mhErr)
 			}
-		} else {
-			p.outbox.MarkHandled(ctx, entry.ID(), HandlerResult{
-				HandlerName: handler.Name(),
-				CompletedAt: time.Now(),
-			})
+		} else if err := p.outbox.MarkHandled(ctx, entry.ID(), HandlerResult{
+			HandlerName: handler.Name(),
+			CompletedAt: time.Now(),
+		}); err != nil {
+			estoria.GetLogger().Error("marking outbox item as handled", "error", err)
 		}
 	}
 

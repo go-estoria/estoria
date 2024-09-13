@@ -1,6 +1,7 @@
 package snapshotstore
 
 import (
+	"errors"
 	"time"
 
 	"github.com/go-estoria/estoria/typeid"
@@ -32,7 +33,7 @@ type MaxSnapshotsRetentionPolicy struct {
 	N int64
 }
 
-func (p MaxSnapshotsRetentionPolicy) ShouldRetain(snap *AggregateSnapshot, snapshotIndex, totalSnapshots int64) bool {
+func (p MaxSnapshotsRetentionPolicy) ShouldRetain(_ *AggregateSnapshot, snapshotIndex, totalSnapshots int64) bool {
 	return p.N == 0 || snapshotIndex >= totalSnapshots-p.N
 }
 
@@ -40,6 +41,8 @@ type MinAggregateVersionRetentionPolicy struct {
 	MinVersion int64
 }
 
-func (p MinAggregateVersionRetentionPolicy) ShouldRetain(snap *AggregateSnapshot, snapshotIndex, totalSnapshots int64) bool {
+func (p MinAggregateVersionRetentionPolicy) ShouldRetain(snap *AggregateSnapshot, _, _ int64) bool {
 	return snap.AggregateVersion >= p.MinVersion
 }
+
+var ErrSnapshotNotFound = errors.New("snapshot not found")

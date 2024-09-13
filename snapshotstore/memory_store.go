@@ -2,7 +2,7 @@ package snapshotstore
 
 import (
 	"context"
-	"fmt"
+	"errors"
 
 	"github.com/go-estoria/estoria"
 	"github.com/go-estoria/estoria/typeid"
@@ -28,13 +28,12 @@ func NewMemoryStore() *MemoryStore {
 	}
 }
 
-func (s *MemoryStore) ReadSnapshot(ctx context.Context, aggregateID typeid.UUID, opts ReadSnapshotOptions) (*AggregateSnapshot, error) {
+func (s *MemoryStore) ReadSnapshot(_ context.Context, aggregateID typeid.UUID, opts ReadSnapshotOptions) (*AggregateSnapshot, error) {
 	estoria.GetLogger().Debug("finding snapshot", "aggregate_id", aggregateID)
 
 	snapshots, ok := s.snapshots[aggregateID]
 	if !ok || len(snapshots) == 0 {
-		estoria.GetLogger().Debug("no snapshots found", "aggregate_id", aggregateID)
-		return nil, nil
+		return nil, ErrSnapshotNotFound
 	}
 
 	if opts.MaxVersion > 0 {
@@ -45,8 +44,7 @@ func (s *MemoryStore) ReadSnapshot(ctx context.Context, aggregateID typeid.UUID,
 			}
 		}
 
-		estoria.GetLogger().Debug("no snapshots found within version range", "aggregate_id", aggregateID, "max_version", opts.MaxVersion)
-		return nil, nil
+		return nil, ErrSnapshotNotFound
 	}
 
 	snap := snapshots[len(snapshots)-1]
@@ -54,7 +52,7 @@ func (s *MemoryStore) ReadSnapshot(ctx context.Context, aggregateID typeid.UUID,
 	return snap, nil
 }
 
-func (s *MemoryStore) WriteSnapshot(ctx context.Context, snap *AggregateSnapshot) error {
+func (s *MemoryStore) WriteSnapshot(_ context.Context, snap *AggregateSnapshot) error {
 	estoria.GetLogger().Debug("writing snapshot",
 		"aggregate_id", snap.AggregateID,
 		"aggregate_version",
@@ -69,7 +67,7 @@ func (s *MemoryStore) WriteSnapshot(ctx context.Context, snap *AggregateSnapshot
 
 	if len(snapshots) > 0 {
 		if snap.AggregateVersion <= snapshots[len(snapshots)-1].AggregateVersion {
-			return fmt.Errorf("aggregate version is older than the most recent snapshot version")
+			return errors.New("aggregate version is older than the most recent snapshot version")
 		}
 	}
 

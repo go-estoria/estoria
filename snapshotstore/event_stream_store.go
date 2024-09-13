@@ -24,7 +24,7 @@ func NewEventStreamStore(eventStore eventstore.Store) *EventStreamStore {
 	}
 }
 
-func (s *EventStreamStore) ReadSnapshot(ctx context.Context, aggregateID typeid.UUID, opts ReadSnapshotOptions) (*AggregateSnapshot, error) {
+func (s *EventStreamStore) ReadSnapshot(ctx context.Context, aggregateID typeid.UUID, _ ReadSnapshotOptions) (*AggregateSnapshot, error) {
 	estoria.GetLogger().Debug("finding snapshot", "aggregate_id", aggregateID)
 
 	snapshotStreamID := typeid.FromUUID(aggregateID.TypeName()+"snapshot", aggregateID.UUID())
@@ -39,11 +39,12 @@ func (s *EventStreamStore) ReadSnapshot(ctx context.Context, aggregateID typeid.
 	}
 
 	event, err := stream.Next(ctx)
-	if errors.Is(err, eventstore.ErrEndOfEventStream) {
-		return nil, nil
-	} else if err != nil {
+	switch {
+	case errors.Is(err, eventstore.ErrEndOfEventStream):
+		return nil, ErrSnapshotNotFound
+	case err != nil:
 		return nil, fmt.Errorf("reading snapshot event: %w", err)
-	} else if event == nil {
+	case event == nil:
 		return nil, errors.New("snapshot event not found")
 	}
 
