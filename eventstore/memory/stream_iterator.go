@@ -21,7 +21,7 @@ type streamIterator struct {
 func (i *streamIterator) Next(_ context.Context) (*eventstore.Event, error) {
 	switch {
 	case i == nil, i.events == nil:
-		return nil, eventstore.StreamIteratorClosedError{StreamID: i.streamID}
+		return nil, eventstore.ErrStreamIteratorClosed
 	case i.direction == eventstore.Forward && i.cursor >= int64(len(i.events)):
 		return nil, eventstore.ErrEndOfEventStream
 	case i.direction == eventstore.Reverse && i.cursor < 0:

@@ -23,32 +23,6 @@ type eventSourcedStoreTestCase[E estoria.Entity] struct {
 	wantErr           error
 }
 
-type mockEntity struct {
-	ID               typeid.UUID
-	eventTypes       []estoria.EntityEvent
-	numAppliedEvents int64
-	applyEventErr    error
-}
-
-var _ estoria.Entity = &mockEntity{}
-
-func (e mockEntity) EntityID() typeid.UUID {
-	return e.ID
-}
-
-func (e mockEntity) EventTypes() []estoria.EntityEvent {
-	return e.eventTypes
-}
-
-func (e *mockEntity) ApplyEvent(_ context.Context, _ estoria.EntityEvent) error {
-	if e.applyEventErr != nil {
-		return e.applyEventErr
-	}
-
-	e.numAppliedEvents++
-	return nil
-}
-
 type mockEntityEventA struct{}
 
 func (e mockEntityEventA) EventType() string {
@@ -124,21 +98,6 @@ func (e mockEntityEventE) marshaledData() []byte {
 	return b
 }
 
-type mockMarshaler struct {
-	marshaledBytes []byte
-	marshalErr     error
-	unmarshalErr   error
-}
-
-func (m mockMarshaler) Marshal(_ *estoria.EntityEvent) ([]byte, error) {
-	return m.marshaledBytes, m.marshalErr
-}
-
-func (m mockMarshaler) Unmarshal(_ []byte, _ *estoria.EntityEvent) error {
-	log.Println("UNMARSHAL")
-	return m.unmarshalErr
-}
-
 type mockStreamReader struct {
 	readStreamIterator eventstore.StreamIterator
 	readStreamErr      error
@@ -168,6 +127,21 @@ func (m mockStreamIterator) Next(_ context.Context) (*eventstore.Event, error) {
 
 func (m mockStreamIterator) Close(_ context.Context) error {
 	return m.closeErr
+}
+
+type mockEventMarshaler struct {
+	marshaledBytes []byte
+	marshalErr     error
+	unmarshalErr   error
+}
+
+func (m mockEventMarshaler) Marshal(_ *estoria.EntityEvent) ([]byte, error) {
+	return m.marshaledBytes, m.marshalErr
+}
+
+func (m mockEventMarshaler) Unmarshal(_ []byte, _ *estoria.EntityEvent) error {
+	log.Println("UNMARSHAL")
+	return m.unmarshalErr
 }
 
 func TestNewEventSourcedStore(t *testing.T) {
@@ -211,7 +185,7 @@ func TestNewEventSourcedStore(t *testing.T) {
 				return &mockEntity{ID: typeid.FromUUID("testentity", id)}
 			},
 			haveOpts: []aggregatestore.EventSourcedStoreOption[*mockEntity]{
-				aggregatestore.WithEventMarshaler[*mockEntity](mockMarshaler{}),
+				aggregatestore.WithEventMarshaler[*mockEntity](mockEventMarshaler{}),
 			},
 		},
 		{
@@ -1089,7 +1063,7 @@ func TestEventSourcedStore_HydrateAggregate(t *testing.T) {
 				return newMockEntity(typeid.FromUUID("mockentity", id), 5)
 			},
 			haveStoreOpts: []aggregatestore.EventSourcedStoreOption[*mockEntity]{
-				aggregatestore.WithEventMarshaler[*mockEntity](mockMarshaler{
+				aggregatestore.WithEventMarshaler[*mockEntity](mockEventMarshaler{
 					unmarshalErr: errors.New("mock error"),
 				}),
 			},
@@ -1525,7 +1499,7 @@ func TestEventSourcedStore_SaveAggregate(t *testing.T) {
 				return newMockEntity(typeid.FromUUID("mockentity", id), 5)
 			},
 			haveStoreOpts: []aggregatestore.EventSourcedStoreOption[*mockEntity]{
-				aggregatestore.WithEventMarshaler[*mockEntity](mockMarshaler{
+				aggregatestore.WithEventMarshaler[*mockEntity](mockEventMarshaler{
 					marshalErr: errors.New("mock error"),
 				}),
 			},

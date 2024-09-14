@@ -2,6 +2,7 @@ package eventstore
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -91,14 +92,6 @@ type WritableEvent struct {
 	Data []byte
 }
 
-type StreamNotFoundError struct {
-	StreamID typeid.UUID
-}
-
-func (e StreamNotFoundError) Error() string {
-	return "stream not found: " + e.StreamID.String()
-}
-
 type EventMarshalingError struct {
 	StreamID typeid.UUID
 	EventID  typeid.UUID
@@ -109,6 +102,10 @@ func (e EventMarshalingError) Error() string {
 	return "marshaling event: " + e.Err.Error()
 }
 
+func (e EventMarshalingError) Unwrap() error {
+	return e.Err
+}
+
 type EventUnmarshalingError struct {
 	StreamID typeid.UUID
 	EventID  typeid.UUID
@@ -117,6 +114,10 @@ type EventUnmarshalingError struct {
 
 func (e EventUnmarshalingError) Error() string {
 	return "unmarshaling event: " + e.Err.Error()
+}
+
+func (e EventUnmarshalingError) Unwrap() error {
+	return e.Err
 }
 
 // StreamVersionMismatchError is returned when the expected stream version does not match the actual stream version.
@@ -144,12 +145,16 @@ func (e InitializationError) Error() string {
 	return "initializing event store: " + e.Err.Error()
 }
 
-type StreamIteratorClosedError struct {
-	StreamID typeid.UUID
+// Unwrap returns the underlying error.
+func (e InitializationError) Unwrap() error {
+	return e.Err
 }
 
-func (e StreamIteratorClosedError) Error() string {
-	return "stream is closed: " + e.StreamID.String()
-}
+// ErrStreamNotFound is returned when an event stream is not found.
+var ErrStreamNotFound = errors.New("stream not found")
 
-var ErrEndOfEventStream = fmt.Errorf("end of event stream")
+// ErrStreamIteratorClosed is returned when an operation is attempted on a closed stream iterator.
+var ErrStreamIteratorClosed = errors.New("stream iterator closed")
+
+// ErrEndOfEventStream is returned when there are no more events in the stream.
+var ErrEndOfEventStream = errors.New("end of event stream")

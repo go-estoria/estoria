@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log/slog"
 
 	"github.com/go-estoria/estoria"
 	"github.com/go-estoria/estoria/eventstore"
@@ -25,8 +24,8 @@ func NewEventStreamStore(eventStore eventstore.Store) *EventStreamStore {
 	}
 }
 
-func (s *EventStreamStore) ReadSnapshot(ctx context.Context, aggregateID typeid.UUID, opts ReadSnapshotOptions) (*AggregateSnapshot, error) {
-	slog.Debug("finding snapshot", "aggregate_id", aggregateID)
+func (s *EventStreamStore) ReadSnapshot(ctx context.Context, aggregateID typeid.UUID, _ ReadSnapshotOptions) (*AggregateSnapshot, error) {
+	estoria.GetLogger().Debug("finding snapshot", "aggregate_id", aggregateID)
 
 	snapshotStreamID := typeid.FromUUID(aggregateID.TypeName()+"snapshot", aggregateID.UUID())
 
@@ -40,15 +39,16 @@ func (s *EventStreamStore) ReadSnapshot(ctx context.Context, aggregateID typeid.
 	}
 
 	event, err := stream.Next(ctx)
-	if errors.Is(err, eventstore.ErrEndOfEventStream) {
-		return nil, nil
-	} else if err != nil {
+	switch {
+	case errors.Is(err, eventstore.ErrEndOfEventStream):
+		return nil, ErrSnapshotNotFound
+	case err != nil:
 		return nil, fmt.Errorf("reading snapshot event: %w", err)
-	} else if event == nil {
+	case event == nil:
 		return nil, errors.New("snapshot event not found")
 	}
 
-	slog.Debug("snapshot event found",
+	estoria.GetLogger().Debug("snapshot event found",
 		"stream_id", snapshotStreamID,
 		"stream_version", event.StreamVersion)
 
@@ -61,7 +61,7 @@ func (s *EventStreamStore) ReadSnapshot(ctx context.Context, aggregateID typeid.
 }
 
 func (s *EventStreamStore) WriteSnapshot(ctx context.Context, snap *AggregateSnapshot) error {
-	slog.Debug("writing snapshot",
+	estoria.GetLogger().Debug("writing snapshot",
 		"aggregate_id", snap.AggregateID,
 		"aggregate_version",
 		snap.AggregateVersion,
@@ -91,7 +91,7 @@ func (s *EventStreamStore) WriteSnapshot(ctx context.Context, snap *AggregateSna
 		return fmt.Errorf("appending snapshot stream: %w", err)
 	}
 
-	slog.Debug("wrote snapshot", "aggregate_id", snap.AggregateID, "snapshot_event_id", eventID)
+	estoria.GetLogger().Debug("wrote snapshot", "aggregate_id", snap.AggregateID, "snapshot_event_id", eventID)
 
 	return nil
 }

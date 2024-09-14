@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log/slog"
 	"sync"
 	"time"
 
@@ -82,7 +81,7 @@ func (s *EventStore) AppendStream(ctx context.Context, streamID typeid.UUID, eve
 	}
 
 	if s.outbox != nil {
-		slog.Debug("handling events with outbox", "tx", "inherited", "events", len(tx))
+		estoria.GetLogger().Debug("handling events with outbox", "tx", "inherited", "events", len(tx))
 		s.outbox.HandleEvents(ctx, preparedEvents)
 	}
 
@@ -97,7 +96,7 @@ func (s *EventStore) ReadStream(_ context.Context, streamID typeid.UUID, opts ev
 
 	stream, ok := s.events[streamID.String()]
 	if !ok || len(stream) == 0 {
-		return nil, eventstore.StreamNotFoundError{StreamID: streamID}
+		return nil, eventstore.ErrStreamNotFound
 	}
 
 	cursor := int64(0)

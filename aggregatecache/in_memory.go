@@ -2,7 +2,6 @@ package aggregatecache
 
 import (
 	"context"
-	"log/slog"
 	"sync"
 	"time"
 
@@ -67,7 +66,7 @@ func NewInMemoryCache[E estoria.Entity](opts ...InMemoryCacheOption[E]) *InMemor
 // evictions will be disabled, and calling Start() will result in a no-op.
 func (c *InMemoryCache[E]) Start(ctx context.Context) error {
 	if c.evictionPolicy.EvictionInterval == 0 {
-		slog.Warn("no cache eviction interval set, periodic evictions disabled")
+		estoria.GetLogger().Warn("no cache eviction interval set, periodic evictions disabled")
 		return nil
 	}
 

@@ -571,7 +571,7 @@ func TestEventStore_ReadStream(t *testing.T) {
 		{
 			name:         "returns StreamNotFoundError for a non-existent stream",
 			haveStreamID: streamIDs[0],
-			wantErr:      eventstore.StreamNotFoundError{StreamID: streamIDs[0]},
+			wantErr:      eventstore.ErrStreamNotFound,
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
@@ -591,14 +591,6 @@ func TestEventStore_ReadStream(t *testing.T) {
 			if tt.wantErr != nil {
 				if err == nil || err.Error() != tt.wantErr.Error() {
 					t.Errorf("unexpected ReadStream() error: wanted %v got %v", tt.wantErr, err)
-				}
-
-				switch err := tt.wantErr.(type) {
-				case eventstore.StreamNotFoundError:
-					t.Logf("StreamNotFoundError: %v", err)
-					if err.StreamID.String() != tt.haveStreamID.String() {
-						t.Errorf("unexpected stream ID: wanted %s got %s", tt.haveStreamID.String(), err.StreamID.String())
-					}
 				}
 
 				return

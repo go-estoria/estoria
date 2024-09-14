@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"log/slog"
 	"strings"
 	"sync"
 
@@ -17,7 +16,7 @@ import (
 
 // Outbox is an in-memory outbox for use with the in-memory event store.
 type Outbox struct {
-	items    []outbox.OutboxItem
+	items    []outbox.Item
 	handlers map[string][]string // event type -> []handlernames
 	mu       sync.RWMutex
 }
@@ -25,7 +24,7 @@ type Outbox struct {
 // NewOutbox creates a new in-memory outbox.
 func NewOutbox() *Outbox {
 	return &Outbox{
-		items:    make([]outbox.OutboxItem, 0),
+		items:    make([]outbox.Item, 0),
 		handlers: make(map[string][]string), // event type -> handlers
 	}
 }
@@ -46,7 +45,7 @@ func (o *Outbox) RegisterHandlers(eventType estoria.EntityEvent, handlers ...out
 func (o *Outbox) HandleEvents(_ context.Context, events []*eventstore.Event) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
-	slog.Debug("inserting events into outbox", "tx", "inherited", "events", len(events))
+	estoria.GetLogger().Debug("inserting events into outbox", "tx", "inherited", "events", len(events))
 
 	for _, event := range events {
 		item := &outboxItem{
@@ -104,13 +103,13 @@ type OutboxIterator struct {
 }
 
 // Next returns the next outbox entry.
-func (i *OutboxIterator) Next(_ context.Context) (outbox.OutboxItem, error) {
+func (i *OutboxIterator) Next(_ context.Context) (outbox.Item, error) {
 	i.outbox.mu.Lock()
 	defer i.outbox.mu.Unlock()
 
 	for ; i.cursor < len(i.outbox.items) && i.outbox.items[i.cursor].FullyProcessed(); i.cursor++ {
 		// skip items that have been fully processed
-		slog.Debug("skipping fully processed outbox item", "event_id", i.outbox.items[i.cursor].EventID())
+		estoria.GetLogger().Debug("skipping fully processed outbox item", "event_id", i.outbox.items[i.cursor].EventID())
 	}
 
 	if i.cursor >= len(i.outbox.items) {

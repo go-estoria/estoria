@@ -3,9 +3,9 @@ package outbox
 import (
 	"context"
 	"fmt"
-	"log/slog"
 	"time"
 
+	"github.com/go-estoria/estoria"
 	"github.com/go-estoria/estoria/typeid"
 	"github.com/gofrs/uuid/v5"
 )
@@ -16,10 +16,10 @@ type Outbox interface {
 }
 
 type Iterator interface {
-	Next(ctx context.Context) (OutboxItem, error)
+	Next(ctx context.Context) (Item, error)
 }
 
-type OutboxItem interface {
+type Item interface {
 	ID() uuid.UUID
 	StreamID() typeid.UUID
 	EventID() typeid.UUID
@@ -57,7 +57,7 @@ func (r HandlerResult) String() string {
 
 type ItemHandler interface {
 	Name() string
-	Handle(ctx context.Context, event OutboxItem) error
+	Handle(ctx context.Context, event Item) error
 }
 
 type Processor struct {
@@ -85,7 +85,7 @@ func (p *Processor) Start(ctx context.Context) error {
 		return fmt.Errorf("creating outbox iterator: %w", err)
 	}
 
-	slog.Debug("starting outbox processor", "handlers", len(p.handlers))
+	estoria.GetLogger().Debug("starting outbox processor", "handlers", len(p.handlers))
 
 	ctx, cancel := context.WithCancel(ctx)
 	p.stop = cancel
@@ -97,9 +97,9 @@ func (p *Processor) Stop() {
 	p.stop()
 }
 
-func (p *Processor) Handle(ctx context.Context, entry OutboxItem) error {
+func (p *Processor) Handle(ctx context.Context, entry Item) error {
 	if entry.FullyProcessed() {
-		slog.Debug("nothing to process", "event_id", entry.EventID())
+		estoria.GetLogger().Debug("nothing to process", "event_id", entry.EventID())
 		return nil
 	}
 
@@ -112,23 +112,23 @@ func (p *Processor) Handle(ctx context.Context, entry OutboxItem) error {
 
 		handler, ok := p.handlers[handlerName]
 		if !ok {
-			slog.Warn("no handler found for outbox item", "handler", handlerName, "event_id", entry.EventID())
+			estoria.GetLogger().Warn("no handler found for outbox item", "handler", handlerName, "event_id", entry.EventID())
 			continue
 		}
 
 		if err := handler.Handle(ctx, entry); err != nil {
-			slog.Error("handling outbox item", "handler", handler.Name(), "error", err)
+			estoria.GetLogger().Error("handling outbox item", "handler", handler.Name(), "error", err)
 			if mhErr := p.outbox.MarkHandled(ctx, entry.ID(), HandlerResult{
 				HandlerName: handler.Name(),
 				Error:       err,
 			}); mhErr != nil {
-				slog.Error("marking outbox item as handled", "error", mhErr)
+				estoria.GetLogger().Error("marking outbox item as handled", "error", mhErr)
 			}
-		} else {
-			p.outbox.MarkHandled(ctx, entry.ID(), HandlerResult{
-				HandlerName: handler.Name(),
-				CompletedAt: time.Now(),
-			})
+		} else if err := p.outbox.MarkHandled(ctx, entry.ID(), HandlerResult{
+			HandlerName: handler.Name(),
+			CompletedAt: time.Now(),
+		}); err != nil {
+			estoria.GetLogger().Error("marking outbox item as handled", "error", err)
 		}
 	}
 
@@ -139,20 +139,20 @@ func (p *Processor) run(ctx context.Context, iterator Iterator) {
 	for {
 		select {
 		case <-ctx.Done():
-			slog.Debug("stopping outbox processor", "reason", ctx.Err())
+			estoria.GetLogger().Debug("stopping outbox processor", "reason", ctx.Err())
 			return
 		default:
 		}
 
 		entry, err := iterator.Next(ctx)
 		if err != nil {
-			slog.Error("reading outbox entry", "error", err)
+			estoria.GetLogger().Error("reading outbox entry", "error", err)
 			p.Stop()
 		}
 
 		if entry != nil {
 			if err := p.Handle(ctx, entry); err != nil {
-				slog.Error("handling outbox entry", "error", err)
+				estoria.GetLogger().Error("handling outbox entry", "error", err)
 			}
 		} else {
 			<-time.After(time.Second)
