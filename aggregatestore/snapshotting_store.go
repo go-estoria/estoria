@@ -166,6 +166,10 @@ func (s *SnapshottingStore[E]) Hydrate(ctx context.Context, aggregate *Aggregate
 
 // Save saves an aggregate.
 func (s *SnapshottingStore[E]) Save(ctx context.Context, aggregate *Aggregate[E], opts SaveOptions) error {
+	if aggregate == nil {
+		return SaveAggregateError{Err: ErrNilAggregate}
+	}
+
 	estoria.GetLogger().Debug("saving aggregate", "aggregate_id", aggregate.ID())
 
 	// defer applying events so a snapshot can be taken at an exact version

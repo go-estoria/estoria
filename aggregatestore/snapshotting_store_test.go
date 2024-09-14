@@ -47,6 +47,27 @@ func (m *mockSnapshotPolicy) ShouldSnapshot(aggregateID typeid.UUID, version int
 	return false
 }
 
+type mockSnapshotMarshaler struct {
+	MarshalFn   func(**mockEntity) ([]byte, error)
+	UnmarshalFn func([]byte, **mockEntity) error
+}
+
+func (m *mockSnapshotMarshaler) Marshal(entity **mockEntity) ([]byte, error) {
+	if m.MarshalFn != nil {
+		return m.MarshalFn(entity)
+	}
+
+	return nil, errors.New("unexpected call to Marshal")
+}
+
+func (m *mockSnapshotMarshaler) Unmarshal(data []byte, entity **mockEntity) error {
+	if m.UnmarshalFn != nil {
+		return m.UnmarshalFn(data, entity)
+	}
+
+	return errors.New("unexpected call to Unmarshal")
+}
+
 func TestNewSnapshottingStore(t *testing.T) {
 	t.Parallel()
 
@@ -726,64 +747,241 @@ func TestSnapshottingStore_Hydrate(t *testing.T) {
 	}
 }
 
-// func TestSnapshottingStore_Save(t *testing.T) {
-// 	t.Parallel()
+func TestSnapshottingStore_Save(t *testing.T) {
+	t.Parallel()
 
-// 	aggregateID := typeid.Must(typeid.NewUUID("mockentity")).(typeid.UUID)
+	aggregateID := typeid.Must(typeid.NewUUID("mockentity")).(typeid.UUID)
 
-// 	for _, tt := range []struct {
-// 		name                      string
-// 		haveInner                 aggregatestore.Store[*mockEntity]
-// 		haveSnapshotStore         aggregatestore.SnapshotStore
-// 		haveSnapshotPolicy        aggregatestore.SnapshotPolicy
-// 		haveSnapshottingStoreOpts []aggregatestore.SnapshottingStoreOption[*mockEntity]
-// 		haveAggregate             *aggregatestore.Aggregate[*mockEntity]
-// 		haveOpts                  aggregatestore.SaveOptions
-// 		wantAggregate             *aggregatestore.Aggregate[*mockEntity]
-// 		wantErr                   error
-// 	}{
-// 		{
-// 			name: "saves an aggregate using the inner store and adds the aggregate to the cache",
-// 		},
-// 	} {
-// 		t.Run(tt.name, func(t *testing.T) {
-// 			t.Parallel()
+	for _, tt := range []struct {
+		name                      string
+		haveInner                 aggregatestore.Store[*mockEntity]
+		haveSnapshotStore         aggregatestore.SnapshotStore
+		haveSnapshotPolicy        aggregatestore.SnapshotPolicy
+		haveSnapshottingStoreOpts []aggregatestore.SnapshottingStoreOption[*mockEntity]
+		haveAggregate             *aggregatestore.Aggregate[*mockEntity]
+		haveOpts                  aggregatestore.SaveOptions
+		wantAggregate             *aggregatestore.Aggregate[*mockEntity]
+		wantErr                   error
+	}{
+		{
+			name: "saves an aggregate using the inner store and creates no snapshot if the policy does not require it",
+			haveInner: &mockAggregateStore[*mockEntity]{
+				SaveFn: func(_ context.Context, aggregate *aggregatestore.Aggregate[*mockEntity], _ aggregatestore.SaveOptions) error {
+					aggregate.State().WillApply(&aggregatestore.AggregateEvent{
+						EntityEvent: &mockEntityEventA{},
+					})
+					return nil
+				},
+			},
+			haveSnapshotStore: &mockSnapshotStore{},
+			haveSnapshotPolicy: &mockSnapshotPolicy{
+				ShouldSnapshotFn: func(_ typeid.UUID, _ int64, _ time.Time) bool {
+					return false
+				},
+			},
+			haveAggregate: func() *aggregatestore.Aggregate[*mockEntity] {
+				agg := &aggregatestore.Aggregate[*mockEntity]{}
+				agg.State().SetEntityAtVersion(&mockEntity{
+					ID:         aggregateID,
+					eventTypes: []estoria.EntityEvent{mockEntityEventA{}},
+				}, 42)
+				return agg
+			}(),
+			wantAggregate: func() *aggregatestore.Aggregate[*mockEntity] {
+				agg := &aggregatestore.Aggregate[*mockEntity]{}
+				agg.State().SetEntityAtVersion(&mockEntity{ID: aggregateID}, 43)
+				return agg
+			}(),
+		},
+		{
+			name: "saves an aggregate using the inner store and creates no snapshot if the snapshot fails to marshal",
+			haveInner: &mockAggregateStore[*mockEntity]{
+				SaveFn: func(_ context.Context, aggregate *aggregatestore.Aggregate[*mockEntity], _ aggregatestore.SaveOptions) error {
+					aggregate.State().WillApply(&aggregatestore.AggregateEvent{
+						EntityEvent: &mockEntityEventA{},
+					})
+					return nil
+				},
+			},
+			haveSnapshotStore: &mockSnapshotStore{},
+			haveSnapshotPolicy: &mockSnapshotPolicy{
+				ShouldSnapshotFn: func(_ typeid.UUID, _ int64, _ time.Time) bool {
+					return true
+				},
+			},
+			haveSnapshottingStoreOpts: []aggregatestore.SnapshottingStoreOption[*mockEntity]{
+				aggregatestore.WithSnapshotMarshaler[*mockEntity](&mockSnapshotMarshaler{
+					MarshalFn: func(_ **mockEntity) ([]byte, error) {
+						return nil, errors.New("mock error")
+					},
+				}),
+			},
+			haveAggregate: func() *aggregatestore.Aggregate[*mockEntity] {
+				agg := &aggregatestore.Aggregate[*mockEntity]{}
+				agg.State().SetEntityAtVersion(&mockEntity{ID: aggregateID}, 42)
+				return agg
+			}(),
+			wantAggregate: func() *aggregatestore.Aggregate[*mockEntity] {
+				agg := &aggregatestore.Aggregate[*mockEntity]{}
+				agg.State().SetEntityAtVersion(&mockEntity{ID: aggregateID}, 43)
+				return agg
+			}(),
+		},
+		{
+			name: "saves an aggregate using the inner store and creates no snapshot if the snappshot writer fails to write",
+			haveInner: &mockAggregateStore[*mockEntity]{
+				SaveFn: func(_ context.Context, aggregate *aggregatestore.Aggregate[*mockEntity], _ aggregatestore.SaveOptions) error {
+					aggregate.State().WillApply(&aggregatestore.AggregateEvent{
+						EntityEvent: &mockEntityEventA{},
+					})
+					return nil
+				},
+			},
+			haveSnapshotStore: &mockSnapshotStore{
+				WriteSnapshotFn: func(_ context.Context, _ *snapshotstore.AggregateSnapshot) error {
+					return errors.New("mock error")
+				},
+			},
+			haveSnapshotPolicy: &mockSnapshotPolicy{
+				ShouldSnapshotFn: func(_ typeid.UUID, _ int64, _ time.Time) bool {
+					return true
+				},
+			},
+			haveAggregate: func() *aggregatestore.Aggregate[*mockEntity] {
+				agg := &aggregatestore.Aggregate[*mockEntity]{}
+				agg.State().SetEntityAtVersion(&mockEntity{ID: aggregateID}, 42)
+				return agg
+			}(),
+			wantAggregate: func() *aggregatestore.Aggregate[*mockEntity] {
+				agg := &aggregatestore.Aggregate[*mockEntity]{}
+				agg.State().SetEntityAtVersion(&mockEntity{ID: aggregateID}, 43)
+				return agg
+			}(),
+		},
+		{
+			name: "saves an aggregate using the inner store and creates a snapshot if the policy requires it",
+			haveInner: &mockAggregateStore[*mockEntity]{
+				SaveFn: func(_ context.Context, aggregate *aggregatestore.Aggregate[*mockEntity], _ aggregatestore.SaveOptions) error {
+					aggregate.State().WillApply(&aggregatestore.AggregateEvent{
+						EntityEvent: &mockEntityEventA{},
+					})
+					return nil
+				},
+			},
+			haveSnapshotStore: &mockSnapshotStore{
+				WriteSnapshotFn: func(_ context.Context, _ *snapshotstore.AggregateSnapshot) error {
+					return nil
+				},
+			},
+			haveSnapshotPolicy: &mockSnapshotPolicy{
+				ShouldSnapshotFn: func(_ typeid.UUID, _ int64, _ time.Time) bool {
+					return true
+				},
+			},
+			haveAggregate: func() *aggregatestore.Aggregate[*mockEntity] {
+				agg := &aggregatestore.Aggregate[*mockEntity]{}
+				agg.State().SetEntityAtVersion(&mockEntity{ID: aggregateID}, 42)
+				return agg
+			}(),
+			wantAggregate: func() *aggregatestore.Aggregate[*mockEntity] {
+				agg := &aggregatestore.Aggregate[*mockEntity]{}
+				agg.State().SetEntityAtVersion(&mockEntity{ID: aggregateID}, 43)
+				return agg
+			}(),
+		},
+		{
+			name:               "returns an error when the aggregate is nil",
+			haveInner:          &mockAggregateStore[*mockEntity]{},
+			haveSnapshotStore:  &mockSnapshotStore{},
+			haveSnapshotPolicy: &mockSnapshotPolicy{},
+			haveAggregate:      nil,
+			wantErr:            aggregatestore.SaveAggregateError{Err: aggregatestore.ErrNilAggregate},
+		},
+		{
+			name: "returns an error when the inner store returns an error",
+			haveInner: &mockAggregateStore[*mockEntity]{
+				SaveFn: func(_ context.Context, _ *aggregatestore.Aggregate[*mockEntity], _ aggregatestore.SaveOptions) error {
+					return errors.New("mock error")
+				},
+			},
+			haveSnapshotStore:  &mockSnapshotStore{},
+			haveSnapshotPolicy: &mockSnapshotPolicy{},
+			haveAggregate: func() *aggregatestore.Aggregate[*mockEntity] {
+				agg := &aggregatestore.Aggregate[*mockEntity]{}
+				agg.State().SetEntityAtVersion(&mockEntity{ID: aggregateID}, 42)
+				return agg
+			}(),
+			wantErr: aggregatestore.SaveAggregateError{Err: errors.New("saving aggregate using inner store: mock error")},
+		},
+		{
+			name: "returns an error when encountering an unexpected error applying an event",
+			haveInner: &mockAggregateStore[*mockEntity]{
+				SaveFn: func(_ context.Context, aggregate *aggregatestore.Aggregate[*mockEntity], _ aggregatestore.SaveOptions) error {
+					aggregate.State().WillApply(&aggregatestore.AggregateEvent{
+						EntityEvent: &mockEntityEventA{},
+					})
+					return nil
+				},
+			},
+			haveSnapshotStore: &mockSnapshotStore{
+				WriteSnapshotFn: func(_ context.Context, _ *snapshotstore.AggregateSnapshot) error {
+					return nil
+				},
+			},
+			haveSnapshotPolicy: &mockSnapshotPolicy{
+				ShouldSnapshotFn: func(_ typeid.UUID, _ int64, _ time.Time) bool {
+					return true
+				},
+			},
+			haveAggregate: func() *aggregatestore.Aggregate[*mockEntity] {
+				agg := &aggregatestore.Aggregate[*mockEntity]{}
+				agg.State().SetEntityAtVersion(&mockEntity{
+					ID:            aggregateID,
+					applyEventErr: errors.New("mock error"),
+				}, 42)
+				return agg
+			}(),
+			wantErr: aggregatestore.SaveAggregateError{Err: errors.New("applying next aggregate event: applying event: mock error")},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 
-// 			store, err := aggregatestore.NewSnapshottingStore(tt.haveInner,
-// 				tt.haveSnapshotStore,
-// 				tt.haveSnapshotPolicy,
-// 				tt.haveSnapshottingStoreOpts...,
-// 			)
-// 			if err != nil {
-// 				t.Fatalf("unexpected error creating store: %v", err)
-// 			} else if store == nil {
-// 				t.Fatal("unexpected nil store")
-// 			}
+			store, err := aggregatestore.NewSnapshottingStore(tt.haveInner,
+				tt.haveSnapshotStore,
+				tt.haveSnapshotPolicy,
+				tt.haveSnapshottingStoreOpts...,
+			)
+			if err != nil {
+				t.Fatalf("unexpected error creating store: %v", err)
+			} else if store == nil {
+				t.Fatal("unexpected nil store")
+			}
 
-// 			gotAggregate := tt.haveAggregate
-// 			gotErr := store.Save(context.Background(), gotAggregate, tt.haveOpts)
+			gotAggregate := tt.haveAggregate
+			gotErr := store.Save(context.Background(), gotAggregate, tt.haveOpts)
 
-// 			if tt.wantErr != nil {
-// 				if gotErr == nil || gotErr.Error() != tt.wantErr.Error() {
-// 					t.Errorf("want error: %v, got: %v", tt.wantErr, gotErr)
-// 				}
-// 				return
-// 			}
+			if tt.wantErr != nil {
+				if gotErr == nil || gotErr.Error() != tt.wantErr.Error() {
+					t.Errorf("want error: %v, got: %v", tt.wantErr, gotErr)
+				}
+				return
+			}
 
-// 			if gotErr != nil {
-// 				t.Errorf("unexpected error: %v", gotErr)
-// 			} else if gotAggregate == nil {
-// 				t.Errorf("unexpected nil aggregate")
-// 			}
+			if gotErr != nil {
+				t.Errorf("unexpected error: %v", gotErr)
+			} else if gotAggregate == nil {
+				t.Errorf("unexpected nil aggregate")
+			}
 
-// 			// aggregate has the correct ID
-// 			if gotAggregate.ID().String() != typeid.FromUUID("mockentity", aggregateID.UUID()).String() {
-// 				t.Errorf("want aggregate ID %s, got %s", typeid.FromUUID("mockentity", aggregateID.UUID()), gotAggregate.ID())
-// 			}
-// 			// aggregate has the correct version
-// 			if gotAggregate.Version() != tt.wantAggregate.Version() {
-// 				t.Errorf("want aggregate version %d, got %d", tt.wantAggregate.Version(), gotAggregate.Version())
-// 			}
-// 		})
-// 	}
-// }
+			// aggregate has the correct ID
+			if gotAggregate.ID().String() != typeid.FromUUID("mockentity", aggregateID.UUID()).String() {
+				t.Errorf("want aggregate ID %s, got %s", typeid.FromUUID("mockentity", aggregateID.UUID()), gotAggregate.ID())
+			}
+			// aggregate has the correct version
+			if gotAggregate.Version() != tt.wantAggregate.Version() {
+				t.Errorf("want aggregate version %d, got %d", tt.wantAggregate.Version(), gotAggregate.Version())
+			}
+		})
+	}
+}
