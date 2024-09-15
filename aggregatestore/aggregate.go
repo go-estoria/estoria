@@ -103,11 +103,6 @@ func (a *AggregateState[E]) ClearUnsavedEvents() {
 	a.unsavedEvents = nil
 }
 
-// ClearUnappliedEvents clears the aggregate's unapplied events.
-func (a *AggregateState[E]) ClearUnappliedEvents() {
-	a.unappliedEvents = nil
-}
-
 // WillApply appends an aggregate event to be applied to
 // the aggregate during subsequent calls to ApplyNext.
 func (a *AggregateState[E]) WillApply(event *AggregateEvent) {
@@ -130,13 +125,6 @@ func (a *AggregateState[E]) Entity() E {
 func (a *AggregateState[E]) SetEntityAtVersion(entity E, version int64) {
 	a.entity = entity
 	a.version = version
-}
-
-// UnappliedEvents returns the unapplied events for the aggregate.
-// These are events that have been loaded from persistence or newly stored
-// but not yet applied to the aggregate's entity.
-func (a *AggregateState[E]) UnappliedEvents() []*AggregateEvent {
-	return a.unappliedEvents
 }
 
 // UnsavedEvents returns the unsaved events for the aggregate.

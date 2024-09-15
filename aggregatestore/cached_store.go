@@ -56,8 +56,6 @@ func (s *CachedStore[E]) Load(ctx context.Context, id typeid.UUID, opts LoadOpti
 	aggregate, err = s.inner.Load(ctx, id, opts)
 	if err != nil {
 		return nil, LoadAggregateError{AggregateID: id, Operation: "loading from inner aggregate store", Err: err}
-	} else if aggregate == nil {
-		return nil, LoadAggregateError{AggregateID: id, Err: ErrAggregateNotFound}
 	}
 
 	if err := s.cache.PutAggregate(ctx, aggregate); err != nil {

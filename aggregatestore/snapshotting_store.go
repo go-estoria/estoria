@@ -139,22 +139,17 @@ func (s *SnapshottingStore[E]) Hydrate(ctx context.Context, aggregate *Aggregate
 	}
 
 	snap, err := s.reader.ReadSnapshot(ctx, aggregate.ID(), readSnapshotOpts)
-	if err != nil {
-		estoria.GetLogger().Warn("failed to read snapshot", "error", err)
-		return s.inner.Hydrate(ctx, aggregate, opts)
-	} else if snap == nil {
+	if errors.Is(err, snapshotstore.ErrSnapshotNotFound) {
 		estoria.GetLogger().Debug("no snapshot found")
+		return s.inner.Hydrate(ctx, aggregate, opts)
+	} else if err != nil {
+		estoria.GetLogger().Warn("failed to read snapshot", "error", err)
 		return s.inner.Hydrate(ctx, aggregate, opts)
 	}
 
 	entity := aggregate.Entity()
 	if err := s.marshaler.Unmarshal(snap.Data, &entity); err != nil {
 		estoria.GetLogger().Warn("failed to unmarshal snapshot", "error", err)
-		return s.inner.Hydrate(ctx, aggregate, opts)
-	}
-
-	if entity.EntityID() != aggregate.ID() {
-		estoria.GetLogger().Warn("snapshot entity ID does not match aggregate ID", "snapshot_entity_id", entity.EntityID(), "aggregate_id", aggregate.ID())
 		return s.inner.Hydrate(ctx, aggregate, opts)
 	}
 
