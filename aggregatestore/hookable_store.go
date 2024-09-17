@@ -2,6 +2,7 @@ package aggregatestore
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 
 	"github.com/go-estoria/estoria"
@@ -36,12 +37,16 @@ type HookableStore[E estoria.Entity] struct {
 var _ Store[estoria.Entity] = (*HookableStore[estoria.Entity])(nil)
 
 // NewHookableStore creates a new HookableStore.
-func NewHookableStore[E estoria.Entity](inner Store[E]) *HookableStore[E] {
+func NewHookableStore[E estoria.Entity](inner Store[E]) (*HookableStore[E], error) {
+	if inner == nil {
+		return nil, errors.New("inner store is required")
+	}
+
 	return &HookableStore[E]{
 		inner: inner,
 		hooks: make(map[HookStage][]Hook[E]),
 		log:   slog.Default().WithGroup("hookableaggregatestore"),
-	}
+	}, nil
 }
 
 // BeforeNew adds a hook that runs before a new aggregate is created.

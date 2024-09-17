@@ -94,10 +94,6 @@ type LoadAggregateError struct {
 }
 
 func (e LoadAggregateError) Error() string {
-	if e.Operation == "" {
-		return e.Err.Error()
-	}
-
 	return e.Operation + ": " + e.Err.Error()
 }
 
