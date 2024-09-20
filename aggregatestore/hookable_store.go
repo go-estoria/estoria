@@ -44,7 +44,7 @@ func NewHookableStore[E estoria.Entity](inner Store[E]) (*HookableStore[E], erro
 	return &HookableStore[E]{
 		inner: inner,
 		hooks: make(map[HookStage][]Hook[E]),
-		log:   estoria.DefaultLogger().WithGroup("hookableaggregatestore"),
+		log:   estoria.GetLogger().WithGroup("hookableaggregatestore"),
 	}, nil
 }
 

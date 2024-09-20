@@ -29,7 +29,7 @@ func NewCachedStore[E estoria.Entity](
 	return &CachedStore[E]{
 		inner: inner,
 		cache: cacher,
-		log:   estoria.DefaultLogger().WithGroup("cachedaggregatestore"),
+		log:   estoria.GetLogger().WithGroup("cachedaggregatestore"),
 	}
 }
 

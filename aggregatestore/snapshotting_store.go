@@ -67,7 +67,7 @@ func NewSnapshottingStore[E estoria.Entity](
 		writer:    store,
 		policy:    policy,
 		marshaler: estoria.JSONMarshaler[E]{},
-		log:       estoria.DefaultLogger().WithGroup("snapshottingaggregatestore"),
+		log:       estoria.GetLogger().WithGroup("snapshottingaggregatestore"),
 	}
 
 	for _, opt := range opts {
