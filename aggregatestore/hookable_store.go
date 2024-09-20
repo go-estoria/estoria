@@ -3,7 +3,6 @@ package aggregatestore
 import (
 	"context"
 	"errors"
-	"log/slog"
 
 	"github.com/go-estoria/estoria"
 	"github.com/go-estoria/estoria/typeid"
@@ -45,7 +44,7 @@ func NewHookableStore[E estoria.Entity](inner Store[E]) (*HookableStore[E], erro
 	return &HookableStore[E]{
 		inner: inner,
 		hooks: make(map[HookStage][]Hook[E]),
-		log:   slog.Default().WithGroup("hookableaggregatestore"),
+		log:   estoria.DefaultLogger().WithGroup("hookableaggregatestore"),
 	}, nil
 }
 

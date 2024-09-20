@@ -3,7 +3,6 @@ package aggregatestore
 import (
 	"context"
 	"errors"
-	"log/slog"
 	"time"
 
 	"github.com/go-estoria/estoria"
@@ -68,7 +67,7 @@ func NewSnapshottingStore[E estoria.Entity](
 		writer:    store,
 		policy:    policy,
 		marshaler: estoria.JSONMarshaler[E]{},
-		log:       slog.Default().WithGroup("snapshottingaggregatestore"),
+		log:       estoria.DefaultLogger().WithGroup("snapshottingaggregatestore"),
 	}
 
 	for _, opt := range opts {

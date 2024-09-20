@@ -2,7 +2,6 @@ package aggregatestore
 
 import (
 	"context"
-	"log/slog"
 
 	"github.com/go-estoria/estoria"
 	"github.com/go-estoria/estoria/typeid"
@@ -30,7 +29,7 @@ func NewCachedStore[E estoria.Entity](
 	return &CachedStore[E]{
 		inner: inner,
 		cache: cacher,
-		log:   slog.Default().WithGroup("cachedaggregatestore"),
+		log:   estoria.DefaultLogger().WithGroup("cachedaggregatestore"),
 	}
 }
 

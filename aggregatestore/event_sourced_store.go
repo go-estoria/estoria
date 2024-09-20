@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log/slog"
 
 	"github.com/go-estoria/estoria"
 	"github.com/go-estoria/estoria/eventstore"
@@ -40,7 +39,7 @@ func NewEventSourcedStore[E estoria.Entity](
 		newEntity:             entityFactory,
 		entityEventPrototypes: make(map[string]estoria.EntityEvent),
 		entityEventMarshaler:  estoria.JSONMarshaler[estoria.EntityEvent]{},
-		log:                   slog.Default().WithGroup("aggregatestore"),
+		log:                   estoria.DefaultLogger().WithGroup("aggregatestore"),
 	}
 
 	for _, opt := range opts {
