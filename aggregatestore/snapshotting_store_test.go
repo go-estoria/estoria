@@ -661,7 +661,7 @@ func TestSnapshottingStore_Hydrate(t *testing.T) {
 			},
 			haveSnapshotStore: &mockSnapshotStore{},
 			haveAggregate:     nil,
-			wantErr:           aggregatestore.HydrateAggregateError{Err: aggregatestore.ErrNilAggregate},
+			wantErr:           aggregatestore.HydrateError{Err: aggregatestore.ErrNilAggregate},
 		},
 		{
 			name: "returns an error when the target version is invalid",
@@ -681,7 +681,7 @@ func TestSnapshottingStore_Hydrate(t *testing.T) {
 			haveOpts: aggregatestore.HydrateOptions{
 				ToVersion: -1,
 			},
-			wantErr: aggregatestore.HydrateAggregateError{Err: errors.New("invalid target version")},
+			wantErr: aggregatestore.HydrateError{Err: errors.New("invalid target version")},
 		},
 		{
 			name: "returns an error when the snapshot stoe reader is nil",
@@ -701,7 +701,7 @@ func TestSnapshottingStore_Hydrate(t *testing.T) {
 				agg.State().SetEntityAtVersion(&mockEntity{ID: aggregateID}, 42)
 				return agg
 			}(),
-			wantErr: aggregatestore.HydrateAggregateError{Err: errors.New("snapshot store has no snapshot reader")},
+			wantErr: aggregatestore.HydrateError{Err: errors.New("snapshot store has no snapshot reader")},
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
@@ -895,7 +895,7 @@ func TestSnapshottingStore_Save(t *testing.T) {
 			haveSnapshotStore:  &mockSnapshotStore{},
 			haveSnapshotPolicy: &mockSnapshotPolicy{},
 			haveAggregate:      nil,
-			wantErr:            aggregatestore.SaveAggregateError{Err: aggregatestore.ErrNilAggregate},
+			wantErr:            aggregatestore.SaveError{Err: aggregatestore.ErrNilAggregate},
 		},
 		{
 			name: "returns an error when the inner store returns an error",
@@ -911,7 +911,7 @@ func TestSnapshottingStore_Save(t *testing.T) {
 				agg.State().SetEntityAtVersion(&mockEntity{ID: aggregateID}, 42)
 				return agg
 			}(),
-			wantErr: aggregatestore.SaveAggregateError{Err: errors.New("saving aggregate using inner store: mock error")},
+			wantErr: aggregatestore.SaveError{Err: errors.New("saving aggregate using inner store: mock error")},
 		},
 		{
 			name: "returns an error when encountering an unexpected error applying an event",
@@ -941,7 +941,7 @@ func TestSnapshottingStore_Save(t *testing.T) {
 				}, 42)
 				return agg
 			}(),
-			wantErr: aggregatestore.SaveAggregateError{Err: errors.New("applying next aggregate event: applying event: mock error")},
+			wantErr: aggregatestore.SaveError{Err: errors.New("applying next aggregate event: applying event: mock error")},
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {

@@ -237,7 +237,7 @@ func TestNewEventSourcedStore(t *testing.T) {
 					return nil
 				}()),
 			},
-			wantErr: aggregatestore.InitializeAggregateStoreError{Err: errors.New("no event stream reader or writer provided")},
+			wantErr: aggregatestore.InitializeError{Err: errors.New("no event stream reader or writer provided")},
 		},
 		{
 			name: "returns an error when a duplicate entity event prototype is registered",
@@ -255,7 +255,7 @@ func TestNewEventSourcedStore(t *testing.T) {
 					},
 				}
 			},
-			wantErr: aggregatestore.InitializeAggregateStoreError{
+			wantErr: aggregatestore.InitializeError{
 				Operation: "registering entity event prototype",
 				Err:       errors.New("duplicate event type mockEntityEventA for entity testentity"),
 			},
@@ -274,7 +274,7 @@ func TestNewEventSourcedStore(t *testing.T) {
 					return errors.New("test error")
 				},
 			},
-			wantErr: aggregatestore.InitializeAggregateStoreError{
+			wantErr: aggregatestore.InitializeError{
 				Operation: "applying option",
 				Err:       errors.New("test error"),
 			},
@@ -316,7 +316,7 @@ func TestEventSourcedStore_New(t *testing.T) {
 		{
 			name:     "returns an error when provided a nil aggregate ID",
 			haveUUID: uuid.Nil,
-			wantErr:  aggregatestore.CreateAggregateError{Err: errors.New("aggregate ID is nil")},
+			wantErr:  aggregatestore.CreateError{Err: errors.New("aggregate ID is nil")},
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {

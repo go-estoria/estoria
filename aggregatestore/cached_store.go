@@ -54,7 +54,7 @@ func (s *CachedStore[E]) Load(ctx context.Context, id typeid.UUID, opts LoadOpti
 
 	aggregate, err = s.inner.Load(ctx, id, opts)
 	if err != nil {
-		return nil, LoadAggregateError{AggregateID: id, Operation: "loading from inner aggregate store", Err: err}
+		return nil, LoadError{AggregateID: id, Operation: "loading from inner aggregate store", Err: err}
 	}
 
 	if err := s.cache.PutAggregate(ctx, aggregate); err != nil {
@@ -72,7 +72,7 @@ func (s *CachedStore[E]) Hydrate(ctx context.Context, aggregate *Aggregate[E], o
 // Save saves an aggregate.
 func (s *CachedStore[E]) Save(ctx context.Context, aggregate *Aggregate[E], opts SaveOptions) error {
 	if err := s.inner.Save(ctx, aggregate, opts); err != nil {
-		return SaveAggregateError{AggregateID: aggregate.ID(), Operation: "saving to inner aggregate store", Err: err}
+		return SaveError{AggregateID: aggregate.ID(), Operation: "saving to inner aggregate store", Err: err}
 	}
 
 	if err := s.cache.PutAggregate(ctx, aggregate); err != nil {

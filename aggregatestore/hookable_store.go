@@ -82,18 +82,18 @@ func (s *HookableStore[E]) AfterSave(hooks ...Hook[E]) {
 func (s *HookableStore[E]) New(id uuid.UUID) (*Aggregate[E], error) {
 	for _, hook := range s.precreateHooks {
 		if err := hook(id); err != nil {
-			return nil, CreateAggregateError{Operation: "pre-create hook", Err: err}
+			return nil, CreateError{Operation: "pre-create hook", Err: err}
 		}
 	}
 
 	aggregate, err := s.inner.New(id)
 	if err != nil {
-		return nil, CreateAggregateError{Operation: "creating aggregate using inner store", Err: err}
+		return nil, CreateError{Operation: "creating aggregate using inner store", Err: err}
 	}
 
 	for _, hook := range s.hooks[AfterNew] {
 		if err := hook(context.Background(), aggregate); err != nil {
-			return nil, CreateAggregateError{Operation: "post-create hook", Err: err}
+			return nil, CreateError{Operation: "post-create hook", Err: err}
 		}
 	}
 
@@ -105,18 +105,18 @@ func (s *HookableStore[E]) Load(ctx context.Context, id typeid.UUID, opts LoadOp
 	s.log.Debug("loading aggregate", "aggregate_id", id)
 	for _, hook := range s.preloadHooks {
 		if err := hook(ctx, id); err != nil {
-			return nil, LoadAggregateError{AggregateID: id, Operation: "pre-load hook", Err: err}
+			return nil, LoadError{AggregateID: id, Operation: "pre-load hook", Err: err}
 		}
 	}
 
 	aggregate, err := s.inner.Load(ctx, id, opts)
 	if err != nil {
-		return nil, LoadAggregateError{AggregateID: id, Operation: "loading aggregate using inner store", Err: err}
+		return nil, LoadError{AggregateID: id, Operation: "loading aggregate using inner store", Err: err}
 	}
 
 	for _, hook := range s.hooks[AfterLoad] {
 		if err := hook(ctx, aggregate); err != nil {
-			return nil, LoadAggregateError{AggregateID: id, Operation: "post-load hook", Err: err}
+			return nil, LoadError{AggregateID: id, Operation: "post-load hook", Err: err}
 		}
 	}
 
@@ -133,17 +133,17 @@ func (s *HookableStore[E]) Save(ctx context.Context, aggregate *Aggregate[E], op
 	s.log.Debug("saving aggregate", "aggregate_id", aggregate.ID())
 	for _, hook := range s.hooks[BeforeSave] {
 		if err := hook(ctx, aggregate); err != nil {
-			return SaveAggregateError{AggregateID: aggregate.ID(), Operation: "pre-save hook", Err: err}
+			return SaveError{AggregateID: aggregate.ID(), Operation: "pre-save hook", Err: err}
 		}
 	}
 
 	if err := s.inner.Save(ctx, aggregate, opts); err != nil {
-		return SaveAggregateError{AggregateID: aggregate.ID(), Operation: "saving aggregate using inner store", Err: err}
+		return SaveError{AggregateID: aggregate.ID(), Operation: "saving aggregate using inner store", Err: err}
 	}
 
 	for _, hook := range s.hooks[AfterSave] {
 		if err := hook(ctx, aggregate); err != nil {
-			return SaveAggregateError{AggregateID: aggregate.ID(), Operation: "post-save hook", Err: err}
+			return SaveError{AggregateID: aggregate.ID(), Operation: "post-save hook", Err: err}
 		}
 	}
 

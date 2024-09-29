@@ -54,11 +54,11 @@ func NewSnapshottingStore[E estoria.Entity](
 ) (*SnapshottingStore[E], error) {
 	switch {
 	case inner == nil:
-		return nil, InitializeAggregateStoreError{Err: errors.New("inner store is required")}
+		return nil, InitializeError{Err: errors.New("inner store is required")}
 	case store == nil:
-		return nil, InitializeAggregateStoreError{Err: errors.New("snapshot store is required")}
+		return nil, InitializeError{Err: errors.New("snapshot store is required")}
 	case policy == nil:
-		return nil, InitializeAggregateStoreError{Err: errors.New("snapshot policy is required")}
+		return nil, InitializeError{Err: errors.New("snapshot policy is required")}
 	}
 
 	aggregateStore := &SnapshottingStore[E]{
@@ -72,7 +72,7 @@ func NewSnapshottingStore[E estoria.Entity](
 
 	for _, opt := range opts {
 		if err := opt(aggregateStore); err != nil {
-			return nil, InitializeAggregateStoreError{Operation: "applying option", Err: err}
+			return nil, InitializeError{Operation: "applying option", Err: err}
 		}
 	}
 
@@ -107,11 +107,11 @@ func (s *SnapshottingStore[E]) Load(ctx context.Context, aggregateID typeid.UUID
 func (s *SnapshottingStore[E]) Hydrate(ctx context.Context, aggregate *Aggregate[E], opts HydrateOptions) error {
 	switch {
 	case aggregate == nil:
-		return HydrateAggregateError{Err: ErrNilAggregate}
+		return HydrateError{Err: ErrNilAggregate}
 	case opts.ToVersion < 0:
-		return HydrateAggregateError{AggregateID: aggregate.ID(), Err: errors.New("invalid target version")}
+		return HydrateError{AggregateID: aggregate.ID(), Err: errors.New("invalid target version")}
 	case s.reader == nil:
-		return HydrateAggregateError{AggregateID: aggregate.ID(), Err: errors.New("snapshot store has no snapshot reader")}
+		return HydrateError{AggregateID: aggregate.ID(), Err: errors.New("snapshot store has no snapshot reader")}
 	}
 
 	s.log.Debug("hydrating aggregate from snapshot",
@@ -161,7 +161,7 @@ func (s *SnapshottingStore[E]) Hydrate(ctx context.Context, aggregate *Aggregate
 // Save saves an aggregate.
 func (s *SnapshottingStore[E]) Save(ctx context.Context, aggregate *Aggregate[E], opts SaveOptions) error {
 	if aggregate == nil {
-		return SaveAggregateError{Err: ErrNilAggregate}
+		return SaveError{Err: ErrNilAggregate}
 	}
 
 	estoria.GetLogger().Debug("saving aggregate", "aggregate_id", aggregate.ID())
@@ -170,7 +170,7 @@ func (s *SnapshottingStore[E]) Save(ctx context.Context, aggregate *Aggregate[E]
 	opts.SkipApply = true
 
 	if err := s.inner.Save(ctx, aggregate, opts); err != nil {
-		return SaveAggregateError{AggregateID: aggregate.ID(), Operation: "saving aggregate using inner store", Err: err}
+		return SaveError{AggregateID: aggregate.ID(), Operation: "saving aggregate using inner store", Err: err}
 	}
 
 	now := time.Now()
@@ -180,7 +180,7 @@ func (s *SnapshottingStore[E]) Save(ctx context.Context, aggregate *Aggregate[E]
 		if errors.Is(err, ErrNoUnappliedEvents) {
 			break
 		} else if err != nil {
-			return SaveAggregateError{AggregateID: aggregate.ID(), Operation: "applying next aggregate event", Err: err}
+			return SaveError{AggregateID: aggregate.ID(), Operation: "applying next aggregate event", Err: err}
 		}
 
 		if !s.policy.ShouldSnapshot(aggregate.ID(), aggregate.Version(), now) {

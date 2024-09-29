@@ -44,12 +44,12 @@ func NewEventSourcedStore[E estoria.Entity](
 
 	for _, opt := range opts {
 		if err := opt(store); err != nil {
-			return nil, InitializeAggregateStoreError{Operation: "applying option", Err: err}
+			return nil, InitializeError{Operation: "applying option", Err: err}
 		}
 	}
 
 	if store.eventReader == nil && store.eventWriter == nil {
-		return nil, InitializeAggregateStoreError{Err: errors.New("no event stream reader or writer provided")}
+		return nil, InitializeError{Err: errors.New("no event stream reader or writer provided")}
 	}
 
 	// register entity event prototypes
@@ -60,7 +60,7 @@ func NewEventSourcedStore[E estoria.Entity](
 			continue
 		}
 
-		return nil, InitializeAggregateStoreError{
+		return nil, InitializeError{
 			Operation: "registering entity event prototype",
 			Err:       fmt.Errorf("duplicate event type %s for entity %s", prototype.EventType(), entity.EntityID().TypeName()),
 		}
@@ -73,7 +73,7 @@ func NewEventSourcedStore[E estoria.Entity](
 // If an ID is provided, the aggregate is created with that ID.
 func (s *EventSourcedStore[E]) New(id uuid.UUID) (*Aggregate[E], error) {
 	if id.IsNil() {
-		return nil, CreateAggregateError{Err: errors.New("aggregate ID is nil")}
+		return nil, CreateError{Err: errors.New("aggregate ID is nil")}
 	}
 
 	aggregate := &Aggregate[E]{}
@@ -89,7 +89,7 @@ func (s *EventSourcedStore[E]) Load(ctx context.Context, id typeid.UUID, opts Lo
 
 	aggregate, err := s.New(id.UUID())
 	if err != nil {
-		return nil, LoadAggregateError{AggregateID: id, Operation: "creating new aggregate", Err: err}
+		return nil, LoadError{AggregateID: id, Operation: "creating new aggregate", Err: err}
 	}
 
 	hydrateOpts := HydrateOptions{
@@ -97,7 +97,7 @@ func (s *EventSourcedStore[E]) Load(ctx context.Context, id typeid.UUID, opts Lo
 	}
 
 	if err := s.Hydrate(ctx, aggregate, hydrateOpts); err != nil {
-		return nil, LoadAggregateError{AggregateID: id, Operation: "hydrating aggregate", Err: err}
+		return nil, LoadError{AggregateID: id, Operation: "hydrating aggregate", Err: err}
 	}
 
 	return aggregate, nil
@@ -107,11 +107,11 @@ func (s *EventSourcedStore[E]) Load(ctx context.Context, id typeid.UUID, opts Lo
 func (s *EventSourcedStore[E]) Hydrate(ctx context.Context, aggregate *Aggregate[E], opts HydrateOptions) error {
 	switch {
 	case aggregate == nil:
-		return HydrateAggregateError{Err: ErrNilAggregate}
+		return HydrateError{Err: ErrNilAggregate}
 	case opts.ToVersion < 0:
-		return HydrateAggregateError{AggregateID: aggregate.ID(), Err: errors.New("invalid target version")}
+		return HydrateError{AggregateID: aggregate.ID(), Err: errors.New("invalid target version")}
 	case s.eventReader == nil:
-		return HydrateAggregateError{AggregateID: aggregate.ID(), Err: errors.New("event store has no event stream reader")}
+		return HydrateError{AggregateID: aggregate.ID(), Err: errors.New("event store has no event stream reader")}
 	}
 
 	s.log.Debug("hydrating aggregate from event store", "from_version", aggregate.Version(), "to_version", opts.ToVersion)
@@ -128,7 +128,7 @@ func (s *EventSourcedStore[E]) Hydrate(ctx context.Context, aggregate *Aggregate
 				"version", opts.ToVersion)
 			return nil
 		} else if v > opts.ToVersion {
-			return HydrateAggregateError{
+			return HydrateError{
 				AggregateID: aggregate.ID(),
 				Err:         fmt.Errorf("aggregate is at more recent version (%d) than requested version (%d)", v, opts.ToVersion),
 			}
@@ -140,9 +140,9 @@ func (s *EventSourcedStore[E]) Hydrate(ctx context.Context, aggregate *Aggregate
 	// load the aggregate's events
 	stream, err := s.eventReader.ReadStream(ctx, aggregate.ID(), readOpts)
 	if errors.Is(err, eventstore.ErrStreamNotFound) {
-		return HydrateAggregateError{AggregateID: aggregate.ID(), Err: ErrAggregateNotFound}
+		return HydrateError{AggregateID: aggregate.ID(), Err: ErrAggregateNotFound}
 	} else if err != nil {
-		return HydrateAggregateError{AggregateID: aggregate.ID(), Operation: "reading event stream", Err: err}
+		return HydrateError{AggregateID: aggregate.ID(), Operation: "reading event stream", Err: err}
 	}
 
 	defer stream.Close(ctx)
@@ -154,12 +154,12 @@ func (s *EventSourcedStore[E]) Hydrate(ctx context.Context, aggregate *Aggregate
 			s.log.Debug("end of event stream", "aggregate_id", aggregate.ID())
 			break
 		} else if err != nil {
-			return HydrateAggregateError{AggregateID: aggregate.ID(), Operation: "reading event", Err: err}
+			return HydrateError{AggregateID: aggregate.ID(), Operation: "reading event", Err: err}
 		}
 
 		prototype, ok := s.entityEventPrototypes[event.ID.TypeName()]
 		if !ok {
-			return HydrateAggregateError{
+			return HydrateError{
 				AggregateID: aggregate.ID(),
 				Operation:   "obtaining entity prototype",
 				Err:         errors.New("no prototype registered for event type " + event.ID.TypeName()),
@@ -168,7 +168,7 @@ func (s *EventSourcedStore[E]) Hydrate(ctx context.Context, aggregate *Aggregate
 
 		entityEvent := prototype.New()
 		if err := s.entityEventMarshaler.Unmarshal(event.Data, &entityEvent); err != nil {
-			return HydrateAggregateError{AggregateID: aggregate.ID(), Operation: "unmarshaling event data", Err: err}
+			return HydrateError{AggregateID: aggregate.ID(), Operation: "unmarshaling event data", Err: err}
 		}
 
 		// enqueue and apply the event immediately
@@ -179,13 +179,13 @@ func (s *EventSourcedStore[E]) Hydrate(ctx context.Context, aggregate *Aggregate
 			EntityEvent: entityEvent,
 		})
 		if err := aggregate.State().ApplyNext(ctx); errors.Is(err, ErrNoUnappliedEvents) {
-			return HydrateAggregateError{
+			return HydrateError{
 				AggregateID: aggregate.ID(),
 				Operation:   "applying aggregate event",
 				Err:         errors.New("unexpected end of unapplied events while hydrating aggregate"),
 			}
 		} else if err != nil {
-			return HydrateAggregateError{AggregateID: aggregate.ID(), Operation: "applying aggregate event", Err: err}
+			return HydrateError{AggregateID: aggregate.ID(), Operation: "applying aggregate event", Err: err}
 		}
 	}
 
@@ -199,15 +199,15 @@ func (s *EventSourcedStore[E]) Hydrate(ctx context.Context, aggregate *Aggregate
 // Save saves an aggregate.
 func (s *EventSourcedStore[E]) Save(ctx context.Context, aggregate *Aggregate[E], opts SaveOptions) error {
 	if aggregate == nil {
-		return SaveAggregateError{Err: ErrNilAggregate}
+		return SaveError{Err: ErrNilAggregate}
 	} else if s.eventWriter == nil {
-		return SaveAggregateError{AggregateID: aggregate.ID(), Err: errors.New("event store has no event stream writer")}
+		return SaveError{AggregateID: aggregate.ID(), Err: errors.New("event store has no event stream writer")}
 	}
 
 	unsavedEvents := aggregate.State().UnsavedEvents()
 	if len(unsavedEvents) == 0 {
 		if aggregate.Version() == 0 {
-			return SaveAggregateError{AggregateID: aggregate.ID(), Err: errors.New("new aggregate has no events to save")}
+			return SaveError{AggregateID: aggregate.ID(), Err: errors.New("new aggregate has no events to save")}
 		}
 
 		s.log.Debug("no events to save")
@@ -221,7 +221,7 @@ func (s *EventSourcedStore[E]) Save(ctx context.Context, aggregate *Aggregate[E]
 	for i, unsavedEvent := range unsavedEvents {
 		nextVersion := aggregate.Version() + int64(i) + 1
 		if unsavedEvent.Version > 0 && unsavedEvent.Version != nextVersion {
-			return SaveAggregateError{
+			return SaveError{
 				AggregateID: aggregate.ID(),
 				Err: fmt.Errorf("event version mismatch: next is %d, event specifies %d",
 					nextVersion, unsavedEvent.Version),
@@ -230,7 +230,7 @@ func (s *EventSourcedStore[E]) Save(ctx context.Context, aggregate *Aggregate[E]
 
 		data, err := s.entityEventMarshaler.Marshal(&unsavedEvent.EntityEvent)
 		if err != nil {
-			return SaveAggregateError{AggregateID: aggregate.ID(), Operation: "marshaling event data", Err: err}
+			return SaveError{AggregateID: aggregate.ID(), Operation: "marshaling event data", Err: err}
 		}
 
 		events[i] = &eventstore.WritableEvent{
@@ -243,7 +243,7 @@ func (s *EventSourcedStore[E]) Save(ctx context.Context, aggregate *Aggregate[E]
 	if err := s.eventWriter.AppendStream(ctx, aggregate.ID(), events, eventstore.AppendStreamOptions{
 		ExpectVersion: aggregate.Version(),
 	}); err != nil {
-		return SaveAggregateError{AggregateID: aggregate.ID(), Operation: "saving events to stream", Err: err}
+		return SaveError{AggregateID: aggregate.ID(), Operation: "saving events to stream", Err: err}
 	}
 
 	// queue the events for application
@@ -262,7 +262,7 @@ func (s *EventSourcedStore[E]) Save(ctx context.Context, aggregate *Aggregate[E]
 		if err := aggregate.State().ApplyNext(ctx); errors.Is(err, ErrNoUnappliedEvents) {
 			return nil
 		} else if err != nil {
-			return SaveAggregateError{AggregateID: aggregate.ID(), Operation: "applying aggregate event", Err: err}
+			return SaveError{AggregateID: aggregate.ID(), Operation: "applying aggregate event", Err: err}
 		}
 	}
 }
