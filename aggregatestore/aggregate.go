@@ -10,7 +10,7 @@ import (
 	"github.com/go-estoria/estoria/typeid"
 )
 
-// An Aggregate is an aggregate that is managed using event sourcing.
+// An Aggregate encapsulates an entity (the aggregate root) and its state.
 type Aggregate[E estoria.Entity] struct {
 	// the aggregate's state (unsaved/unapplied events)
 	state AggregateState[E]
@@ -56,27 +56,18 @@ func (a *Aggregate[E]) Version() int64 {
 }
 
 // AggregateState holds all of the aggregate's state, including the entity, version,
-// unsaved events, and unapplied events.
-//
-// The unsaved events are events that have been appended to the aggregate but not yet stored.
-//
-// The unapplied events are events that have been loaded from persistence or newly stored
-// but not yet applied to the entity.
-//
-// The entity is the domain object whose state the aggregate manages.
-//
-// The version is the number of events that have been applied to the entity.
+// unsaved events, and unapplied events
 type AggregateState[E estoria.Entity] struct {
-	// the entity that the aggregate represents
+	// The domain object whose state the aggregate manages.
 	entity E
 
-	// the number of events that have been applied to the aggregate
+	// The number of events that have been applied to the entity.
 	version int64
 
-	// appended to the aggregate but not yet persisted
+	// Events that have been appended to the aggregate but not yet stored.
 	unsavedEvents []*AggregateEvent
 
-	// events loaded from persistence or newly stored but not yet applied to the entity
+	// Events that have been loaded from persistence or newly stored but not yet applied to the entity.
 	unappliedEvents []*AggregateEvent
 }
 
