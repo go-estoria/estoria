@@ -53,12 +53,6 @@ type SaveOptions struct {
 	SkipApply bool
 }
 
-// ErrNilAggregate indicates that the provided aggregate is nil.
-var ErrNilAggregate = errors.New("aggregate is nil")
-
-// ErrAggregateNotFound indicates that an aggregate was not found in the aggregate store.
-var ErrAggregateNotFound = errors.New("aggregate not found")
-
 // An InitializeError is an error that occurred while initializing an aggregate store.
 type InitializeError struct {
 	Operation string
@@ -133,3 +127,9 @@ func (e SaveError) Error() string {
 
 	return e.Operation + ": " + e.Err.Error()
 }
+
+// ErrAggregateNotFound indicates that an aggregate was not found in the aggregate store.
+var ErrAggregateNotFound = errors.New("aggregate not found")
+
+// ErrNilAggregate indicates that the provided aggregate is nil.
+var ErrNilAggregate = errors.New("aggregate is nil")
