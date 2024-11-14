@@ -56,7 +56,7 @@ func (a *Aggregate[E]) Version() int64 {
 }
 
 // AggregateState holds all of the aggregate's state, including the entity, version,
-// unsaved events, and unapplied events
+// unsaved events, and unapplied events.
 type AggregateState[E estoria.Entity] struct {
 	// The domain object whose state the aggregate manages.
 	entity E
