@@ -8,7 +8,6 @@ import (
 	"github.com/go-estoria/estoria"
 	"github.com/go-estoria/estoria/snapshotstore"
 	"github.com/go-estoria/estoria/typeid"
-	"github.com/gofrs/uuid/v5"
 )
 
 // A SnapshotReader reads snapshots.
@@ -36,10 +35,11 @@ type SnapshotPolicy interface {
 // and/or hydrate aggregates from snapshots.
 type SnapshottingStore[E estoria.Entity] struct {
 	inner     Store[E]
+	newEntity estoria.EntityFactory[E]
 	reader    SnapshotReader
 	writer    SnapshotWriter
 	policy    SnapshotPolicy
-	marshaler estoria.Marshaler[E, *E]
+	marshaler estoria.EntityMarshaler[E]
 	log       estoria.Logger
 }
 
@@ -48,6 +48,7 @@ var _ Store[estoria.Entity] = (*SnapshottingStore[estoria.Entity])(nil)
 // NewSnapshottingStore creates a new SnapshottingStore.
 func NewSnapshottingStore[E estoria.Entity](
 	inner Store[E],
+	entityFactory estoria.EntityFactory[E],
 	store SnapshotStore,
 	policy SnapshotPolicy,
 	opts ...SnapshottingStoreOption[E],
@@ -55,6 +56,8 @@ func NewSnapshottingStore[E estoria.Entity](
 	switch {
 	case inner == nil:
 		return nil, InitializeError{Err: errors.New("inner store is required")}
+	case entityFactory == nil:
+		return nil, InitializeError{Err: errors.New("entity factory is required")}
 	case store == nil:
 		return nil, InitializeError{Err: errors.New("snapshot store is required")}
 	case policy == nil:
@@ -63,6 +66,7 @@ func NewSnapshottingStore[E estoria.Entity](
 
 	aggregateStore := &SnapshottingStore[E]{
 		inner:     inner,
+		newEntity: entityFactory,
 		reader:    store,
 		writer:    store,
 		policy:    policy,
@@ -79,25 +83,15 @@ func NewSnapshottingStore[E estoria.Entity](
 	return aggregateStore, nil
 }
 
-// New creates a new aggregate.
-func (s *SnapshottingStore[E]) New(id uuid.UUID) (*Aggregate[E], error) {
-	return s.inner.New(id)
-}
-
 // Load loads an aggregate by its ID.
 func (s *SnapshottingStore[E]) Load(ctx context.Context, aggregateID typeid.UUID, opts LoadOptions) (*Aggregate[E], error) {
 	s.log.Debug("loading aggregate", "aggregate_id", aggregateID)
-	aggregate, err := s.New(aggregateID.UUID())
-	if err != nil {
-		estoria.GetLogger().Warn("failed to create new aggregate", "error", err)
-		return s.inner.Load(ctx, aggregateID, opts)
-	}
+	aggregate := NewAggregate(s.newEntity(aggregateID.UUID()), 0)
 
 	if err := s.Hydrate(ctx, aggregate, HydrateOptions{
 		ToVersion: opts.ToVersion,
 	}); err != nil {
-		estoria.GetLogger().Warn("failed to hydrate aggregate", "error", err)
-		return s.inner.Load(ctx, aggregateID, opts)
+		return nil, LoadError{AggregateID: aggregateID, Operation: "hydrating aggregate", Err: err}
 	}
 
 	return aggregate, nil
@@ -146,8 +140,8 @@ func (s *SnapshottingStore[E]) Hydrate(ctx context.Context, aggregate *Aggregate
 		return s.inner.Hydrate(ctx, aggregate, opts)
 	}
 
-	entity := aggregate.Entity()
-	if err := s.marshaler.Unmarshal(snap.Data, &entity); err != nil {
+	entity := s.newEntity(aggregate.ID().UUID())
+	if err := s.marshaler.UnmarshalEntity(snap.Data, entity); err != nil {
 		estoria.GetLogger().Warn("failed to unmarshal snapshot", "error", err)
 		return s.inner.Hydrate(ctx, aggregate, opts)
 	}
@@ -189,8 +183,7 @@ func (s *SnapshottingStore[E]) Save(ctx context.Context, aggregate *Aggregate[E]
 
 		estoria.GetLogger().Debug("taking snapshot", "aggregate_id", aggregate.ID(), "version", aggregate.Version())
 
-		entity := aggregate.Entity()
-		data, err := s.marshaler.Marshal(&entity)
+		data, err := s.marshaler.MarshalEntity(aggregate.Entity())
 		if err != nil {
 			estoria.GetLogger().Error("failed to marshal snapshot", "error", err)
 			continue
@@ -213,7 +206,7 @@ func (s *SnapshottingStore[E]) Save(ctx context.Context, aggregate *Aggregate[E]
 type SnapshottingStoreOption[E estoria.Entity] func(*SnapshottingStore[E]) error
 
 // WithSnapshotMarshaler sets the snapshot marshaler.
-func WithSnapshotMarshaler[E estoria.Entity](marshaler estoria.Marshaler[E, *E]) SnapshottingStoreOption[E] {
+func WithSnapshotMarshaler[E estoria.Entity](marshaler estoria.EntityMarshaler[E]) SnapshottingStoreOption[E] {
 	return func(s *SnapshottingStore[E]) error {
 		s.marshaler = marshaler
 		return nil

@@ -13,18 +13,9 @@ import (
 // Mocks in this file are shared by the tests for multiple aggregate store implementations.
 
 type mockAggregateStore[E estoria.Entity] struct {
-	NewFn     func(id uuid.UUID) (*aggregatestore.Aggregate[E], error)
 	LoadFn    func(context.Context, typeid.UUID, aggregatestore.LoadOptions) (*aggregatestore.Aggregate[E], error)
 	HydrateFn func(context.Context, *aggregatestore.Aggregate[E], aggregatestore.HydrateOptions) error
 	SaveFn    func(context.Context, *aggregatestore.Aggregate[E], aggregatestore.SaveOptions) error
-}
-
-func (s *mockAggregateStore[E]) New(id uuid.UUID) (*aggregatestore.Aggregate[E], error) {
-	if s.NewFn != nil {
-		return s.NewFn(id)
-	}
-
-	return nil, fmt.Errorf("unexpected call: New(id=%s)", id.String())
 }
 
 func (s *mockAggregateStore[E]) Load(ctx context.Context, aggregateID typeid.UUID, opts aggregatestore.LoadOptions) (*aggregatestore.Aggregate[E], error) {
@@ -53,26 +44,17 @@ func (s *mockAggregateStore[E]) Save(ctx context.Context, aggregate *aggregatest
 
 type mockEntity struct {
 	ID               typeid.UUID
-	eventTypes       []estoria.EntityEvent
 	numAppliedEvents int64
-	applyEventErr    error
 }
 
-var _ estoria.Entity = &mockEntity{}
+var _ estoria.Entity = mockEntity{}
+
+func newMockEntity(id uuid.UUID) mockEntity {
+	return mockEntity{
+		ID: typeid.FromUUID("mockentity", id),
+	}
+}
 
 func (e mockEntity) EntityID() typeid.UUID {
 	return e.ID
-}
-
-func (e mockEntity) EventTypes() []estoria.EntityEvent {
-	return e.eventTypes
-}
-
-func (e *mockEntity) ApplyEvent(_ context.Context, _ estoria.EntityEvent) error {
-	if e.applyEventErr != nil {
-		return e.applyEventErr
-	}
-
-	e.numAppliedEvents++
-	return nil
 }

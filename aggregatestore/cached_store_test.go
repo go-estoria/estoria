@@ -9,7 +9,6 @@ import (
 	"github.com/go-estoria/estoria"
 	"github.com/go-estoria/estoria/aggregatestore"
 	"github.com/go-estoria/estoria/typeid"
-	"github.com/gofrs/uuid/v5"
 )
 
 // mockCache is a mock implementation of aggregatestore.AggregateCache.
@@ -60,88 +59,6 @@ func TestNewCachedStore(t *testing.T) {
 
 			if gotStore == nil {
 				t.Error("unexpected nil store")
-			}
-		})
-	}
-}
-
-func TestCachedStore_New(t *testing.T) {
-	t.Parallel()
-
-	aggregateID := typeid.Must(typeid.NewUUID("mockentity")).(typeid.UUID)
-
-	for _, tt := range []struct {
-		name          string
-		haveInner     func() aggregatestore.Store[*mockEntity]
-		haveCache     func() aggregatestore.AggregateCache[*mockEntity]
-		wantAggregate *aggregatestore.Aggregate[*mockEntity]
-		wantErr       error
-	}{
-		{
-			name: "creates a new aggregate using the inner store",
-			haveInner: func() aggregatestore.Store[*mockEntity] {
-				return &mockAggregateStore[*mockEntity]{
-					NewFn: func(id uuid.UUID) (*aggregatestore.Aggregate[*mockEntity], error) {
-						agg := &aggregatestore.Aggregate[*mockEntity]{}
-						agg.State().SetEntityAtVersion(&mockEntity{ID: typeid.FromUUID("mockentity", id)}, 42)
-						return agg, nil
-					},
-				}
-			},
-			haveCache: func() aggregatestore.AggregateCache[*mockEntity] {
-				return &mockCache[*mockEntity]{}
-			},
-			wantAggregate: func() *aggregatestore.Aggregate[*mockEntity] {
-				agg := &aggregatestore.Aggregate[*mockEntity]{}
-				agg.State().SetEntityAtVersion(&mockEntity{ID: aggregateID}, 42)
-				return agg
-			}(),
-		},
-		{
-			name: "returns an error when the inner store returns an error",
-			haveInner: func() aggregatestore.Store[*mockEntity] {
-				return &mockAggregateStore[*mockEntity]{
-					NewFn: func(uuid.UUID) (*aggregatestore.Aggregate[*mockEntity], error) {
-						return nil, errors.New("mock error")
-					},
-				}
-			},
-			haveCache: func() aggregatestore.AggregateCache[*mockEntity] {
-				return &mockCache[*mockEntity]{}
-			},
-			wantErr: errors.New("mock error"),
-		},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-
-			store := aggregatestore.NewCachedStore(tt.haveInner(), tt.haveCache())
-			if store == nil {
-				t.Fatal("unexpected nil store")
-			}
-
-			gotAggregate, gotErr := store.New(aggregateID.UUID())
-
-			if tt.wantErr != nil {
-				if gotErr == nil || gotErr.Error() != tt.wantErr.Error() {
-					t.Errorf("want error: %v, got: %v", tt.wantErr, gotErr)
-				}
-				return
-			}
-
-			if gotErr != nil {
-				t.Errorf("unexpected error: %v", gotErr)
-			} else if gotAggregate == nil {
-				t.Errorf("unexpected nil aggregate")
-			}
-
-			// aggregate has the correct ID
-			if gotAggregate.ID().String() != typeid.FromUUID("mockentity", aggregateID.UUID()).String() {
-				t.Errorf("want aggregate ID %s, got %s", typeid.FromUUID("mockentity", aggregateID.UUID()), gotAggregate.ID())
-			}
-			// aggregate has the correct version
-			if gotAggregate.Version() != tt.wantAggregate.Version() {
-				t.Errorf("want aggregate version %d, got %d", tt.wantAggregate.Version(), gotAggregate.Version())
 			}
 		})
 	}

@@ -2,6 +2,7 @@ package memory
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sync"
@@ -12,11 +13,16 @@ import (
 	"github.com/go-estoria/estoria/typeid"
 )
 
+type EventMarshaler interface {
+	Marshal(event *eventstore.Event) ([]byte, error)
+	Unmarshal(data []byte, dest *eventstore.Event) error
+}
+
 // EventStore is an in-memory event store. It should not be used in production applications.
 type EventStore struct {
 	events    map[string][]*eventStoreDocument
 	mu        sync.RWMutex
-	marshaler estoria.Marshaler[eventstore.Event, *eventstore.Event]
+	marshaler EventMarshaler
 	outbox    *Outbox
 }
 
@@ -24,7 +30,7 @@ type EventStore struct {
 func NewEventStore(opts ...EventStoreOption) (*EventStore, error) {
 	eventStore := &EventStore{
 		events:    map[string][]*eventStoreDocument{},
-		marshaler: estoria.JSONMarshaler[eventstore.Event]{},
+		marshaler: JSONEventMarshaler{},
 	}
 
 	for _, opt := range opts {
@@ -131,7 +137,7 @@ func (s *EventStore) ReadStream(_ context.Context, streamID typeid.UUID, opts ev
 type EventStoreOption func(*EventStore) error
 
 // WithEventMarshaler configures the event store to use a custom event marshaler.
-func WithEventMarshaler(marshaler estoria.Marshaler[eventstore.Event, *eventstore.Event]) EventStoreOption {
+func WithEventMarshaler(marshaler EventMarshaler) EventStoreOption {
 	return func(s *EventStore) error {
 		if marshaler == nil {
 			return errors.New("marshaler cannot be nil")
@@ -156,4 +162,14 @@ func WithOutbox(outbox *Outbox) EventStoreOption {
 
 type eventStoreDocument struct {
 	Data []byte
+}
+
+type JSONEventMarshaler struct{}
+
+func (m JSONEventMarshaler) Marshal(event *eventstore.Event) ([]byte, error) {
+	return json.Marshal(event)
+}
+
+func (m JSONEventMarshaler) Unmarshal(src []byte, dest *eventstore.Event) error {
+	return json.Unmarshal(src, dest)
 }

@@ -78,28 +78,6 @@ func (s *HookableStore[E]) AfterSave(hooks ...Hook[E]) {
 	s.hooks[AfterSave] = append(s.hooks[AfterSave], hooks...)
 }
 
-// New creates a new aggregate.
-func (s *HookableStore[E]) New(id uuid.UUID) (*Aggregate[E], error) {
-	for _, hook := range s.precreateHooks {
-		if err := hook(id); err != nil {
-			return nil, CreateError{Operation: "pre-create hook", Err: err}
-		}
-	}
-
-	aggregate, err := s.inner.New(id)
-	if err != nil {
-		return nil, CreateError{Operation: "creating aggregate using inner store", Err: err}
-	}
-
-	for _, hook := range s.hooks[AfterNew] {
-		if err := hook(context.Background(), aggregate); err != nil {
-			return nil, CreateError{Operation: "post-create hook", Err: err}
-		}
-	}
-
-	return aggregate, nil
-}
-
 // Load loads an aggregate by ID.
 func (s *HookableStore[E]) Load(ctx context.Context, id typeid.UUID, opts LoadOptions) (*Aggregate[E], error) {
 	s.log.Debug("loading aggregate", "aggregate_id", id)

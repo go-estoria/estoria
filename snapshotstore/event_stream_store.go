@@ -13,14 +13,14 @@ import (
 type EventStreamStore struct {
 	eventReader eventstore.StreamReader
 	eventWriter eventstore.StreamWriter
-	marshaler   estoria.Marshaler[AggregateSnapshot, *AggregateSnapshot]
+	marshaler   SnapshotMarshaler
 }
 
 func NewEventStreamStore(eventStore eventstore.Store) *EventStreamStore {
 	return &EventStreamStore{
 		eventReader: eventStore,
 		eventWriter: eventStore,
-		marshaler:   estoria.JSONMarshaler[AggregateSnapshot]{},
+		marshaler:   JSONSnapshotMarshaler{},
 	}
 }
 
@@ -53,7 +53,7 @@ func (s *EventStreamStore) ReadSnapshot(ctx context.Context, aggregateID typeid.
 		"stream_version", event.StreamVersion)
 
 	var snapshot AggregateSnapshot
-	if err := s.marshaler.Unmarshal(event.Data, &snapshot); err != nil {
+	if err := s.marshaler.UnmarshalSnapshot(event.Data, &snapshot); err != nil {
 		return nil, fmt.Errorf("unmarshaling snapshot: %w", err)
 	}
 
@@ -77,7 +77,7 @@ func (s *EventStreamStore) WriteSnapshot(ctx context.Context, snap *AggregateSna
 	}
 
 	// event data includes the aggregate ID, aggregate version, and snapshot data
-	eventData, err := s.marshaler.Marshal(snap)
+	eventData, err := s.marshaler.MarshalSnapshot(snap)
 	if err != nil {
 		return fmt.Errorf("marshaling snapshot data for stream event: %w", err)
 	}

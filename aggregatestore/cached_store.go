@@ -5,7 +5,6 @@ import (
 
 	"github.com/go-estoria/estoria"
 	"github.com/go-estoria/estoria/typeid"
-	"github.com/gofrs/uuid/v5"
 )
 
 // An AggregateCache is a cache for aggregates.
@@ -34,11 +33,6 @@ func NewCachedStore[E estoria.Entity](
 }
 
 var _ Store[estoria.Entity] = (*CachedStore[estoria.Entity])(nil)
-
-// New creates a new Aggregate.
-func (s *CachedStore[E]) New(id uuid.UUID) (*Aggregate[E], error) {
-	return s.inner.New(id)
-}
 
 // Load loads an aggregate by ID.
 func (s *CachedStore[E]) Load(ctx context.Context, id typeid.UUID, opts LoadOptions) (*Aggregate[E], error) {

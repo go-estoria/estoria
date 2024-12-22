@@ -2,6 +2,7 @@ package snapshotstore
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 
 	"github.com/go-estoria/estoria"
@@ -14,16 +15,21 @@ type RetentionPolicy interface {
 	ShouldRetain(snap *AggregateSnapshot, snapshotIndex, totalSnapshots int64) bool
 }
 
+type SnapshotMarshaler interface {
+	MarshalSnapshot(snap *AggregateSnapshot) ([]byte, error)
+	UnmarshalSnapshot(data []byte, dest *AggregateSnapshot) error
+}
+
 type MemoryStore struct {
 	snapshots map[typeid.UUID][]*AggregateSnapshot
-	marshaler estoria.Marshaler[AggregateSnapshot, *AggregateSnapshot]
+	marshaler SnapshotMarshaler
 	retention RetentionPolicy
 }
 
 func NewMemoryStore() *MemoryStore {
 	return &MemoryStore{
 		snapshots: map[typeid.UUID][]*AggregateSnapshot{},
-		marshaler: estoria.JSONMarshaler[AggregateSnapshot]{},
+		marshaler: JSONSnapshotMarshaler{},
 		retention: MaxSnapshotsRetentionPolicy{N: 1},
 	}
 }
@@ -88,4 +94,14 @@ func (s *MemoryStore) WriteSnapshot(_ context.Context, snap *AggregateSnapshot) 
 	estoria.GetLogger().Debug("wrote snapshot", "aggregate_id", snap.AggregateID, "aggregate_version", snap.AggregateVersion)
 
 	return nil
+}
+
+type JSONSnapshotMarshaler struct{}
+
+func (m JSONSnapshotMarshaler) MarshalSnapshot(snap *AggregateSnapshot) ([]byte, error) {
+	return json.Marshal(snap)
+}
+
+func (m JSONSnapshotMarshaler) UnmarshalSnapshot(data []byte, dest *AggregateSnapshot) error {
+	return json.Unmarshal(data, dest)
 }

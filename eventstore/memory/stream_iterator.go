@@ -3,7 +3,6 @@ package memory
 import (
 	"context"
 
-	"github.com/go-estoria/estoria"
 	"github.com/go-estoria/estoria/eventstore"
 	"github.com/go-estoria/estoria/typeid"
 )
@@ -15,7 +14,7 @@ type streamIterator struct {
 	direction eventstore.ReadStreamDirection
 	limit     int64
 	retrieved int64
-	marshaler estoria.Marshaler[eventstore.Event, *eventstore.Event]
+	marshaler EventMarshaler
 }
 
 func (i *streamIterator) Next(_ context.Context) (*eventstore.Event, error) {

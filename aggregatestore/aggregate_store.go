@@ -6,12 +6,10 @@ import (
 
 	"github.com/go-estoria/estoria"
 	"github.com/go-estoria/estoria/typeid"
-	"github.com/gofrs/uuid/v5"
 )
 
 // A Store is a read/write store for aggregates.
 type Store[E estoria.Entity] interface {
-	New(id uuid.UUID) (*Aggregate[E], error)
 	Load(ctx context.Context, id typeid.UUID, opts LoadOptions) (*Aggregate[E], error)
 	Hydrate(ctx context.Context, aggregate *Aggregate[E], opts HydrateOptions) error
 	Save(ctx context.Context, aggregate *Aggregate[E], opts SaveOptions) error
@@ -93,6 +91,9 @@ type LoadError struct {
 
 // Error implements the error interface.
 func (e LoadError) Error() string {
+	if e.Operation == "" {
+		return e.Err.Error()
+	}
 	return e.Operation + ": " + e.Err.Error()
 }
 
