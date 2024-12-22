@@ -140,13 +140,13 @@ func (s *SnapshottingStore[E]) Hydrate(ctx context.Context, aggregate *Aggregate
 		return s.inner.Hydrate(ctx, aggregate, opts)
 	}
 
-	entity := s.newEntity(aggregate.ID().UUID())
-	if err := s.marshaler.UnmarshalEntity(snap.Data, entity); err != nil {
+	entity := aggregate.Entity()
+	if err := s.marshaler.UnmarshalEntity(snap.Data, &entity); err != nil {
 		estoria.GetLogger().Warn("failed to unmarshal snapshot", "error", err)
 		return s.inner.Hydrate(ctx, aggregate, opts)
 	}
 
-	s.log.Debug("loaded snapshot", "aggregate_id", aggregate.ID(), "version", snap.AggregateVersion)
+	s.log.Debug("loaded snapshot", "aggregate_id", aggregate.ID(), "version", snap.AggregateVersion, "entity", entity)
 	aggregate.State().SetEntityAtVersion(entity, snap.AggregateVersion)
 
 	return s.inner.Hydrate(ctx, aggregate, opts)

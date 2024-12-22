@@ -22,7 +22,7 @@ type EntityMarshaler[E Entity] interface {
 	// MarshalEntity marshals an entity to a type T.
 	MarshalEntity(entity E) ([]byte, error)
 	// UnmarshalEntity unmarshals an entity from a type T.
-	UnmarshalEntity(data []byte, dest E) error
+	UnmarshalEntity(data []byte, dest *E) error
 }
 
 type JSONMarshaler[E Entity] struct{}
@@ -30,10 +30,13 @@ type JSONMarshaler[E Entity] struct{}
 var _ EntityMarshaler[Entity] = JSONMarshaler[Entity]{}
 
 func (m JSONMarshaler[E]) MarshalEntity(entity E) ([]byte, error) {
-	return json.Marshal(entity)
+	b, err := json.Marshal(entity)
+	GetLogger().Debug("marshaled entity", "entity", entity, "data", string(b))
+	return b, err
 }
 
-func (m JSONMarshaler[E]) UnmarshalEntity(data []byte, dest E) error {
+func (m JSONMarshaler[E]) UnmarshalEntity(data []byte, dest *E) error {
+	GetLogger().Debug("unmarshaling entity", "data", string(data))
 	return json.Unmarshal(data, &dest)
 }
 

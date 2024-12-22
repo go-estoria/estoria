@@ -48,7 +48,7 @@ func (m *mockSnapshotPolicy) ShouldSnapshot(aggregateID typeid.UUID, version int
 
 type mockSnapshotMarshaler struct {
 	MarshalFn   func(mockEntity) ([]byte, error)
-	UnmarshalFn func([]byte, mockEntity) error
+	UnmarshalFn func([]byte, *mockEntity) error
 }
 
 func (m *mockSnapshotMarshaler) MarshalEntity(entity mockEntity) ([]byte, error) {
@@ -59,7 +59,7 @@ func (m *mockSnapshotMarshaler) MarshalEntity(entity mockEntity) ([]byte, error)
 	return nil, errors.New("unexpected call to Marshal")
 }
 
-func (m *mockSnapshotMarshaler) UnmarshalEntity(data []byte, entity mockEntity) error {
+func (m *mockSnapshotMarshaler) UnmarshalEntity(data []byte, entity *mockEntity) error {
 	if m.UnmarshalFn != nil {
 		return m.UnmarshalFn(data, entity)
 	}
