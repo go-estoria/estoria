@@ -22,6 +22,8 @@ type EventSourcedStore[E estoria.Entity] struct {
 	entityEventPrototypes map[string]func() estoria.EntityEvent[E]
 	entityEventMarshaler  estoria.EntityEventMarshaler[E]
 
+	inner Store[E]
+
 	log estoria.Logger
 }
 
@@ -67,7 +69,7 @@ func (s *EventSourcedStore[E]) Load(ctx context.Context, id uuid.UUID, opts Load
 
 	s.log.Debug("loading aggregate from event store", "aggregate_id", id)
 
-	aggregate := NewAggregate(s.newEntity(id), 0)
+	aggregate := s.New(id)
 
 	hydrateOpts := HydrateOptions{
 		ToVersion: opts.ToVersion,
@@ -272,6 +274,13 @@ func WithEventStreamWriter[E estoria.Entity](writer eventstore.StreamWriter) Eve
 func WithEntityEventMarshaler[E estoria.Entity](marshaler estoria.EntityEventMarshaler[E]) EventSourcedStoreOption[E] {
 	return func(s *EventSourcedStore[E]) error {
 		s.entityEventMarshaler = marshaler
+		return nil
+	}
+}
+
+func WithInnerStore[E estoria.Entity](inner Store[E]) EventSourcedStoreOption[E] {
+	return func(s *EventSourcedStore[E]) error {
+		s.inner = inner
 		return nil
 	}
 }
