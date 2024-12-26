@@ -8,7 +8,6 @@ import (
 
 	"github.com/go-estoria/estoria"
 	"github.com/go-estoria/estoria/eventstore"
-	"github.com/go-estoria/estoria/typeid"
 	"github.com/gofrs/uuid/v5"
 )
 
@@ -40,7 +39,7 @@ func NewEventSourcedStore[E estoria.Entity](
 		newEntity:             entityFactory,
 		entityEventPrototypes: make(map[string]func() estoria.EntityEvent[E]),
 		entityEventMarshaler:  estoria.JSONEntityEventMarshaler[E]{},
-		log:                   estoria.GetLogger().WithGroup("aggregatestore"),
+		log:                   estoria.GetLogger().WithGroup("store"),
 	}
 
 	for _, opt := range opts {
@@ -56,22 +55,26 @@ func NewEventSourcedStore[E estoria.Entity](
 	return store, nil
 }
 
+func (s *EventSourcedStore[E]) New(id uuid.UUID) *Aggregate[E] {
+	return NewAggregate(s.newEntity(id), 0)
+}
+
 // Load loads an aggregate by its ID.
-func (s *EventSourcedStore[E]) Load(ctx context.Context, id typeid.UUID, opts LoadOptions) (*Aggregate[E], error) {
-	if id.UUID() == uuid.Nil {
-		return nil, LoadError{AggregateID: id, Err: errors.New("aggregate ID is nil")}
+func (s *EventSourcedStore[E]) Load(ctx context.Context, id uuid.UUID, opts LoadOptions) (*Aggregate[E], error) {
+	if id == uuid.Nil {
+		return nil, LoadError{Err: errors.New("aggregate ID is nil")}
 	}
 
 	s.log.Debug("loading aggregate from event store", "aggregate_id", id)
 
-	aggregate := NewAggregate[E](s.newEntity(id.UUID()), 0)
+	aggregate := NewAggregate(s.newEntity(id), 0)
 
 	hydrateOpts := HydrateOptions{
 		ToVersion: opts.ToVersion,
 	}
 
 	if err := s.Hydrate(ctx, aggregate, hydrateOpts); err != nil {
-		return nil, LoadError{AggregateID: id, Operation: "hydrating aggregate", Err: err}
+		return nil, LoadError{AggregateID: aggregate.ID(), Operation: "hydrating aggregate", Err: err}
 	}
 
 	return aggregate, nil

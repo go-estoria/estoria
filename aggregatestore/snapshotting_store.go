@@ -8,6 +8,7 @@ import (
 	"github.com/go-estoria/estoria"
 	"github.com/go-estoria/estoria/snapshotstore"
 	"github.com/go-estoria/estoria/typeid"
+	"github.com/gofrs/uuid/v5"
 )
 
 // A SnapshotReader reads snapshots.
@@ -35,7 +36,6 @@ type SnapshotPolicy interface {
 // and/or hydrate aggregates from snapshots.
 type SnapshottingStore[E estoria.Entity] struct {
 	inner     Store[E]
-	newEntity estoria.EntityFactory[E]
 	reader    SnapshotReader
 	writer    SnapshotWriter
 	policy    SnapshotPolicy
@@ -48,7 +48,6 @@ var _ Store[estoria.Entity] = (*SnapshottingStore[estoria.Entity])(nil)
 // NewSnapshottingStore creates a new SnapshottingStore.
 func NewSnapshottingStore[E estoria.Entity](
 	inner Store[E],
-	entityFactory estoria.EntityFactory[E],
 	store SnapshotStore,
 	policy SnapshotPolicy,
 	opts ...SnapshottingStoreOption[E],
@@ -56,8 +55,6 @@ func NewSnapshottingStore[E estoria.Entity](
 	switch {
 	case inner == nil:
 		return nil, InitializeError{Err: errors.New("inner store is required")}
-	case entityFactory == nil:
-		return nil, InitializeError{Err: errors.New("entity factory is required")}
 	case store == nil:
 		return nil, InitializeError{Err: errors.New("snapshot store is required")}
 	case policy == nil:
@@ -66,12 +63,11 @@ func NewSnapshottingStore[E estoria.Entity](
 
 	aggregateStore := &SnapshottingStore[E]{
 		inner:     inner,
-		newEntity: entityFactory,
 		reader:    store,
 		writer:    store,
 		policy:    policy,
 		marshaler: estoria.JSONMarshaler[E]{},
-		log:       estoria.GetLogger().WithGroup("snapshottingaggregatestore"),
+		log:       estoria.GetLogger().WithGroup("snapshottingstore"),
 	}
 
 	for _, opt := range opts {
@@ -83,15 +79,20 @@ func NewSnapshottingStore[E estoria.Entity](
 	return aggregateStore, nil
 }
 
+// New creates a new aggregate.
+func (s *SnapshottingStore[E]) New(id uuid.UUID) *Aggregate[E] {
+	return s.inner.New(id)
+}
+
 // Load loads an aggregate by its ID.
-func (s *SnapshottingStore[E]) Load(ctx context.Context, aggregateID typeid.UUID, opts LoadOptions) (*Aggregate[E], error) {
-	s.log.Debug("loading aggregate", "aggregate_id", aggregateID)
-	aggregate := NewAggregate(s.newEntity(aggregateID.UUID()), 0)
+func (s *SnapshottingStore[E]) Load(ctx context.Context, id uuid.UUID, opts LoadOptions) (*Aggregate[E], error) {
+	aggregate := s.New(id)
+	s.log.Debug("loading aggregate", "aggregate_id", aggregate.ID())
 
 	if err := s.Hydrate(ctx, aggregate, HydrateOptions{
 		ToVersion: opts.ToVersion,
 	}); err != nil {
-		return nil, LoadError{AggregateID: aggregateID, Operation: "hydrating aggregate", Err: err}
+		return nil, LoadError{AggregateID: aggregate.ID(), Operation: "hydrating aggregate", Err: err}
 	}
 
 	return aggregate, nil

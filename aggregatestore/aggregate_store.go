@@ -6,11 +6,13 @@ import (
 
 	"github.com/go-estoria/estoria"
 	"github.com/go-estoria/estoria/typeid"
+	"github.com/gofrs/uuid/v5"
 )
 
 // A Store is a read/write store for aggregates.
 type Store[E estoria.Entity] interface {
-	Load(ctx context.Context, id typeid.UUID, opts LoadOptions) (*Aggregate[E], error)
+	New(id uuid.UUID) *Aggregate[E]
+	Load(ctx context.Context, id uuid.UUID, opts LoadOptions) (*Aggregate[E], error)
 	Hydrate(ctx context.Context, aggregate *Aggregate[E], opts HydrateOptions) error
 	Save(ctx context.Context, aggregate *Aggregate[E], opts SaveOptions) error
 }

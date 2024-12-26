@@ -13,12 +13,21 @@ import (
 // Mocks in this file are shared by the tests for multiple aggregate store implementations.
 
 type mockAggregateStore[E estoria.Entity] struct {
-	LoadFn    func(context.Context, typeid.UUID, aggregatestore.LoadOptions) (*aggregatestore.Aggregate[E], error)
+	NewFn     func(uuid.UUID) *aggregatestore.Aggregate[E]
+	LoadFn    func(context.Context, uuid.UUID, aggregatestore.LoadOptions) (*aggregatestore.Aggregate[E], error)
 	HydrateFn func(context.Context, *aggregatestore.Aggregate[E], aggregatestore.HydrateOptions) error
 	SaveFn    func(context.Context, *aggregatestore.Aggregate[E], aggregatestore.SaveOptions) error
 }
 
-func (s *mockAggregateStore[E]) Load(ctx context.Context, aggregateID typeid.UUID, opts aggregatestore.LoadOptions) (*aggregatestore.Aggregate[E], error) {
+func (s *mockAggregateStore[E]) New(id uuid.UUID) *aggregatestore.Aggregate[E] {
+	if s.NewFn != nil {
+		return s.NewFn(id)
+	}
+
+	return nil
+}
+
+func (s *mockAggregateStore[E]) Load(ctx context.Context, aggregateID uuid.UUID, opts aggregatestore.LoadOptions) (*aggregatestore.Aggregate[E], error) {
 	if s.LoadFn != nil {
 		return s.LoadFn(ctx, aggregateID, opts)
 	}

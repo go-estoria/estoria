@@ -7,6 +7,7 @@ import (
 
 	"github.com/go-estoria/estoria/aggregatestore"
 	"github.com/go-estoria/estoria/typeid"
+	"github.com/gofrs/uuid/v5"
 )
 
 func TestNewHookableStore(t *testing.T) {
@@ -14,12 +15,12 @@ func TestNewHookableStore(t *testing.T) {
 
 	for _, tt := range []struct {
 		name      string
-		haveInner aggregatestore.Store[*mockEntity]
+		haveInner aggregatestore.Store[mockEntity]
 		wantErr   error
 	}{
 		{
 			name:      "creates a new hookable store",
-			haveInner: &mockAggregateStore[*mockEntity]{},
+			haveInner: &mockAggregateStore[mockEntity]{},
 		},
 		{
 			name:      "returns an error when the inner store is nil",
@@ -48,90 +49,92 @@ func TestNewHookableStore(t *testing.T) {
 func TestHookableStore_Load(t *testing.T) {
 	t.Parallel()
 
-	aggregateID := typeid.Must(typeid.NewUUID("mockentity")).(typeid.UUID)
+	aggregateID := uuid.Must(uuid.NewV4())
 
 	for _, tt := range []struct {
 		name             string
-		haveInner        aggregatestore.Store[*mockEntity]
+		haveInner        aggregatestore.Store[mockEntity]
 		havePreloadHooks []aggregatestore.PreloadHook
-		haveHooks        map[aggregatestore.HookStage][]aggregatestore.Hook[*mockEntity]
-		haveAggregateID  typeid.UUID
+		haveHooks        map[aggregatestore.HookStage][]aggregatestore.Hook[mockEntity]
+		haveAggregateID  uuid.UUID
 		haveOpts         aggregatestore.LoadOptions
-		wantAggregate    *aggregatestore.Aggregate[*mockEntity]
+		wantAggregate    *aggregatestore.Aggregate[mockEntity]
 		wantErr          error
 	}{
 		{
 			name: "loads an aggergate using the inner store when no hooks are provided",
-			haveInner: &mockAggregateStore[*mockEntity]{
-				LoadFn: func(_ context.Context, id typeid.UUID, _ aggregatestore.LoadOptions) (*aggregatestore.Aggregate[*mockEntity], error) {
-					agg := &aggregatestore.Aggregate[*mockEntity]{}
-					agg.State().SetEntityAtVersion(&mockEntity{ID: id}, 42)
-					return agg, nil
+			haveInner: &mockAggregateStore[mockEntity]{
+				NewFn: func(id uuid.UUID) *aggregatestore.Aggregate[mockEntity] {
+					return aggregatestore.NewAggregate(newMockEntity(id), 0)
+				},
+				LoadFn: func(_ context.Context, id uuid.UUID, _ aggregatestore.LoadOptions) (*aggregatestore.Aggregate[mockEntity], error) {
+					return aggregatestore.NewAggregate(newMockEntity(id), 42), nil
 				},
 			},
 			havePreloadHooks: []aggregatestore.PreloadHook{},
-			haveHooks:        map[aggregatestore.HookStage][]aggregatestore.Hook[*mockEntity]{},
+			haveHooks:        map[aggregatestore.HookStage][]aggregatestore.Hook[mockEntity]{},
 			haveAggregateID:  aggregateID,
-			wantAggregate: func() *aggregatestore.Aggregate[*mockEntity] {
-				agg := &aggregatestore.Aggregate[*mockEntity]{}
-				agg.State().SetEntityAtVersion(&mockEntity{ID: aggregateID}, 42)
-				return agg
+			wantAggregate: func() *aggregatestore.Aggregate[mockEntity] {
+				return aggregatestore.NewAggregate(newMockEntity(aggregateID), 42)
 			}(),
 		},
 		{
 			name: "loads an aggergate using the inner store and runs a single pre-load hook",
-			haveInner: &mockAggregateStore[*mockEntity]{
-				LoadFn: func(_ context.Context, id typeid.UUID, _ aggregatestore.LoadOptions) (*aggregatestore.Aggregate[*mockEntity], error) {
-					agg := &aggregatestore.Aggregate[*mockEntity]{}
-					agg.State().SetEntityAtVersion(&mockEntity{ID: id}, 42)
-					return agg, nil
+			haveInner: &mockAggregateStore[mockEntity]{
+				NewFn: func(id uuid.UUID) *aggregatestore.Aggregate[mockEntity] {
+					return aggregatestore.NewAggregate(newMockEntity(id), 0)
+				},
+				LoadFn: func(_ context.Context, id uuid.UUID, _ aggregatestore.LoadOptions) (*aggregatestore.Aggregate[mockEntity], error) {
+					return aggregatestore.NewAggregate(newMockEntity(id), 42), nil
 				},
 			},
 			havePreloadHooks: []aggregatestore.PreloadHook{
-				func(_ context.Context, _ typeid.UUID) error {
+				func(_ context.Context, _ uuid.UUID) error {
 					return errors.New("mock error")
 				},
 			},
-			haveHooks:       map[aggregatestore.HookStage][]aggregatestore.Hook[*mockEntity]{},
+			haveHooks:       map[aggregatestore.HookStage][]aggregatestore.Hook[mockEntity]{},
 			haveAggregateID: aggregateID,
 			wantErr:         errors.New("pre-load hook: mock error"),
 		},
 		{
 			name: "loads an aggergate using the inner store and runs multiple pre-load hooks",
-			haveInner: &mockAggregateStore[*mockEntity]{
-				LoadFn: func(_ context.Context, id typeid.UUID, _ aggregatestore.LoadOptions) (*aggregatestore.Aggregate[*mockEntity], error) {
-					agg := &aggregatestore.Aggregate[*mockEntity]{}
-					agg.State().SetEntityAtVersion(&mockEntity{ID: id}, 42)
-					return agg, nil
+			haveInner: &mockAggregateStore[mockEntity]{
+				NewFn: func(id uuid.UUID) *aggregatestore.Aggregate[mockEntity] {
+					return aggregatestore.NewAggregate(newMockEntity(id), 0)
+				},
+				LoadFn: func(_ context.Context, id uuid.UUID, _ aggregatestore.LoadOptions) (*aggregatestore.Aggregate[mockEntity], error) {
+					return aggregatestore.NewAggregate(newMockEntity(id), 42), nil
 				},
 			},
 			havePreloadHooks: []aggregatestore.PreloadHook{
-				func(_ context.Context, _ typeid.UUID) error {
+				func(_ context.Context, _ uuid.UUID) error {
 					return nil
 				},
-				func(_ context.Context, _ typeid.UUID) error {
+				func(_ context.Context, _ uuid.UUID) error {
 					return nil
 				},
-				func(_ context.Context, _ typeid.UUID) error {
+				func(_ context.Context, _ uuid.UUID) error {
 					return errors.New("mock error")
 				},
 			},
-			haveHooks:       map[aggregatestore.HookStage][]aggregatestore.Hook[*mockEntity]{},
+			haveHooks:       map[aggregatestore.HookStage][]aggregatestore.Hook[mockEntity]{},
 			haveAggregateID: aggregateID,
 			wantErr:         errors.New("pre-load hook: mock error"),
 		},
 		{
 			name: "loads an aggergate using the inner store and runs a single post-load hook",
-			haveInner: &mockAggregateStore[*mockEntity]{
-				LoadFn: func(_ context.Context, id typeid.UUID, _ aggregatestore.LoadOptions) (*aggregatestore.Aggregate[*mockEntity], error) {
-					agg := &aggregatestore.Aggregate[*mockEntity]{}
-					agg.State().SetEntityAtVersion(&mockEntity{ID: id}, 42)
-					return agg, nil
+			haveInner: &mockAggregateStore[mockEntity]{
+				NewFn: func(id uuid.UUID) *aggregatestore.Aggregate[mockEntity] {
+					return aggregatestore.NewAggregate(newMockEntity(id), 0)
+				},
+				LoadFn: func(_ context.Context, id uuid.UUID, _ aggregatestore.LoadOptions) (*aggregatestore.Aggregate[mockEntity], error) {
+					return aggregatestore.NewAggregate(newMockEntity(id), 42), nil
 				},
 			},
-			haveHooks: map[aggregatestore.HookStage][]aggregatestore.Hook[*mockEntity]{
+			haveHooks: map[aggregatestore.HookStage][]aggregatestore.Hook[mockEntity]{
 				aggregatestore.AfterLoad: {
-					func(_ context.Context, _ *aggregatestore.Aggregate[*mockEntity]) error {
+					func(_ context.Context, _ *aggregatestore.Aggregate[mockEntity]) error {
 						return errors.New("mock error")
 					},
 				},
@@ -141,22 +144,23 @@ func TestHookableStore_Load(t *testing.T) {
 		},
 		{
 			name: "loads an aggergate using the inner store and runs multiple post-load hooks",
-			haveInner: &mockAggregateStore[*mockEntity]{
-				LoadFn: func(_ context.Context, id typeid.UUID, _ aggregatestore.LoadOptions) (*aggregatestore.Aggregate[*mockEntity], error) {
-					agg := &aggregatestore.Aggregate[*mockEntity]{}
-					agg.State().SetEntityAtVersion(&mockEntity{ID: id}, 42)
-					return agg, nil
+			haveInner: &mockAggregateStore[mockEntity]{
+				NewFn: func(id uuid.UUID) *aggregatestore.Aggregate[mockEntity] {
+					return aggregatestore.NewAggregate(newMockEntity(id), 0)
+				},
+				LoadFn: func(_ context.Context, id uuid.UUID, _ aggregatestore.LoadOptions) (*aggregatestore.Aggregate[mockEntity], error) {
+					return aggregatestore.NewAggregate(newMockEntity(id), 42), nil
 				},
 			},
-			haveHooks: map[aggregatestore.HookStage][]aggregatestore.Hook[*mockEntity]{
+			haveHooks: map[aggregatestore.HookStage][]aggregatestore.Hook[mockEntity]{
 				aggregatestore.AfterLoad: {
-					func(_ context.Context, _ *aggregatestore.Aggregate[*mockEntity]) error {
+					func(_ context.Context, _ *aggregatestore.Aggregate[mockEntity]) error {
 						return nil
 					},
-					func(_ context.Context, _ *aggregatestore.Aggregate[*mockEntity]) error {
+					func(_ context.Context, _ *aggregatestore.Aggregate[mockEntity]) error {
 						return nil
 					},
-					func(_ context.Context, _ *aggregatestore.Aggregate[*mockEntity]) error {
+					func(_ context.Context, _ *aggregatestore.Aggregate[mockEntity]) error {
 						return errors.New("mock error")
 					},
 				},
@@ -166,8 +170,11 @@ func TestHookableStore_Load(t *testing.T) {
 		},
 		{
 			name: "returns an error when the inner store returns an error",
-			haveInner: &mockAggregateStore[*mockEntity]{
-				LoadFn: func(_ context.Context, _ typeid.UUID, _ aggregatestore.LoadOptions) (*aggregatestore.Aggregate[*mockEntity], error) {
+			haveInner: &mockAggregateStore[mockEntity]{
+				NewFn: func(id uuid.UUID) *aggregatestore.Aggregate[mockEntity] {
+					return aggregatestore.NewAggregate(newMockEntity(id), 0)
+				},
+				LoadFn: func(_ context.Context, _ uuid.UUID, _ aggregatestore.LoadOptions) (*aggregatestore.Aggregate[mockEntity], error) {
 					return nil, errors.New("mock error")
 				},
 			},
@@ -205,8 +212,8 @@ func TestHookableStore_Load(t *testing.T) {
 			}
 
 			// aggregate has the correct ID
-			if gotAggregate.ID().String() != typeid.FromUUID("mockentity", aggregateID.UUID()).String() {
-				t.Errorf("want aggregate ID %s, got %s", typeid.FromUUID("mockentity", aggregateID.UUID()), gotAggregate.ID())
+			if gotAggregate.ID().String() != typeid.FromUUID("mockentity", aggregateID).String() {
+				t.Errorf("want aggregate ID %s, got %s", typeid.FromUUID("mockentity", aggregateID), gotAggregate.ID())
 			}
 			// aggregate has the correct version
 			if gotAggregate.Version() != tt.wantAggregate.Version() {
@@ -219,33 +226,29 @@ func TestHookableStore_Load(t *testing.T) {
 func TestHookableStore_Hydrate(t *testing.T) {
 	t.Parallel()
 
-	aggregateID := typeid.Must(typeid.NewUUID("mockentity")).(typeid.UUID)
+	aggregateID := uuid.Must(uuid.NewV4())
 
 	for _, tt := range []struct {
 		name          string
-		haveInner     aggregatestore.Store[*mockEntity]
-		haveAggregate *aggregatestore.Aggregate[*mockEntity]
+		haveInner     aggregatestore.Store[mockEntity]
+		haveAggregate *aggregatestore.Aggregate[mockEntity]
 		haveOpts      aggregatestore.HydrateOptions
-		wantAggregate *aggregatestore.Aggregate[*mockEntity]
+		wantAggregate *aggregatestore.Aggregate[mockEntity]
 		wantErr       error
 	}{
 		{
 			name: "hydrates an aggregate using the inner store",
-			haveInner: &mockAggregateStore[*mockEntity]{
-				HydrateFn: func(_ context.Context, agg *aggregatestore.Aggregate[*mockEntity], _ aggregatestore.HydrateOptions) error {
-					agg.State().SetEntityAtVersion(&mockEntity{ID: aggregateID}, 42)
+			haveInner: &mockAggregateStore[mockEntity]{
+				HydrateFn: func(_ context.Context, aggregate *aggregatestore.Aggregate[mockEntity], _ aggregatestore.HydrateOptions) error {
+					aggregate.State().SetEntityAtVersion(newMockEntity(aggregateID), 42)
 					return nil
 				},
 			},
-			haveAggregate: func() *aggregatestore.Aggregate[*mockEntity] {
-				agg := &aggregatestore.Aggregate[*mockEntity]{}
-				agg.State().SetEntityAtVersion(&mockEntity{ID: aggregateID}, 0)
-				return agg
+			haveAggregate: func() *aggregatestore.Aggregate[mockEntity] {
+				return aggregatestore.NewAggregate(newMockEntity(aggregateID), 0)
 			}(),
-			wantAggregate: func() *aggregatestore.Aggregate[*mockEntity] {
-				agg := &aggregatestore.Aggregate[*mockEntity]{}
-				agg.State().SetEntityAtVersion(&mockEntity{ID: aggregateID}, 42)
-				return agg
+			wantAggregate: func() *aggregatestore.Aggregate[mockEntity] {
+				return aggregatestore.NewAggregate(newMockEntity(aggregateID), 42)
 			}(),
 		},
 	} {
@@ -278,8 +281,8 @@ func TestHookableStore_Hydrate(t *testing.T) {
 			}
 
 			// aggregate has the correct ID
-			if gotAggregate.ID().String() != typeid.FromUUID("mockentity", aggregateID.UUID()).String() {
-				t.Errorf("want aggregate ID %s, got %s", typeid.FromUUID("mockentity", aggregateID.UUID()), gotAggregate.ID())
+			if gotAggregate.ID().String() != typeid.FromUUID("mockentity", aggregateID).String() {
+				t.Errorf("want aggregate ID %s, got %s", typeid.FromUUID("mockentity", aggregateID), gotAggregate.ID())
 			}
 			// aggregate has the correct version
 			if gotAggregate.Version() != tt.wantAggregate.Version() {
@@ -292,148 +295,134 @@ func TestHookableStore_Hydrate(t *testing.T) {
 func TestHookableStore_Save(t *testing.T) {
 	t.Parallel()
 
-	aggregateID := typeid.Must(typeid.NewUUID("mockentity")).(typeid.UUID)
+	aggregateID := uuid.Must(uuid.NewV4())
 
 	for _, tt := range []struct {
 		name          string
-		haveInner     aggregatestore.Store[*mockEntity]
-		haveHooks     map[aggregatestore.HookStage][]aggregatestore.Hook[*mockEntity]
-		haveAggregate *aggregatestore.Aggregate[*mockEntity]
+		haveInner     aggregatestore.Store[mockEntity]
+		haveHooks     map[aggregatestore.HookStage][]aggregatestore.Hook[mockEntity]
+		haveAggregate *aggregatestore.Aggregate[mockEntity]
 		haveOpts      aggregatestore.SaveOptions
-		wantAggregate *aggregatestore.Aggregate[*mockEntity]
+		wantAggregate *aggregatestore.Aggregate[mockEntity]
 		wantErr       error
 	}{
 		{
 			name: "saves an aggregate using the inner store when no hooks are provided",
-			haveInner: &mockAggregateStore[*mockEntity]{
-				SaveFn: func(_ context.Context, aggregate *aggregatestore.Aggregate[*mockEntity], _ aggregatestore.SaveOptions) error {
-					aggregate.State().SetEntityAtVersion(&mockEntity{ID: aggregateID}, aggregate.Version()+1)
+			haveInner: &mockAggregateStore[mockEntity]{
+				SaveFn: func(_ context.Context, aggregate *aggregatestore.Aggregate[mockEntity], _ aggregatestore.SaveOptions) error {
+					aggregate.State().SetEntityAtVersion(newMockEntity(aggregateID), aggregate.Version()+1)
 					return nil
 				},
 			},
-			haveHooks: map[aggregatestore.HookStage][]aggregatestore.Hook[*mockEntity]{},
-			haveAggregate: func() *aggregatestore.Aggregate[*mockEntity] {
-				agg := &aggregatestore.Aggregate[*mockEntity]{}
-				agg.State().SetEntityAtVersion(&mockEntity{ID: aggregateID}, 42)
-				return agg
+			haveHooks: map[aggregatestore.HookStage][]aggregatestore.Hook[mockEntity]{},
+			haveAggregate: func() *aggregatestore.Aggregate[mockEntity] {
+				return aggregatestore.NewAggregate(newMockEntity(aggregateID), 42)
 			}(),
-			wantAggregate: func() *aggregatestore.Aggregate[*mockEntity] {
-				agg := &aggregatestore.Aggregate[*mockEntity]{}
-				agg.State().SetEntityAtVersion(&mockEntity{ID: aggregateID}, 43)
-				return agg
+			wantAggregate: func() *aggregatestore.Aggregate[mockEntity] {
+				return aggregatestore.NewAggregate(newMockEntity(aggregateID), 43)
 			}(),
 		},
 		{
 			name: "saves an aggregate using the inner store when a single pre-save hook is provided",
-			haveInner: &mockAggregateStore[*mockEntity]{
-				SaveFn: func(_ context.Context, aggregate *aggregatestore.Aggregate[*mockEntity], _ aggregatestore.SaveOptions) error {
-					aggregate.State().SetEntityAtVersion(&mockEntity{ID: aggregateID}, aggregate.Version()+1)
+			haveInner: &mockAggregateStore[mockEntity]{
+				SaveFn: func(_ context.Context, aggregate *aggregatestore.Aggregate[mockEntity], _ aggregatestore.SaveOptions) error {
+					aggregate.State().SetEntityAtVersion(newMockEntity(aggregateID), aggregate.Version()+1)
 					return nil
 				},
 			},
-			haveHooks: map[aggregatestore.HookStage][]aggregatestore.Hook[*mockEntity]{
+			haveHooks: map[aggregatestore.HookStage][]aggregatestore.Hook[mockEntity]{
 				aggregatestore.BeforeSave: {
-					func(_ context.Context, _ *aggregatestore.Aggregate[*mockEntity]) error {
+					func(_ context.Context, _ *aggregatestore.Aggregate[mockEntity]) error {
 						return errors.New("mock error")
 					},
 				},
 			},
-			haveAggregate: func() *aggregatestore.Aggregate[*mockEntity] {
-				agg := &aggregatestore.Aggregate[*mockEntity]{}
-				agg.State().SetEntityAtVersion(&mockEntity{ID: aggregateID}, 42)
-				return agg
+			haveAggregate: func() *aggregatestore.Aggregate[mockEntity] {
+				return aggregatestore.NewAggregate(newMockEntity(aggregateID), 42)
 			}(),
 			wantErr: errors.New("pre-save hook: mock error"),
 		},
 		{
 			name: "saves an aggregate using the inner store when multiple pre-save hooks are provided",
-			haveInner: &mockAggregateStore[*mockEntity]{
-				SaveFn: func(_ context.Context, aggregate *aggregatestore.Aggregate[*mockEntity], _ aggregatestore.SaveOptions) error {
-					aggregate.State().SetEntityAtVersion(&mockEntity{ID: aggregateID}, aggregate.Version()+1)
+			haveInner: &mockAggregateStore[mockEntity]{
+				SaveFn: func(_ context.Context, aggregate *aggregatestore.Aggregate[mockEntity], _ aggregatestore.SaveOptions) error {
+					aggregate.State().SetEntityAtVersion(newMockEntity(aggregateID), aggregate.Version()+1)
 					return nil
 				},
 			},
-			haveHooks: map[aggregatestore.HookStage][]aggregatestore.Hook[*mockEntity]{
+			haveHooks: map[aggregatestore.HookStage][]aggregatestore.Hook[mockEntity]{
 				aggregatestore.BeforeSave: {
-					func(_ context.Context, _ *aggregatestore.Aggregate[*mockEntity]) error {
+					func(_ context.Context, _ *aggregatestore.Aggregate[mockEntity]) error {
 						return nil
 					},
-					func(_ context.Context, _ *aggregatestore.Aggregate[*mockEntity]) error {
+					func(_ context.Context, _ *aggregatestore.Aggregate[mockEntity]) error {
 						return nil
 					},
-					func(_ context.Context, _ *aggregatestore.Aggregate[*mockEntity]) error {
+					func(_ context.Context, _ *aggregatestore.Aggregate[mockEntity]) error {
 						return errors.New("mock error")
 					},
 				},
 			},
-			haveAggregate: func() *aggregatestore.Aggregate[*mockEntity] {
-				agg := &aggregatestore.Aggregate[*mockEntity]{}
-				agg.State().SetEntityAtVersion(&mockEntity{ID: aggregateID}, 42)
-				return agg
+			haveAggregate: func() *aggregatestore.Aggregate[mockEntity] {
+				return aggregatestore.NewAggregate(newMockEntity(aggregateID), 42)
 			}(),
 			wantErr: errors.New("pre-save hook: mock error"),
 		},
 		{
 			name: "saves an aggregate using the inner store when a single post-save hook is provided",
-			haveInner: &mockAggregateStore[*mockEntity]{
-				SaveFn: func(_ context.Context, aggregate *aggregatestore.Aggregate[*mockEntity], _ aggregatestore.SaveOptions) error {
-					aggregate.State().SetEntityAtVersion(&mockEntity{ID: aggregateID}, aggregate.Version()+1)
+			haveInner: &mockAggregateStore[mockEntity]{
+				SaveFn: func(_ context.Context, aggregate *aggregatestore.Aggregate[mockEntity], _ aggregatestore.SaveOptions) error {
+					aggregate.State().SetEntityAtVersion(newMockEntity(aggregateID), aggregate.Version()+1)
 					return nil
 				},
 			},
-			haveHooks: map[aggregatestore.HookStage][]aggregatestore.Hook[*mockEntity]{
+			haveHooks: map[aggregatestore.HookStage][]aggregatestore.Hook[mockEntity]{
 				aggregatestore.AfterSave: {
-					func(_ context.Context, _ *aggregatestore.Aggregate[*mockEntity]) error {
+					func(_ context.Context, _ *aggregatestore.Aggregate[mockEntity]) error {
 						return errors.New("mock error")
 					},
 				},
 			},
-			haveAggregate: func() *aggregatestore.Aggregate[*mockEntity] {
-				agg := &aggregatestore.Aggregate[*mockEntity]{}
-				agg.State().SetEntityAtVersion(&mockEntity{ID: aggregateID}, 42)
-				return agg
+			haveAggregate: func() *aggregatestore.Aggregate[mockEntity] {
+				return aggregatestore.NewAggregate(newMockEntity(aggregateID), 42)
 			}(),
 			wantErr: errors.New("post-save hook: mock error"),
 		},
 		{
 			name: "saves an aggregate using the inner store when multiple post-save hooks are provided",
-			haveInner: &mockAggregateStore[*mockEntity]{
-				SaveFn: func(_ context.Context, aggregate *aggregatestore.Aggregate[*mockEntity], _ aggregatestore.SaveOptions) error {
-					aggregate.State().SetEntityAtVersion(&mockEntity{ID: aggregateID}, aggregate.Version()+1)
+			haveInner: &mockAggregateStore[mockEntity]{
+				SaveFn: func(_ context.Context, aggregate *aggregatestore.Aggregate[mockEntity], _ aggregatestore.SaveOptions) error {
+					aggregate.State().SetEntityAtVersion(newMockEntity(aggregateID), aggregate.Version()+1)
 					return nil
 				},
 			},
-			haveHooks: map[aggregatestore.HookStage][]aggregatestore.Hook[*mockEntity]{
+			haveHooks: map[aggregatestore.HookStage][]aggregatestore.Hook[mockEntity]{
 				aggregatestore.AfterSave: {
-					func(_ context.Context, _ *aggregatestore.Aggregate[*mockEntity]) error {
+					func(_ context.Context, _ *aggregatestore.Aggregate[mockEntity]) error {
 						return nil
 					},
-					func(_ context.Context, _ *aggregatestore.Aggregate[*mockEntity]) error {
+					func(_ context.Context, _ *aggregatestore.Aggregate[mockEntity]) error {
 						return nil
 					},
-					func(_ context.Context, _ *aggregatestore.Aggregate[*mockEntity]) error {
+					func(_ context.Context, _ *aggregatestore.Aggregate[mockEntity]) error {
 						return errors.New("mock error")
 					},
 				},
 			},
-			haveAggregate: func() *aggregatestore.Aggregate[*mockEntity] {
-				agg := &aggregatestore.Aggregate[*mockEntity]{}
-				agg.State().SetEntityAtVersion(&mockEntity{ID: aggregateID}, 42)
-				return agg
+			haveAggregate: func() *aggregatestore.Aggregate[mockEntity] {
+				return aggregatestore.NewAggregate(newMockEntity(aggregateID), 42)
 			}(),
 			wantErr: errors.New("post-save hook: mock error"),
 		},
 		{
 			name: "returns an error when the inner store returns an error",
-			haveInner: &mockAggregateStore[*mockEntity]{
-				SaveFn: func(_ context.Context, _ *aggregatestore.Aggregate[*mockEntity], _ aggregatestore.SaveOptions) error {
+			haveInner: &mockAggregateStore[mockEntity]{
+				SaveFn: func(_ context.Context, _ *aggregatestore.Aggregate[mockEntity], _ aggregatestore.SaveOptions) error {
 					return errors.New("mock error")
 				},
 			},
-			haveAggregate: func() *aggregatestore.Aggregate[*mockEntity] {
-				agg := &aggregatestore.Aggregate[*mockEntity]{}
-				agg.State().SetEntityAtVersion(&mockEntity{ID: aggregateID}, 42)
-				return agg
+			haveAggregate: func() *aggregatestore.Aggregate[mockEntity] {
+				return aggregatestore.NewAggregate(newMockEntity(aggregateID), 42)
 			}(),
 			wantErr: errors.New("saving aggregate using inner store: mock error"),
 		},
@@ -468,8 +457,8 @@ func TestHookableStore_Save(t *testing.T) {
 			}
 
 			// aggregate has the correct ID
-			if gotAggregate.ID().String() != typeid.FromUUID("mockentity", aggregateID.UUID()).String() {
-				t.Errorf("want aggregate ID %s, got %s", typeid.FromUUID("mockentity", aggregateID.UUID()), gotAggregate.ID())
+			if gotAggregate.ID().String() != typeid.FromUUID("mockentity", aggregateID).String() {
+				t.Errorf("want aggregate ID %s, got %s", typeid.FromUUID("mockentity", aggregateID), gotAggregate.ID())
 			}
 			// aggregate has the correct version
 			if gotAggregate.Version() != tt.wantAggregate.Version() {

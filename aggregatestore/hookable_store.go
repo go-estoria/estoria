@@ -12,25 +12,21 @@ import (
 type HookStage int
 
 const (
-	AfterNew HookStage = iota
-	AfterLoad
+	AfterLoad HookStage = iota
 	BeforeSave
 	AfterSave
 )
 
-type PrecreateHook func(id uuid.UUID) error
-
-type PreloadHook func(ctx context.Context, id typeid.UUID) error
+type PreloadHook func(ctx context.Context, id uuid.UUID) error
 
 type Hook[E estoria.Entity] func(ctx context.Context, aggregate *Aggregate[E]) error
 
 // A HookableStore wraps an aggregate store and provides lifecycle hooks for aggregate store operations.
 type HookableStore[E estoria.Entity] struct {
-	inner          Store[E]
-	precreateHooks []PrecreateHook
-	preloadHooks   []PreloadHook
-	hooks          map[HookStage][]Hook[E]
-	log            estoria.Logger
+	inner        Store[E]
+	preloadHooks []PreloadHook
+	hooks        map[HookStage][]Hook[E]
+	log          estoria.Logger
 }
 
 var _ Store[estoria.Entity] = (*HookableStore[estoria.Entity])(nil)
@@ -44,18 +40,8 @@ func NewHookableStore[E estoria.Entity](inner Store[E]) (*HookableStore[E], erro
 	return &HookableStore[E]{
 		inner: inner,
 		hooks: make(map[HookStage][]Hook[E]),
-		log:   estoria.GetLogger().WithGroup("hookableaggregatestore"),
+		log:   estoria.GetLogger().WithGroup("hookablestore"),
 	}, nil
-}
-
-// BeforeNew adds a hook that runs before a new aggregate is created.
-func (s *HookableStore[E]) BeforeNew(hooks ...PrecreateHook) {
-	s.precreateHooks = append(s.precreateHooks, hooks...)
-}
-
-// AfterNew adds a hook that runs after an aggregate is created.
-func (s *HookableStore[E]) AfterNew(hooks ...Hook[E]) {
-	s.hooks[AfterNew] = append(s.hooks[AfterNew], hooks...)
 }
 
 // BeforeLoad adds a hook that runs before an aggregate is loaded.
@@ -78,23 +64,30 @@ func (s *HookableStore[E]) AfterSave(hooks ...Hook[E]) {
 	s.hooks[AfterSave] = append(s.hooks[AfterSave], hooks...)
 }
 
+func (s *HookableStore[E]) New(id uuid.UUID) *Aggregate[E] {
+	return s.inner.New(id)
+}
+
 // Load loads an aggregate by ID.
-func (s *HookableStore[E]) Load(ctx context.Context, id typeid.UUID, opts LoadOptions) (*Aggregate[E], error) {
+func (s *HookableStore[E]) Load(ctx context.Context, id uuid.UUID, opts LoadOptions) (*Aggregate[E], error) {
+	// ew
+	aggregateID := typeid.FromUUID((*new(E)).EntityID().TypeName(), id)
+
 	s.log.Debug("loading aggregate", "aggregate_id", id)
 	for _, hook := range s.preloadHooks {
 		if err := hook(ctx, id); err != nil {
-			return nil, LoadError{AggregateID: id, Operation: "pre-load hook", Err: err}
+			return nil, LoadError{AggregateID: aggregateID, Operation: "pre-load hook", Err: err}
 		}
 	}
 
 	aggregate, err := s.inner.Load(ctx, id, opts)
 	if err != nil {
-		return nil, LoadError{AggregateID: id, Operation: "loading aggregate using inner store", Err: err}
+		return nil, LoadError{AggregateID: aggregateID, Operation: "loading aggregate using inner store", Err: err}
 	}
 
 	for _, hook := range s.hooks[AfterLoad] {
 		if err := hook(ctx, aggregate); err != nil {
-			return nil, LoadError{AggregateID: id, Operation: "post-load hook", Err: err}
+			return nil, LoadError{AggregateID: aggregateID, Operation: "post-load hook", Err: err}
 		}
 	}
 

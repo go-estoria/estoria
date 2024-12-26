@@ -2,14 +2,15 @@ package aggregatestore
 
 import (
 	"context"
+	"errors"
 
 	"github.com/go-estoria/estoria"
-	"github.com/go-estoria/estoria/typeid"
+	"github.com/gofrs/uuid/v5"
 )
 
 // An AggregateCache is a cache for aggregates.
 type AggregateCache[E estoria.Entity] interface {
-	GetAggregate(ctx context.Context, aggregateID typeid.UUID) (*Aggregate[E], error)
+	GetAggregate(ctx context.Context, aggregateID uuid.UUID) (*Aggregate[E], error)
 	PutAggregate(ctx context.Context, aggregate *Aggregate[E]) error
 }
 
@@ -24,18 +25,26 @@ type CachedStore[E estoria.Entity] struct {
 func NewCachedStore[E estoria.Entity](
 	inner Store[E],
 	cacher AggregateCache[E],
-) *CachedStore[E] {
+) (*CachedStore[E], error) {
+	if inner == nil {
+		return nil, errors.New("inner store is required")
+	}
+
 	return &CachedStore[E]{
 		inner: inner,
 		cache: cacher,
-		log:   estoria.GetLogger().WithGroup("cachedaggregatestore"),
-	}
+		log:   estoria.GetLogger().WithGroup("cachedstore"),
+	}, nil
 }
 
 var _ Store[estoria.Entity] = (*CachedStore[estoria.Entity])(nil)
 
+func (s *CachedStore[E]) New(id uuid.UUID) *Aggregate[E] {
+	return s.inner.New(id)
+}
+
 // Load loads an aggregate by ID.
-func (s *CachedStore[E]) Load(ctx context.Context, id typeid.UUID, opts LoadOptions) (*Aggregate[E], error) {
+func (s *CachedStore[E]) Load(ctx context.Context, id uuid.UUID, opts LoadOptions) (*Aggregate[E], error) {
 	aggregate, err := s.cache.GetAggregate(ctx, id)
 	switch {
 	case err == nil && aggregate != nil:
@@ -48,7 +57,7 @@ func (s *CachedStore[E]) Load(ctx context.Context, id typeid.UUID, opts LoadOpti
 
 	aggregate, err = s.inner.Load(ctx, id, opts)
 	if err != nil {
-		return nil, LoadError{AggregateID: id, Operation: "loading from inner aggregate store", Err: err}
+		return nil, LoadError{Operation: "loading from inner aggregate store", Err: err}
 	}
 
 	if err := s.cache.PutAggregate(ctx, aggregate); err != nil {

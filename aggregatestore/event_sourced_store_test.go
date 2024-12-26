@@ -432,7 +432,7 @@ func TestEventSourcedStore_LoadAggregate(t *testing.T) {
 				t.Errorf("unexpected error creating store: %v", err)
 			}
 
-			gotAggregate, err := store.Load(context.Background(), tt.haveAggregateID, tt.haveLoadOpts)
+			gotAggregate, err := store.Load(context.Background(), tt.haveAggregateID.UUID(), tt.haveLoadOpts)
 
 			if tt.wantErr != nil {
 				if err == nil || err.Error() != tt.wantErr.Error() {
