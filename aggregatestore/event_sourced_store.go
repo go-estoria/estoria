@@ -22,8 +22,6 @@ type EventSourcedStore[E estoria.Entity] struct {
 	entityEventPrototypes map[string]func() estoria.EntityEvent[E]
 	entityEventMarshaler  estoria.EntityEventMarshaler[E]
 
-	inner Store[E]
-
 	log estoria.Logger
 }
 
@@ -274,13 +272,6 @@ func WithEventStreamWriter[E estoria.Entity](writer eventstore.StreamWriter) Eve
 func WithEntityEventMarshaler[E estoria.Entity](marshaler estoria.EntityEventMarshaler[E]) EventSourcedStoreOption[E] {
 	return func(s *EventSourcedStore[E]) error {
 		s.entityEventMarshaler = marshaler
-		return nil
-	}
-}
-
-func WithInnerStore[E estoria.Entity](inner Store[E]) EventSourcedStoreOption[E] {
-	return func(s *EventSourcedStore[E]) error {
-		s.inner = inner
 		return nil
 	}
 }
