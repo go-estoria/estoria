@@ -109,23 +109,19 @@ func (s *SnapshottingStore[E]) Hydrate(ctx context.Context, aggregate *Aggregate
 		return HydrateError{AggregateID: aggregate.ID(), Err: errors.New("snapshot store has no snapshot reader")}
 	}
 
-	s.log.Debug("hydrating aggregate from snapshot",
-		"aggregate_id", aggregate.ID(),
+	log := s.log.With("aggregate_id", aggregate.ID())
+
+	log.Debug("hydrating aggregate from snapshot",
 		"from_version", aggregate.Version(),
 		"to_version", opts.ToVersion)
 
 	readSnapshotOpts := snapshotstore.ReadSnapshotOptions{}
 	if opts.ToVersion > 0 {
 		if v := aggregate.Version(); v == opts.ToVersion {
-			s.log.Debug("aggregate already at target version, nothing to hydrate",
-				"aggregate_id", aggregate.ID(),
-				"version", opts.ToVersion)
+			log.Debug("aggregate already at target version, nothing to hydrate", "version", opts.ToVersion)
 			return s.inner.Hydrate(ctx, aggregate, opts)
 		} else if v > opts.ToVersion {
-			s.log.Debug("aggregate version is higher than target version, nothing to hydrate",
-				"aggregate_id", aggregate.ID(),
-				"version", v,
-				"target_version", opts.ToVersion)
+			log.Debug("aggregate version is higher than target version, nothing to hydrate", "version", v, "target_version", opts.ToVersion)
 			return s.inner.Hydrate(ctx, aggregate, opts)
 		}
 
@@ -134,20 +130,20 @@ func (s *SnapshottingStore[E]) Hydrate(ctx context.Context, aggregate *Aggregate
 
 	snap, err := s.reader.ReadSnapshot(ctx, aggregate.ID(), readSnapshotOpts)
 	if errors.Is(err, snapshotstore.ErrSnapshotNotFound) {
-		estoria.GetLogger().Debug("no snapshot found")
+		log.Debug("no snapshot found")
 		return s.inner.Hydrate(ctx, aggregate, opts)
 	} else if err != nil {
-		estoria.GetLogger().Warn("failed to read snapshot", "error", err)
+		log.Warn("failed to read snapshot", "error", err)
 		return s.inner.Hydrate(ctx, aggregate, opts)
 	}
 
 	entity := aggregate.Entity()
 	if err := s.marshaler.UnmarshalEntity(snap.Data, &entity); err != nil {
-		estoria.GetLogger().Warn("failed to unmarshal snapshot", "error", err)
+		log.Warn("failed to unmarshal snapshot", "error", err)
 		return s.inner.Hydrate(ctx, aggregate, opts)
 	}
 
-	s.log.Debug("loaded snapshot", "aggregate_id", aggregate.ID(), "version", snap.AggregateVersion, "entity", entity)
+	log.Debug("loaded snapshot", "version", snap.AggregateVersion, "entity", entity)
 	aggregate.State().SetEntityAtVersion(entity, snap.AggregateVersion)
 
 	return s.inner.Hydrate(ctx, aggregate, opts)
@@ -159,7 +155,9 @@ func (s *SnapshottingStore[E]) Save(ctx context.Context, aggregate *Aggregate[E]
 		return SaveError{Err: ErrNilAggregate}
 	}
 
-	estoria.GetLogger().Debug("saving aggregate", "aggregate_id", aggregate.ID())
+	log := s.log.With("aggregate_id", aggregate.ID())
+
+	log.Debug("saving aggregate")
 
 	// defer applying events so a snapshot can be taken at an exact version
 	opts.SkipApply = true
@@ -182,11 +180,11 @@ func (s *SnapshottingStore[E]) Save(ctx context.Context, aggregate *Aggregate[E]
 			continue
 		}
 
-		estoria.GetLogger().Debug("taking snapshot", "aggregate_id", aggregate.ID(), "version", aggregate.Version())
+		log.Debug("taking snapshot", "version", aggregate.Version())
 
 		data, err := s.marshaler.MarshalEntity(aggregate.Entity())
 		if err != nil {
-			estoria.GetLogger().Error("failed to marshal snapshot", "error", err)
+			log.Error("failed to marshal snapshot", "error", err)
 			continue
 		}
 
@@ -195,7 +193,7 @@ func (s *SnapshottingStore[E]) Save(ctx context.Context, aggregate *Aggregate[E]
 			AggregateVersion: aggregate.Version(),
 			Data:             data,
 		}); err != nil {
-			estoria.GetLogger().Error("failed to write snapshot", "error", err)
+			log.Error("failed to write snapshot", "error", err)
 			continue
 		}
 	}
