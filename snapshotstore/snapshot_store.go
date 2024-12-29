@@ -11,6 +11,7 @@ import (
 type AggregateSnapshot struct {
 	AggregateID      typeid.UUID
 	AggregateVersion int64
+	Timestamp        time.Time
 	Data             []byte
 }
 
