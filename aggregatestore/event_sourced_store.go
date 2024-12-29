@@ -39,7 +39,7 @@ func NewEventSourcedStore[E estoria.Entity](
 		newEntity:             entityFactory,
 		entityEventPrototypes: make(map[string]func() estoria.EntityEvent[E]),
 		entityEventMarshaler:  estoria.JSONEntityEventMarshaler[E]{},
-		log:                   estoria.GetLogger().WithGroup("store"),
+		log:                   estoria.GetLogger().WithGroup("eventsourcedstore"),
 	}
 
 	for _, opt := range opts {
