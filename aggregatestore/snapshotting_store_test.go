@@ -74,7 +74,7 @@ func TestNewSnapshottingStore(t *testing.T) {
 	for _, tt := range []struct {
 		name               string
 		haveInner          aggregatestore.Store[mockEntity]
-		haveSnapshotStore  aggregatestore.SnapshotStore
+		haveSnapshotStore  snapshotstore.SnapshotStore
 		haveSnapshotPolicy aggregatestore.SnapshotPolicy
 		haveOpts           []aggregatestore.SnapshottingStoreOption[mockEntity]
 		wantErr            error
@@ -177,7 +177,7 @@ func TestSnapshottingStore_Load(t *testing.T) {
 	for _, tt := range []struct {
 		name                      string
 		haveInner                 aggregatestore.Store[mockEntity]
-		haveSnapshotStore         aggregatestore.SnapshotStore
+		haveSnapshotStore         snapshotstore.SnapshotStore
 		haveSnapshottingStoreOpts []aggregatestore.SnapshottingStoreOption[mockEntity]
 		haveAggregateID           uuid.UUID
 		haveOpts                  aggregatestore.LoadOptions
@@ -332,7 +332,7 @@ func TestSnapshottingStore_Hydrate(t *testing.T) {
 		name                      string
 		haveInner                 aggregatestore.Store[mockEntity]
 		haveEntityFactory         estoria.EntityFactory[mockEntity]
-		haveSnapshotStore         aggregatestore.SnapshotStore
+		haveSnapshotStore         snapshotstore.SnapshotStore
 		haveSnapshottingStoreOpts []aggregatestore.SnapshottingStoreOption[mockEntity]
 		haveAggregate             *aggregatestore.Aggregate[mockEntity]
 		haveOpts                  aggregatestore.HydrateOptions
@@ -603,7 +603,7 @@ func TestSnapshottingStore_Save(t *testing.T) {
 	for _, tt := range []struct {
 		name                      string
 		haveInner                 aggregatestore.Store[mockEntity]
-		haveSnapshotStore         aggregatestore.SnapshotStore
+		haveSnapshotStore         snapshotstore.SnapshotStore
 		haveSnapshotPolicy        aggregatestore.SnapshotPolicy
 		haveSnapshottingStoreOpts []aggregatestore.SnapshottingStoreOption[mockEntity]
 		haveAggregate             *aggregatestore.Aggregate[mockEntity]

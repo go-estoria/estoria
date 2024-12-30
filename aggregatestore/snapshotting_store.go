@@ -11,22 +11,6 @@ import (
 	"github.com/gofrs/uuid/v5"
 )
 
-// A SnapshotReader reads snapshots.
-type SnapshotReader interface {
-	ReadSnapshot(ctx context.Context, aggregateID typeid.UUID, opts snapshotstore.ReadSnapshotOptions) (*snapshotstore.AggregateSnapshot, error)
-}
-
-// A SnapshotWriter writes snapshots.
-type SnapshotWriter interface {
-	WriteSnapshot(ctx context.Context, snap *snapshotstore.AggregateSnapshot) error
-}
-
-// A SnapshotStore reads and writes snapshots.
-type SnapshotStore interface {
-	SnapshotReader
-	SnapshotWriter
-}
-
 // A SnapshotPolicy determines when to take snapshots.
 type SnapshotPolicy interface {
 	ShouldSnapshot(aggregateID typeid.UUID, aggregateVersion int64, timestamp time.Time) bool
@@ -36,8 +20,8 @@ type SnapshotPolicy interface {
 // and/or hydrate aggregates from snapshots.
 type SnapshottingStore[E estoria.Entity] struct {
 	inner     Store[E]
-	reader    SnapshotReader
-	writer    SnapshotWriter
+	reader    snapshotstore.SnapshotReader
+	writer    snapshotstore.SnapshotWriter
 	policy    SnapshotPolicy
 	marshaler estoria.EntityMarshaler[E]
 	log       estoria.Logger
@@ -48,7 +32,7 @@ var _ Store[estoria.Entity] = (*SnapshottingStore[estoria.Entity])(nil)
 // NewSnapshottingStore creates a new SnapshottingStore.
 func NewSnapshottingStore[E estoria.Entity](
 	inner Store[E],
-	store SnapshotStore,
+	store snapshotstore.SnapshotStore,
 	policy SnapshotPolicy,
 	opts ...SnapshottingStoreOption[E],
 ) (*SnapshottingStore[E], error) {
@@ -217,7 +201,7 @@ func WithSnapshotMarshaler[E estoria.Entity](marshaler estoria.EntityMarshaler[E
 }
 
 // WithSnapshotReader sets the snapshot reader.
-func WithSnapshotReader[E estoria.Entity](reader SnapshotReader) SnapshottingStoreOption[E] {
+func WithSnapshotReader[E estoria.Entity](reader snapshotstore.SnapshotReader) SnapshottingStoreOption[E] {
 	return func(s *SnapshottingStore[E]) error {
 		s.reader = reader
 		return nil
@@ -225,7 +209,7 @@ func WithSnapshotReader[E estoria.Entity](reader SnapshotReader) SnapshottingSto
 }
 
 // WithSnapshotWriter sets the snapshot writer.
-func WithSnapshotWriter[E estoria.Entity](writer SnapshotWriter) SnapshottingStoreOption[E] {
+func WithSnapshotWriter[E estoria.Entity](writer snapshotstore.SnapshotWriter) SnapshottingStoreOption[E] {
 	return func(s *SnapshottingStore[E]) error {
 		s.writer = writer
 		return nil
