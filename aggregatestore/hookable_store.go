@@ -5,7 +5,6 @@ import (
 	"errors"
 
 	"github.com/go-estoria/estoria"
-	"github.com/go-estoria/estoria/typeid"
 	"github.com/gofrs/uuid/v5"
 )
 
@@ -13,6 +12,8 @@ type HookStage int
 
 const (
 	AfterLoad HookStage = iota
+	BeforeHydrate
+	AfterHydrate
 	BeforeSave
 	AfterSave
 )
@@ -54,6 +55,16 @@ func (s *HookableStore[E]) AfterLoad(hooks ...Hook[E]) {
 	s.hooks[AfterLoad] = append(s.hooks[AfterLoad], hooks...)
 }
 
+// BeforeHydrate adds a hook that runs before an aggregate is hydrated.
+func (s *HookableStore[E]) BeforeHydrate(hooks ...Hook[E]) {
+	s.hooks[BeforeHydrate] = append(s.hooks[BeforeHydrate], hooks...)
+}
+
+// AfterHydrate adds a hook that runs after an aggregate is hydrated.
+func (s *HookableStore[E]) AfterHydrate(hooks ...Hook[E]) {
+	s.hooks[AfterHydrate] = append(s.hooks[AfterHydrate], hooks...)
+}
+
 // BeforeSave adds a hook that runs before an aggregate is saved.
 func (s *HookableStore[E]) BeforeSave(hooks ...Hook[E]) {
 	s.hooks[BeforeSave] = append(s.hooks[BeforeSave], hooks...)
@@ -70,10 +81,9 @@ func (s *HookableStore[E]) New(id uuid.UUID) *Aggregate[E] {
 
 // Load loads an aggregate by ID.
 func (s *HookableStore[E]) Load(ctx context.Context, id uuid.UUID, opts LoadOptions) (*Aggregate[E], error) {
-	// ew
-	aggregateID := typeid.FromUUID((*new(E)).EntityID().TypeName(), id)
+	aggregateID := s.inner.New(id).ID()
 
-	s.log.Debug("loading aggregate", "aggregate_id", id)
+	s.log.Debug("loading aggregate", "aggregate_id", aggregateID)
 	for _, hook := range s.preloadHooks {
 		if err := hook(ctx, id); err != nil {
 			return nil, LoadError{AggregateID: aggregateID, Operation: "pre-load hook", Err: err}
@@ -96,7 +106,24 @@ func (s *HookableStore[E]) Load(ctx context.Context, id uuid.UUID, opts LoadOpti
 
 // Hydrate hydrates an aggregate.
 func (s *HookableStore[E]) Hydrate(ctx context.Context, aggregate *Aggregate[E], opts HydrateOptions) error {
-	return s.inner.Hydrate(ctx, aggregate, opts)
+	s.log.Debug("hydrating aggregate", "aggregate_id", aggregate.ID())
+	for _, hook := range s.hooks[BeforeHydrate] {
+		if err := hook(ctx, aggregate); err != nil {
+			return HydrateError{AggregateID: aggregate.ID(), Operation: "pre-hydrate hook", Err: err}
+		}
+	}
+
+	if err := s.inner.Hydrate(ctx, aggregate, opts); err != nil {
+		return HydrateError{AggregateID: aggregate.ID(), Operation: "hydrating aggregate using inner store", Err: err}
+	}
+
+	for _, hook := range s.hooks[AfterHydrate] {
+		if err := hook(ctx, aggregate); err != nil {
+			return HydrateError{AggregateID: aggregate.ID(), Operation: "post-hydrate hook", Err: err}
+		}
+	}
+
+	return nil
 }
 
 // Save saves an aggregate.
