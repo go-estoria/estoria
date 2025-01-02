@@ -7,7 +7,7 @@ var logger Logger
 
 //nolint:gochecknoinits // The logger is a global component
 func init() {
-	logger = DefaultLogger()
+	SetLogger(DefaultLogger())
 }
 
 type Logger interface {
@@ -15,11 +15,24 @@ type Logger interface {
 	Info(msg string, args ...any)
 	Warn(msg string, args ...any)
 	Error(msg string, args ...any)
+	With(args ...any) Logger
+	WithGroup(group string) Logger
 }
 
-//nolint:ireturn // Deliberately an interface
-func DefaultLogger() Logger {
-	return slog.Default()
+type SlogLogger struct {
+	*slog.Logger
+}
+
+func (l SlogLogger) With(args ...any) Logger {
+	return SlogLogger{l.Logger.With(args...)}
+}
+
+func (l SlogLogger) WithGroup(group string) Logger {
+	return SlogLogger{l.Logger.WithGroup(group)}
+}
+
+func DefaultLogger() SlogLogger {
+	return SlogLogger{slog.Default()}
 }
 
 //nolint:ireturn // Deliberately an interface

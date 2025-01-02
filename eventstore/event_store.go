@@ -88,7 +88,12 @@ type Event struct {
 
 // A WritableEvent is an event that can be written to an event store.
 type WritableEvent struct {
-	ID   typeid.UUID
+	ID typeid.UUID
+
+	// Timestamp is the time the event occurred. If zero (default), the current time is used.
+	Timestamp time.Time
+
+	// Data is the serialized event data.
 	Data []byte
 }
 

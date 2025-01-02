@@ -11,8 +11,8 @@ import (
 
 // A Store is a read/write store for aggregates.
 type Store[E estoria.Entity] interface {
-	New(id uuid.UUID) (*Aggregate[E], error)
-	Load(ctx context.Context, id typeid.UUID, opts LoadOptions) (*Aggregate[E], error)
+	New(id uuid.UUID) *Aggregate[E]
+	Load(ctx context.Context, id uuid.UUID, opts LoadOptions) (*Aggregate[E], error)
 	Hydrate(ctx context.Context, aggregate *Aggregate[E], opts HydrateOptions) error
 	Save(ctx context.Context, aggregate *Aggregate[E], opts SaveOptions) error
 }
@@ -53,17 +53,14 @@ type SaveOptions struct {
 	SkipApply bool
 }
 
-var ErrNilAggregate = errors.New("aggregate is nil")
-
-// ErrAggregateNotFound indicates that an aggregate was not found in the aggregate store.
-var ErrAggregateNotFound = errors.New("aggregate not found")
-
-type InitializeAggregateStoreError struct {
+// An InitializeError is an error that occurred while initializing an aggregate store.
+type InitializeError struct {
 	Operation string
 	Err       error
 }
 
-func (e InitializeAggregateStoreError) Error() string {
+// Error implements the error interface.
+func (e InitializeError) Error() string {
 	if e.Operation == "" {
 		return e.Err.Error()
 	}
@@ -71,14 +68,15 @@ func (e InitializeAggregateStoreError) Error() string {
 	return e.Operation + ": " + e.Err.Error()
 }
 
-// A CreateAggregateError is an error that occurred while creating an aggregate.
-type CreateAggregateError struct {
+// A CreateError is an error that occurred while creating an aggregate.
+type CreateError struct {
 	AggregateID typeid.UUID
 	Operation   string
 	Err         error
 }
 
-func (e CreateAggregateError) Error() string {
+// Error implements the error interface.
+func (e CreateError) Error() string {
 	if e.Operation == "" {
 		return e.Err.Error()
 	}
@@ -86,25 +84,30 @@ func (e CreateAggregateError) Error() string {
 	return e.Operation + ": " + e.Err.Error()
 }
 
-// A LoadAggregateError is an error that occurred while loading an aggregate.
-type LoadAggregateError struct {
+// A LoadError is an error that occurred while loading an aggregate.
+type LoadError struct {
 	AggregateID typeid.UUID
 	Operation   string
 	Err         error
 }
 
-func (e LoadAggregateError) Error() string {
+// Error implements the error interface.
+func (e LoadError) Error() string {
+	if e.Operation == "" {
+		return e.Err.Error()
+	}
 	return e.Operation + ": " + e.Err.Error()
 }
 
-// A HydrateAggregateError is an error that occurred while hydrating an aggregate.
-type HydrateAggregateError struct {
+// A HydrateError is an error that occurred while hydrating an aggregate.
+type HydrateError struct {
 	AggregateID typeid.UUID
 	Operation   string
 	Err         error
 }
 
-func (e HydrateAggregateError) Error() string {
+// Error implements the error interface.
+func (e HydrateError) Error() string {
 	if e.Operation == "" {
 		return e.Err.Error()
 	}
@@ -112,17 +115,24 @@ func (e HydrateAggregateError) Error() string {
 	return e.Operation + ": " + e.Err.Error()
 }
 
-// A SaveAggregateError is an error that occurred while saving an aggregate.
-type SaveAggregateError struct {
+// A SaveError is an error that occurred while saving an aggregate.
+type SaveError struct {
 	AggregateID typeid.UUID
 	Operation   string
 	Err         error
 }
 
-func (e SaveAggregateError) Error() string {
+// Error implements the error interface.
+func (e SaveError) Error() string {
 	if e.Operation == "" {
 		return e.Err.Error()
 	}
 
 	return e.Operation + ": " + e.Err.Error()
 }
+
+// ErrAggregateNotFound indicates that an aggregate was not found in the aggregate store.
+var ErrAggregateNotFound = errors.New("aggregate not found")
+
+// ErrNilAggregate indicates that the provided aggregate is nil.
+var ErrNilAggregate = errors.New("aggregate is nil")

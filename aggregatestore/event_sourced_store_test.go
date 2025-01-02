@@ -2,10 +2,10 @@ package aggregatestore_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
-	"log"
+	"fmt"
 	"testing"
-	"time"
 
 	"github.com/go-estoria/estoria"
 	"github.com/go-estoria/estoria/aggregatestore"
@@ -16,86 +16,161 @@ import (
 )
 
 type eventSourcedStoreTestCase[E estoria.Entity] struct {
-	name              string
-	haveEventStore    func() eventstore.Store
-	haveEntityFactory estoria.EntityFactory[E]
-	haveOpts          []aggregatestore.EventSourcedStoreOption[E]
-	wantErr           error
+	name           string
+	haveEventStore func() eventstore.Store
+	haveOpts       []aggregatestore.EventSourcedStoreOption[E]
+	wantErr        error
 }
 
-type mockEntityEventA struct{}
+type mockEntityEventBase struct {
+	ApplyToFn func(context.Context, mockEntity) (mockEntity, error)
+}
+
+type mockEntityEventA struct {
+	mockEntityEventBase `json:"-"`
+	A                   string `json:"a"`
+}
 
 func (e mockEntityEventA) EventType() string {
 	return "mockEntityEventA"
 }
 
-func (e mockEntityEventA) New() estoria.EntityEvent {
+func (e mockEntityEventA) New() estoria.EntityEvent[mockEntity] {
 	return &mockEntityEventA{}
 }
 
-func (e mockEntityEventA) marshaledData() []byte {
-	b, _ := estoria.JSONMarshaler[mockEntityEventA]{}.Marshal(&e)
-	return b
+func (e mockEntityEventA) ApplyTo(ctx context.Context, m mockEntity) (mockEntity, error) {
+	var err error
+	if e.ApplyToFn != nil {
+		m, err = e.ApplyToFn(ctx, m)
+	}
+
+	if err == nil {
+		m.numAppliedEvents++
+	}
+
+	return m, err
 }
 
-type mockEntityEventB struct{}
+type mockEntityEventB struct {
+	mockEntityEventBase `json:"-"`
+	B                   string `json:"b"`
+}
 
 func (e mockEntityEventB) EventType() string {
 	return "mockEntityEventB"
 }
 
-func (e mockEntityEventB) New() estoria.EntityEvent {
+func (e mockEntityEventB) New() estoria.EntityEvent[mockEntity] {
 	return &mockEntityEventB{}
 }
 
-func (e mockEntityEventB) marshaledData() []byte {
-	b, _ := estoria.JSONMarshaler[mockEntityEventB]{}.Marshal(&e)
-	return b
+func (e mockEntityEventB) ApplyTo(ctx context.Context, m mockEntity) (mockEntity, error) {
+	var err error
+	if e.ApplyToFn != nil {
+		m, err = e.ApplyToFn(ctx, m)
+	}
+
+	if err == nil {
+		m.numAppliedEvents++
+	}
+
+	return m, err
 }
 
-type mockEntityEventC struct{}
+type mockEntityEventC struct {
+	mockEntityEventBase `json:"-"`
+	C                   string `json:"c"`
+}
 
 func (e mockEntityEventC) EventType() string {
 	return "mockEntityEventC"
 }
 
-func (e mockEntityEventC) New() estoria.EntityEvent {
+func (e mockEntityEventC) New() estoria.EntityEvent[mockEntity] {
 	return &mockEntityEventC{}
 }
 
-func (e mockEntityEventC) marshaledData() []byte {
-	b, _ := estoria.JSONMarshaler[mockEntityEventC]{}.Marshal(&e)
-	return b
+func (e mockEntityEventC) ApplyTo(ctx context.Context, m mockEntity) (mockEntity, error) {
+	var err error
+	if e.ApplyToFn != nil {
+		m, err = e.ApplyToFn(ctx, m)
+	}
+
+	if err == nil {
+		m.numAppliedEvents++
+	}
+
+	return m, err
 }
 
-type mockEntityEventD struct{}
+type mockEntityEventD struct {
+	mockEntityEventBase `json:"-"`
+	D                   string `json:"d"`
+}
 
 func (e mockEntityEventD) EventType() string {
 	return "mockEntityEventD"
 }
 
-func (e mockEntityEventD) New() estoria.EntityEvent {
+func (e mockEntityEventD) New() estoria.EntityEvent[mockEntity] {
 	return &mockEntityEventD{}
 }
 
-func (e mockEntityEventD) marshaledData() []byte {
-	b, _ := estoria.JSONMarshaler[mockEntityEventD]{}.Marshal(&e)
-	return b
+func (e mockEntityEventD) ApplyTo(ctx context.Context, m mockEntity) (mockEntity, error) {
+	var err error
+	if e.ApplyToFn != nil {
+		m, err = e.ApplyToFn(ctx, m)
+	}
+
+	if err == nil {
+		m.numAppliedEvents++
+	}
+
+	return m, err
 }
 
-type mockEntityEventE struct{}
+type mockEntityEventE struct {
+	mockEntityEventBase `json:"-"`
+	E                   string `json:"e"`
+}
 
 func (e mockEntityEventE) EventType() string {
 	return "mockEntityEventE"
 }
 
-func (e mockEntityEventE) New() estoria.EntityEvent {
+func (e mockEntityEventE) New() estoria.EntityEvent[mockEntity] {
 	return &mockEntityEventE{}
 }
 
-func (e mockEntityEventE) marshaledData() []byte {
-	b, _ := estoria.JSONMarshaler[mockEntityEventE]{}.Marshal(&e)
-	return b
+func (e mockEntityEventE) ApplyTo(ctx context.Context, m mockEntity) (mockEntity, error) {
+	var err error
+	if e.ApplyToFn != nil {
+		m, err = e.ApplyToFn(ctx, m)
+	}
+
+	if err == nil {
+		m.numAppliedEvents++
+	}
+
+	return m, err
+}
+
+type mockEntityEventF struct {
+	mockEntityEventBase `json:"-"`
+	F                   string `json:"f"`
+}
+
+func (e mockEntityEventF) EventType() string {
+	return "mockEntityEventF"
+}
+
+func (e mockEntityEventF) New() estoria.EntityEvent[mockEntity] {
+	return &mockEntityEventF{}
+}
+
+func (e mockEntityEventF) ApplyTo(_ context.Context, m mockEntity) (mockEntity, error) {
+	return m, errors.New("mock error")
 }
 
 type mockStreamReader struct {
@@ -129,63 +204,29 @@ func (m mockStreamIterator) Close(_ context.Context) error {
 	return m.closeErr
 }
 
-type mockEventMarshaler struct {
+type mockEventMarshaler[E estoria.Entity] struct {
 	marshaledBytes []byte
 	marshalErr     error
 	unmarshalErr   error
 }
 
-func (m mockEventMarshaler) Marshal(_ *estoria.EntityEvent) ([]byte, error) {
+func (m mockEventMarshaler[E]) MarshalEntityEvent(_ estoria.EntityEvent[E]) ([]byte, error) {
 	return m.marshaledBytes, m.marshalErr
 }
 
-func (m mockEventMarshaler) Unmarshal(_ []byte, _ *estoria.EntityEvent) error {
-	log.Println("UNMARSHAL")
+func (m mockEventMarshaler[E]) UnmarshalEntityEvent(_ []byte, _ estoria.EntityEvent[E]) error {
 	return m.unmarshalErr
 }
 
 func TestNewEventSourcedStore(t *testing.T) {
 	t.Parallel()
 
-	for _, tt := range []eventSourcedStoreTestCase[*mockEntity]{
+	for _, tt := range []eventSourcedStoreTestCase[mockEntity]{
 		{
 			name: "creates a new event sourced store with default options",
 			haveEventStore: func() eventstore.Store {
 				store, _ := memory.NewEventStore()
 				return store
-			},
-			haveEntityFactory: func(id uuid.UUID) *mockEntity {
-				return &mockEntity{ID: typeid.FromUUID("testentity", id)}
-			},
-		},
-		{
-			name: "creates a new event sourced store with default options and registers entity event prototypes",
-			haveEventStore: func() eventstore.Store {
-				store, _ := memory.NewEventStore()
-				return store
-			},
-			haveEntityFactory: func(id uuid.UUID) *mockEntity {
-				return &mockEntity{
-					ID: typeid.FromUUID("testentity", id),
-					eventTypes: []estoria.EntityEvent{
-						mockEntityEventA{},
-						mockEntityEventB{},
-						mockEntityEventC{},
-					},
-				}
-			},
-		},
-		{
-			name: "creates a new event sourced store with a custom entity event marshaler",
-			haveEventStore: func() eventstore.Store {
-				store, _ := memory.NewEventStore()
-				return store
-			},
-			haveEntityFactory: func(id uuid.UUID) *mockEntity {
-				return &mockEntity{ID: typeid.FromUUID("testentity", id)}
-			},
-			haveOpts: []aggregatestore.EventSourcedStoreOption[*mockEntity]{
-				aggregatestore.WithEventMarshaler[*mockEntity](mockEventMarshaler{}),
 			},
 		},
 		{
@@ -194,11 +235,8 @@ func TestNewEventSourcedStore(t *testing.T) {
 				store, _ := memory.NewEventStore()
 				return store
 			},
-			haveEntityFactory: func(id uuid.UUID) *mockEntity {
-				return &mockEntity{ID: typeid.FromUUID("testentity", id)}
-			},
-			haveOpts: []aggregatestore.EventSourcedStoreOption[*mockEntity]{
-				aggregatestore.WithEventStreamReader[*mockEntity](func() eventstore.Store {
+			haveOpts: []aggregatestore.EventSourcedStoreOption[mockEntity]{
+				aggregatestore.WithEventStreamReader[mockEntity](func() eventstore.Store {
 					store, _ := memory.NewEventStore()
 					return store
 				}()),
@@ -210,11 +248,8 @@ func TestNewEventSourcedStore(t *testing.T) {
 				store, _ := memory.NewEventStore()
 				return store
 			},
-			haveEntityFactory: func(id uuid.UUID) *mockEntity {
-				return &mockEntity{ID: typeid.FromUUID("testentity", id)}
-			},
-			haveOpts: []aggregatestore.EventSourcedStoreOption[*mockEntity]{
-				aggregatestore.WithEventStreamWriter[*mockEntity](func() eventstore.Store {
+			haveOpts: []aggregatestore.EventSourcedStoreOption[mockEntity]{
+				aggregatestore.WithEventStreamWriter[mockEntity](func() eventstore.Store {
 					store, _ := memory.NewEventStore()
 					return store
 				}()),
@@ -226,18 +261,15 @@ func TestNewEventSourcedStore(t *testing.T) {
 				store, _ := memory.NewEventStore()
 				return store
 			},
-			haveEntityFactory: func(id uuid.UUID) *mockEntity {
-				return &mockEntity{ID: typeid.FromUUID("testentity", id)}
-			},
-			haveOpts: []aggregatestore.EventSourcedStoreOption[*mockEntity]{
-				aggregatestore.WithEventStreamReader[*mockEntity](func() eventstore.Store {
+			haveOpts: []aggregatestore.EventSourcedStoreOption[mockEntity]{
+				aggregatestore.WithEventStreamReader[mockEntity](func() eventstore.Store {
 					return nil
 				}()),
-				aggregatestore.WithEventStreamWriter[*mockEntity](func() eventstore.Store {
+				aggregatestore.WithEventStreamWriter[mockEntity](func() eventstore.Store {
 					return nil
 				}()),
 			},
-			wantErr: aggregatestore.InitializeAggregateStoreError{Err: errors.New("no event stream reader or writer provided")},
+			wantErr: aggregatestore.InitializeError{Err: errors.New("no event stream reader or writer provided")},
 		},
 		{
 			name: "returns an error when a duplicate entity event prototype is registered",
@@ -245,20 +277,16 @@ func TestNewEventSourcedStore(t *testing.T) {
 				store, _ := memory.NewEventStore()
 				return store
 			},
-			haveEntityFactory: func(id uuid.UUID) *mockEntity {
-				return &mockEntity{
-					ID: typeid.FromUUID("testentity", id),
-					eventTypes: []estoria.EntityEvent{
-						mockEntityEventA{},
-						mockEntityEventB{},
-						mockEntityEventA{},
-					},
-				}
+			haveOpts: []aggregatestore.EventSourcedStoreOption[mockEntity]{
+				aggregatestore.WithEventTypes(
+					mockEntityEventA{},
+					mockEntityEventA{},
+				),
 			},
-			wantErr: aggregatestore.InitializeAggregateStoreError{
+			wantErr: fmt.Errorf("applying option: %w", aggregatestore.InitializeError{
 				Operation: "registering entity event prototype",
-				Err:       errors.New("duplicate event type mockEntityEventA for entity testentity"),
-			},
+				Err:       errors.New("duplicate event type mockEntityEventA"),
+			}),
 		},
 		{
 			name: "returns an error when applying an option fails",
@@ -266,15 +294,12 @@ func TestNewEventSourcedStore(t *testing.T) {
 				store, _ := memory.NewEventStore()
 				return store
 			},
-			haveEntityFactory: func(id uuid.UUID) *mockEntity {
-				return &mockEntity{ID: typeid.FromUUID("testentity", id)}
-			},
-			haveOpts: []aggregatestore.EventSourcedStoreOption[*mockEntity]{
-				func(_ *aggregatestore.EventSourcedStore[*mockEntity]) error {
+			haveOpts: []aggregatestore.EventSourcedStoreOption[mockEntity]{
+				func(_ *aggregatestore.EventSourcedStore[mockEntity]) error {
 					return errors.New("test error")
 				},
 			},
-			wantErr: aggregatestore.InitializeAggregateStoreError{
+			wantErr: aggregatestore.InitializeError{
 				Operation: "applying option",
 				Err:       errors.New("test error"),
 			},
@@ -283,7 +308,7 @@ func TestNewEventSourcedStore(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			gotStore, err := aggregatestore.NewEventSourcedStore(tt.haveEventStore(), tt.haveEntityFactory, tt.haveOpts...)
+			gotStore, err := aggregatestore.NewEventSourcedStore(tt.haveEventStore(), newMockEntity, tt.haveOpts...)
 
 			if tt.wantErr != nil {
 				if err == nil || err.Error() != tt.wantErr.Error() {
@@ -301,120 +326,81 @@ func TestNewEventSourcedStore(t *testing.T) {
 	}
 }
 
-func TestEventSourcedStore_New(t *testing.T) {
-	t.Parallel()
-
-	for _, tt := range []struct {
-		name     string
-		haveUUID uuid.UUID
-		wantErr  error
-	}{
-		{
-			name:     "creates a new aggregate with the provided ID",
-			haveUUID: uuid.Must(uuid.NewV4()),
-		},
-		{
-			name:     "returns an error when provided a nil aggregate ID",
-			haveUUID: uuid.Nil,
-			wantErr:  aggregatestore.CreateAggregateError{Err: errors.New("aggregate ID is nil")},
-		},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-
-			store, err := aggregatestore.NewEventSourcedStore(
-				func() eventstore.Store {
-					store, _ := memory.NewEventStore()
-					return store
-				}(),
-				func(id uuid.UUID) *mockEntity {
-					return &mockEntity{ID: typeid.FromUUID("testentity", id)}
-				})
-			if err != nil {
-				t.Errorf("unexpected error creating store: %v", err)
-			}
-
-			gotAggregate, err := store.New(tt.haveUUID)
-
-			if tt.wantErr != nil {
-				if err == nil || err.Error() != tt.wantErr.Error() {
-					t.Errorf("want error: %v, got: %v", tt.wantErr, err)
-				}
-				return
-			}
-
-			if err != nil {
-				t.Errorf("unexpected error: %v", err)
-			} else if gotAggregate == nil {
-				t.Errorf("unexpected nil aggregate")
-			}
-
-			// aggregate has the correct ID
-			if gotAggregate.ID().String() != typeid.FromUUID("testentity", tt.haveUUID).String() {
-				t.Errorf("want entity ID %s, got %s", typeid.FromUUID("testentity", tt.haveUUID), gotAggregate.ID())
-			}
-
-			// aggregate has initial version 0
-			if gotAggregate.Version() != 0 {
-				t.Errorf("want entity version 0, got %d", gotAggregate.Version())
-			}
-		})
-	}
-}
-
 func TestEventSourcedStore_LoadAggregate(t *testing.T) {
 	t.Parallel()
 
 	aggregateID := typeid.Must(typeid.NewUUID("mockentity")).(typeid.UUID)
 	for _, tt := range []struct {
-		name              string
-		haveEventStore    func() eventstore.Store
-		haveEntityFactory func(id uuid.UUID) *mockEntity
-		haveAggregateID   typeid.UUID
-		haveOpts          aggregatestore.LoadOptions
-		wantVersion       int64
-		wantEntity        *mockEntity
-		wantErr           error
+		name            string
+		haveEventStore  func() eventstore.Store
+		haveStoreOpts   []aggregatestore.EventSourcedStoreOption[mockEntity]
+		haveAggregateID typeid.UUID
+		haveLoadOpts    aggregatestore.LoadOptions
+		wantVersion     int64
+		wantEntity      mockEntity
+		wantErr         error
 	}{
 		{
 			name:            "loads an aggregate by its ID using default options",
 			haveAggregateID: aggregateID,
 			haveEventStore: func() eventstore.Store {
+				events := []*eventstore.WritableEvent{}
+				for _, event := range []estoria.EntityEvent[mockEntity]{
+					mockEntityEventA{A: "a"},
+					mockEntityEventB{B: "b"},
+					mockEntityEventC{C: "c"},
+				} {
+					events = append(events, &eventstore.WritableEvent{
+						ID:   typeid.FromUUID(event.EventType(), uuid.Must(uuid.NewV4())),
+						Data: mustJSONMarshal(event),
+					})
+				}
 				store, _ := memory.NewEventStore()
-				store.AppendStream(context.Background(), aggregateID, []*eventstore.WritableEvent{
-					{ID: typeid.Must(typeid.NewUUID("mockEntityEventA")).(typeid.UUID), Data: mockEntityEventA{}.marshaledData()},
-					{ID: typeid.Must(typeid.NewUUID("mockEntityEventB")).(typeid.UUID), Data: mockEntityEventB{}.marshaledData()},
-					{ID: typeid.Must(typeid.NewUUID("mockEntityEventC")).(typeid.UUID), Data: mockEntityEventC{}.marshaledData()},
-				}, eventstore.AppendStreamOptions{})
+				store.AppendStream(context.Background(), aggregateID, events, eventstore.AppendStreamOptions{})
 				return store
 			},
-			haveEntityFactory: func(id uuid.UUID) *mockEntity {
-				return newMockEntity(typeid.FromUUID("mockentity", id), 3)
+			haveStoreOpts: []aggregatestore.EventSourcedStoreOption[mockEntity]{
+				aggregatestore.WithEventTypes(
+					mockEntityEventA{},
+					mockEntityEventB{},
+					mockEntityEventC{},
+				),
 			},
 			wantVersion: 3,
-			wantEntity: &mockEntity{
+			wantEntity: mockEntity{
 				ID:               aggregateID,
 				numAppliedEvents: 3,
 			},
 		},
 		{
-			name:            "loads an aggregate to a specific version by its ID ",
+			name:            "loads an aggregate to a specific version by its ID",
 			haveAggregateID: aggregateID,
 			haveEventStore: func() eventstore.Store {
+				events := []*eventstore.WritableEvent{}
+				for _, event := range []estoria.EntityEvent[mockEntity]{
+					mockEntityEventA{A: "a"},
+					mockEntityEventB{B: "b"},
+					mockEntityEventC{C: "c"},
+				} {
+					events = append(events, &eventstore.WritableEvent{
+						ID:   typeid.FromUUID(event.EventType(), uuid.Must(uuid.NewV4())),
+						Data: mustJSONMarshal(event),
+					})
+				}
 				store, _ := memory.NewEventStore()
-				store.AppendStream(context.Background(), aggregateID, []*eventstore.WritableEvent{
-					{ID: typeid.Must(typeid.NewUUID("mockEntityEventA")).(typeid.UUID), Data: mockEntityEventA{}.marshaledData()},
-					{ID: typeid.Must(typeid.NewUUID("mockEntityEventB")).(typeid.UUID), Data: mockEntityEventB{}.marshaledData()},
-					{ID: typeid.Must(typeid.NewUUID("mockEntityEventC")).(typeid.UUID), Data: mockEntityEventC{}.marshaledData()},
-				}, eventstore.AppendStreamOptions{})
+				store.AppendStream(context.Background(), aggregateID, events, eventstore.AppendStreamOptions{})
 				return store
 			},
-			haveEntityFactory: func(id uuid.UUID) *mockEntity {
-				return newMockEntity(typeid.FromUUID("mockentity", id), 3)
+			haveStoreOpts: []aggregatestore.EventSourcedStoreOption[mockEntity]{
+				aggregatestore.WithEventTypes(
+					mockEntityEventA{},
+					mockEntityEventB{},
+					mockEntityEventC{},
+				),
 			},
-			haveOpts:    aggregatestore.LoadOptions{ToVersion: 2},
-			wantVersion: 2,
-			wantEntity: &mockEntity{
+			haveLoadOpts: aggregatestore.LoadOptions{ToVersion: 2},
+			wantVersion:  2,
+			wantEntity: mockEntity{
 				ID:               aggregateID,
 				numAppliedEvents: 2,
 			},
@@ -426,10 +412,7 @@ func TestEventSourcedStore_LoadAggregate(t *testing.T) {
 				store, _ := memory.NewEventStore()
 				return store
 			},
-			haveEntityFactory: func(id uuid.UUID) *mockEntity {
-				return newMockEntity(typeid.FromUUID("mockentity", id), 3)
-			},
-			wantErr: errors.New("creating new aggregate: aggregate ID is nil"),
+			wantErr: errors.New("aggregate ID is nil"),
 		},
 		{
 			name:            "returns an error when the aggregate cannot be hydrated",
@@ -438,21 +421,18 @@ func TestEventSourcedStore_LoadAggregate(t *testing.T) {
 				store, _ := memory.NewEventStore()
 				return store
 			},
-			haveEntityFactory: func(id uuid.UUID) *mockEntity {
-				return newMockEntity(typeid.FromUUID("mockentity", id), 3)
-			},
 			wantErr: errors.New("hydrating aggregate: aggregate not found"),
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			store, err := aggregatestore.NewEventSourcedStore(tt.haveEventStore(), tt.haveEntityFactory)
+			store, err := aggregatestore.NewEventSourcedStore(tt.haveEventStore(), newMockEntity, tt.haveStoreOpts...)
 			if err != nil {
 				t.Errorf("unexpected error creating store: %v", err)
 			}
 
-			gotAggregate, err := store.Load(context.Background(), tt.haveAggregateID, tt.haveOpts)
+			gotAggregate, err := store.Load(context.Background(), tt.haveAggregateID.UUID(), tt.haveLoadOpts)
 
 			if tt.wantErr != nil {
 				if err == nil || err.Error() != tt.wantErr.Error() {
@@ -477,10 +457,6 @@ func TestEventSourcedStore_LoadAggregate(t *testing.T) {
 			}
 			// aggregate has the correct entity
 			gotEntity := gotAggregate.Entity()
-			if gotEntity == nil {
-				t.Errorf("unexpected nil entity")
-				return
-			}
 			// entity has the correct ID
 			if gotEntity.ID.String() != tt.haveAggregateID.String() {
 				t.Errorf("want entity ID %s, got %s", tt.haveAggregateID, gotEntity.ID)
@@ -496,42 +472,52 @@ func TestEventSourcedStore_LoadAggregate(t *testing.T) {
 func TestEventSourcedStore_HydrateAggregate(t *testing.T) {
 	t.Parallel()
 
-	aggregateID := typeid.Must(typeid.NewUUID("mockentity")).(typeid.UUID)
+	aggregateID := newMockEntity(uuid.Must(uuid.NewV4())).EntityID()
 	for _, tt := range []struct {
-		name              string
-		haveEventStore    func() eventstore.Store
-		haveEntityFactory func(id uuid.UUID) *mockEntity
-		haveStoreOpts     []aggregatestore.EventSourcedStoreOption[*mockEntity]
-		haveAggregate     func() *aggregatestore.Aggregate[*mockEntity]
-		haveOpts          aggregatestore.HydrateOptions
-		wantVersion       int64
-		wantEntity        *mockEntity
-		wantErr           error
+		name            string
+		haveEventStore  func() eventstore.Store
+		haveStoreOpts   []aggregatestore.EventSourcedStoreOption[mockEntity]
+		haveAggregate   func() *aggregatestore.Aggregate[mockEntity]
+		haveHydrateOpts aggregatestore.HydrateOptions
+		wantVersion     int64
+		wantEntity      mockEntity
+		wantErr         error
 	}{
 		{
 			name: "hydrates an aggregate from version 0 to the latest version using default options",
 			haveEventStore: func() eventstore.Store {
+				events := []*eventstore.WritableEvent{}
+				for _, event := range []estoria.EntityEvent[mockEntity]{
+					mockEntityEventA{A: "a"},
+					mockEntityEventB{B: "b"},
+					mockEntityEventC{C: "c"},
+					mockEntityEventD{D: "d"},
+					mockEntityEventE{E: "e"},
+				} {
+					events = append(events, &eventstore.WritableEvent{
+						ID:   typeid.FromUUID(event.EventType(), uuid.Must(uuid.NewV4())),
+						Data: mustJSONMarshal(event),
+					})
+				}
 				store, _ := memory.NewEventStore()
-				store.AppendStream(context.Background(), aggregateID, []*eventstore.WritableEvent{
-					{ID: typeid.Must(typeid.NewUUID("mockEntityEventA")).(typeid.UUID), Data: mockEntityEventA{}.marshaledData()},
-					{ID: typeid.Must(typeid.NewUUID("mockEntityEventB")).(typeid.UUID), Data: mockEntityEventB{}.marshaledData()},
-					{ID: typeid.Must(typeid.NewUUID("mockEntityEventC")).(typeid.UUID), Data: mockEntityEventC{}.marshaledData()},
-					{ID: typeid.Must(typeid.NewUUID("mockEntityEventD")).(typeid.UUID), Data: mockEntityEventD{}.marshaledData()},
-					{ID: typeid.Must(typeid.NewUUID("mockEntityEventE")).(typeid.UUID), Data: mockEntityEventE{}.marshaledData()},
-				}, eventstore.AppendStreamOptions{})
+				store.AppendStream(context.Background(), aggregateID, events, eventstore.AppendStreamOptions{})
 				return store
 			},
-			haveEntityFactory: func(id uuid.UUID) *mockEntity {
-				return newMockEntity(typeid.FromUUID("mockentity", id), 5)
+			haveStoreOpts: []aggregatestore.EventSourcedStoreOption[mockEntity]{
+				aggregatestore.WithEventTypes(
+					mockEntityEventA{},
+					mockEntityEventB{},
+					mockEntityEventC{},
+					mockEntityEventD{},
+					mockEntityEventE{},
+				),
 			},
-			haveAggregate: func() *aggregatestore.Aggregate[*mockEntity] {
-				agg := &aggregatestore.Aggregate[*mockEntity]{}
-				agg.State().SetEntityAtVersion(newMockEntity(aggregateID, 5), 0)
-				return agg
+			haveAggregate: func() *aggregatestore.Aggregate[mockEntity] {
+				return aggregatestore.NewAggregate(newMockEntity(aggregateID.UUID()), 0)
 			},
-			haveOpts:    aggregatestore.HydrateOptions{},
-			wantVersion: 5,
-			wantEntity: &mockEntity{
+			haveHydrateOpts: aggregatestore.HydrateOptions{},
+			wantVersion:     5,
+			wantEntity: mockEntity{
 				ID:               aggregateID,
 				numAppliedEvents: 5,
 			},
@@ -539,27 +525,38 @@ func TestEventSourcedStore_HydrateAggregate(t *testing.T) {
 		{
 			name: "hydrates an aggregate from version 0 to a specific version",
 			haveEventStore: func() eventstore.Store {
+				events := []*eventstore.WritableEvent{}
+				for _, event := range []estoria.EntityEvent[mockEntity]{
+					mockEntityEventA{A: "a"},
+					mockEntityEventB{B: "b"},
+					mockEntityEventC{C: "c"},
+					mockEntityEventD{D: "d"},
+					mockEntityEventE{E: "e"},
+				} {
+					events = append(events, &eventstore.WritableEvent{
+						ID:   typeid.FromUUID(event.EventType(), uuid.Must(uuid.NewV4())),
+						Data: mustJSONMarshal(event),
+					})
+				}
 				store, _ := memory.NewEventStore()
-				store.AppendStream(context.Background(), aggregateID, []*eventstore.WritableEvent{
-					{ID: typeid.Must(typeid.NewUUID("mockEntityEventA")).(typeid.UUID), Data: mockEntityEventA{}.marshaledData()},
-					{ID: typeid.Must(typeid.NewUUID("mockEntityEventB")).(typeid.UUID), Data: mockEntityEventB{}.marshaledData()},
-					{ID: typeid.Must(typeid.NewUUID("mockEntityEventC")).(typeid.UUID), Data: mockEntityEventC{}.marshaledData()},
-					{ID: typeid.Must(typeid.NewUUID("mockEntityEventD")).(typeid.UUID), Data: mockEntityEventD{}.marshaledData()},
-					{ID: typeid.Must(typeid.NewUUID("mockEntityEventE")).(typeid.UUID), Data: mockEntityEventE{}.marshaledData()},
-				}, eventstore.AppendStreamOptions{})
+				store.AppendStream(context.Background(), aggregateID, events, eventstore.AppendStreamOptions{})
 				return store
 			},
-			haveEntityFactory: func(id uuid.UUID) *mockEntity {
-				return newMockEntity(typeid.FromUUID("mockentity", id), 5)
+			haveStoreOpts: []aggregatestore.EventSourcedStoreOption[mockEntity]{
+				aggregatestore.WithEventTypes(
+					mockEntityEventA{},
+					mockEntityEventB{},
+					mockEntityEventC{},
+					mockEntityEventD{},
+					mockEntityEventE{},
+				),
 			},
-			haveAggregate: func() *aggregatestore.Aggregate[*mockEntity] {
-				agg := &aggregatestore.Aggregate[*mockEntity]{}
-				agg.State().SetEntityAtVersion(newMockEntity(aggregateID, 5), 0)
-				return agg
+			haveAggregate: func() *aggregatestore.Aggregate[mockEntity] {
+				return aggregatestore.NewAggregate(newMockEntity(aggregateID.UUID()), 0)
 			},
-			haveOpts:    aggregatestore.HydrateOptions{ToVersion: 3},
-			wantVersion: 3,
-			wantEntity: &mockEntity{
+			haveHydrateOpts: aggregatestore.HydrateOptions{ToVersion: 3},
+			wantVersion:     3,
+			wantEntity: mockEntity{
 				ID:               aggregateID,
 				numAppliedEvents: 3,
 			},
@@ -567,27 +564,38 @@ func TestEventSourcedStore_HydrateAggregate(t *testing.T) {
 		{
 			name: "hydrates an aggregate from version 0 to version 1",
 			haveEventStore: func() eventstore.Store {
+				events := []*eventstore.WritableEvent{}
+				for _, event := range []estoria.EntityEvent[mockEntity]{
+					mockEntityEventA{A: "a"},
+					mockEntityEventB{B: "b"},
+					mockEntityEventC{C: "c"},
+					mockEntityEventD{D: "d"},
+					mockEntityEventE{E: "e"},
+				} {
+					events = append(events, &eventstore.WritableEvent{
+						ID:   typeid.FromUUID(event.EventType(), uuid.Must(uuid.NewV4())),
+						Data: mustJSONMarshal(event),
+					})
+				}
 				store, _ := memory.NewEventStore()
-				store.AppendStream(context.Background(), aggregateID, []*eventstore.WritableEvent{
-					{ID: typeid.Must(typeid.NewUUID("mockEntityEventA")).(typeid.UUID), Data: mockEntityEventA{}.marshaledData()},
-					{ID: typeid.Must(typeid.NewUUID("mockEntityEventB")).(typeid.UUID), Data: mockEntityEventB{}.marshaledData()},
-					{ID: typeid.Must(typeid.NewUUID("mockEntityEventC")).(typeid.UUID), Data: mockEntityEventC{}.marshaledData()},
-					{ID: typeid.Must(typeid.NewUUID("mockEntityEventD")).(typeid.UUID), Data: mockEntityEventD{}.marshaledData()},
-					{ID: typeid.Must(typeid.NewUUID("mockEntityEventE")).(typeid.UUID), Data: mockEntityEventE{}.marshaledData()},
-				}, eventstore.AppendStreamOptions{})
+				store.AppendStream(context.Background(), aggregateID, events, eventstore.AppendStreamOptions{})
 				return store
 			},
-			haveEntityFactory: func(id uuid.UUID) *mockEntity {
-				return newMockEntity(typeid.FromUUID("mockentity", id), 5)
+			haveStoreOpts: []aggregatestore.EventSourcedStoreOption[mockEntity]{
+				aggregatestore.WithEventTypes(
+					mockEntityEventA{},
+					mockEntityEventB{},
+					mockEntityEventC{},
+					mockEntityEventD{},
+					mockEntityEventE{},
+				),
 			},
-			haveAggregate: func() *aggregatestore.Aggregate[*mockEntity] {
-				agg := &aggregatestore.Aggregate[*mockEntity]{}
-				agg.State().SetEntityAtVersion(newMockEntity(aggregateID, 5), 0)
-				return agg
+			haveAggregate: func() *aggregatestore.Aggregate[mockEntity] {
+				return aggregatestore.NewAggregate(newMockEntity(aggregateID.UUID()), 0)
 			},
-			haveOpts:    aggregatestore.HydrateOptions{ToVersion: 1},
-			wantVersion: 1,
-			wantEntity: &mockEntity{
+			haveHydrateOpts: aggregatestore.HydrateOptions{ToVersion: 1},
+			wantVersion:     1,
+			wantEntity: mockEntity{
 				ID:               aggregateID,
 				numAppliedEvents: 1,
 			},
@@ -595,27 +603,38 @@ func TestEventSourcedStore_HydrateAggregate(t *testing.T) {
 		{
 			name: "hydrates an aggregate from version 0 to version N-1",
 			haveEventStore: func() eventstore.Store {
+				events := []*eventstore.WritableEvent{}
+				for _, event := range []estoria.EntityEvent[mockEntity]{
+					mockEntityEventA{A: "a"},
+					mockEntityEventB{B: "b"},
+					mockEntityEventC{C: "c"},
+					mockEntityEventD{D: "d"},
+					mockEntityEventE{E: "e"},
+				} {
+					events = append(events, &eventstore.WritableEvent{
+						ID:   typeid.FromUUID(event.EventType(), uuid.Must(uuid.NewV4())),
+						Data: mustJSONMarshal(event),
+					})
+				}
 				store, _ := memory.NewEventStore()
-				store.AppendStream(context.Background(), aggregateID, []*eventstore.WritableEvent{
-					{ID: typeid.Must(typeid.NewUUID("mockEntityEventA")).(typeid.UUID), Data: mockEntityEventA{}.marshaledData()},
-					{ID: typeid.Must(typeid.NewUUID("mockEntityEventB")).(typeid.UUID), Data: mockEntityEventB{}.marshaledData()},
-					{ID: typeid.Must(typeid.NewUUID("mockEntityEventC")).(typeid.UUID), Data: mockEntityEventC{}.marshaledData()},
-					{ID: typeid.Must(typeid.NewUUID("mockEntityEventD")).(typeid.UUID), Data: mockEntityEventD{}.marshaledData()},
-					{ID: typeid.Must(typeid.NewUUID("mockEntityEventE")).(typeid.UUID), Data: mockEntityEventE{}.marshaledData()},
-				}, eventstore.AppendStreamOptions{})
+				store.AppendStream(context.Background(), aggregateID, events, eventstore.AppendStreamOptions{})
 				return store
 			},
-			haveEntityFactory: func(id uuid.UUID) *mockEntity {
-				return newMockEntity(typeid.FromUUID("mockentity", id), 5)
+			haveStoreOpts: []aggregatestore.EventSourcedStoreOption[mockEntity]{
+				aggregatestore.WithEventTypes(
+					mockEntityEventA{},
+					mockEntityEventB{},
+					mockEntityEventC{},
+					mockEntityEventD{},
+					mockEntityEventE{},
+				),
 			},
-			haveAggregate: func() *aggregatestore.Aggregate[*mockEntity] {
-				agg := &aggregatestore.Aggregate[*mockEntity]{}
-				agg.State().SetEntityAtVersion(newMockEntity(aggregateID, 5), 0)
-				return agg
+			haveAggregate: func() *aggregatestore.Aggregate[mockEntity] {
+				return aggregatestore.NewAggregate(newMockEntity(aggregateID.UUID()), 0)
 			},
-			haveOpts:    aggregatestore.HydrateOptions{ToVersion: 4},
-			wantVersion: 4,
-			wantEntity: &mockEntity{
+			haveHydrateOpts: aggregatestore.HydrateOptions{ToVersion: 4},
+			wantVersion:     4,
+			wantEntity: mockEntity{
 				ID:               aggregateID,
 				numAppliedEvents: 4,
 			},
@@ -623,27 +642,38 @@ func TestEventSourcedStore_HydrateAggregate(t *testing.T) {
 		{
 			name: "hydrates an aggregate from version 1 to the latest version using default options",
 			haveEventStore: func() eventstore.Store {
+				events := []*eventstore.WritableEvent{}
+				for _, event := range []estoria.EntityEvent[mockEntity]{
+					mockEntityEventA{A: "a"},
+					mockEntityEventB{B: "b"},
+					mockEntityEventC{C: "c"},
+					mockEntityEventD{D: "d"},
+					mockEntityEventE{E: "e"},
+				} {
+					events = append(events, &eventstore.WritableEvent{
+						ID:   typeid.FromUUID(event.EventType(), uuid.Must(uuid.NewV4())),
+						Data: mustJSONMarshal(event),
+					})
+				}
 				store, _ := memory.NewEventStore()
-				store.AppendStream(context.Background(), aggregateID, []*eventstore.WritableEvent{
-					{ID: typeid.Must(typeid.NewUUID("mockEntityEventA")).(typeid.UUID), Data: mockEntityEventA{}.marshaledData()},
-					{ID: typeid.Must(typeid.NewUUID("mockEntityEventB")).(typeid.UUID), Data: mockEntityEventB{}.marshaledData()},
-					{ID: typeid.Must(typeid.NewUUID("mockEntityEventC")).(typeid.UUID), Data: mockEntityEventC{}.marshaledData()},
-					{ID: typeid.Must(typeid.NewUUID("mockEntityEventD")).(typeid.UUID), Data: mockEntityEventD{}.marshaledData()},
-					{ID: typeid.Must(typeid.NewUUID("mockEntityEventE")).(typeid.UUID), Data: mockEntityEventE{}.marshaledData()},
-				}, eventstore.AppendStreamOptions{})
+				store.AppendStream(context.Background(), aggregateID, events, eventstore.AppendStreamOptions{})
 				return store
 			},
-			haveEntityFactory: func(id uuid.UUID) *mockEntity {
-				return newMockEntity(typeid.FromUUID("mockentity", id), 5)
+			haveStoreOpts: []aggregatestore.EventSourcedStoreOption[mockEntity]{
+				aggregatestore.WithEventTypes(
+					mockEntityEventA{},
+					mockEntityEventB{},
+					mockEntityEventC{},
+					mockEntityEventD{},
+					mockEntityEventE{},
+				),
 			},
-			haveAggregate: func() *aggregatestore.Aggregate[*mockEntity] {
-				agg := &aggregatestore.Aggregate[*mockEntity]{}
-				agg.State().SetEntityAtVersion(newMockEntity(aggregateID, 5), 1)
-				return agg
+			haveAggregate: func() *aggregatestore.Aggregate[mockEntity] {
+				return aggregatestore.NewAggregate(newMockEntity(aggregateID.UUID()), 1)
 			},
-			haveOpts:    aggregatestore.HydrateOptions{},
-			wantVersion: 5,
-			wantEntity: &mockEntity{
+			haveHydrateOpts: aggregatestore.HydrateOptions{},
+			wantVersion:     5,
+			wantEntity: mockEntity{
 				ID:               aggregateID,
 				numAppliedEvents: 4,
 			},
@@ -651,27 +681,38 @@ func TestEventSourcedStore_HydrateAggregate(t *testing.T) {
 		{
 			name: "hydrates an aggregate from version 1 to a specific version",
 			haveEventStore: func() eventstore.Store {
+				events := []*eventstore.WritableEvent{}
+				for _, event := range []estoria.EntityEvent[mockEntity]{
+					mockEntityEventA{A: "a"},
+					mockEntityEventB{B: "b"},
+					mockEntityEventC{C: "c"},
+					mockEntityEventD{D: "d"},
+					mockEntityEventE{E: "e"},
+				} {
+					events = append(events, &eventstore.WritableEvent{
+						ID:   typeid.FromUUID(event.EventType(), uuid.Must(uuid.NewV4())),
+						Data: mustJSONMarshal(event),
+					})
+				}
 				store, _ := memory.NewEventStore()
-				store.AppendStream(context.Background(), aggregateID, []*eventstore.WritableEvent{
-					{ID: typeid.Must(typeid.NewUUID("mockEntityEventA")).(typeid.UUID), Data: mockEntityEventA{}.marshaledData()},
-					{ID: typeid.Must(typeid.NewUUID("mockEntityEventB")).(typeid.UUID), Data: mockEntityEventB{}.marshaledData()},
-					{ID: typeid.Must(typeid.NewUUID("mockEntityEventC")).(typeid.UUID), Data: mockEntityEventC{}.marshaledData()},
-					{ID: typeid.Must(typeid.NewUUID("mockEntityEventD")).(typeid.UUID), Data: mockEntityEventD{}.marshaledData()},
-					{ID: typeid.Must(typeid.NewUUID("mockEntityEventE")).(typeid.UUID), Data: mockEntityEventE{}.marshaledData()},
-				}, eventstore.AppendStreamOptions{})
+				store.AppendStream(context.Background(), aggregateID, events, eventstore.AppendStreamOptions{})
 				return store
 			},
-			haveEntityFactory: func(id uuid.UUID) *mockEntity {
-				return newMockEntity(typeid.FromUUID("mockentity", id), 5)
+			haveStoreOpts: []aggregatestore.EventSourcedStoreOption[mockEntity]{
+				aggregatestore.WithEventTypes(
+					mockEntityEventA{},
+					mockEntityEventB{},
+					mockEntityEventC{},
+					mockEntityEventD{},
+					mockEntityEventE{},
+				),
 			},
-			haveAggregate: func() *aggregatestore.Aggregate[*mockEntity] {
-				agg := &aggregatestore.Aggregate[*mockEntity]{}
-				agg.State().SetEntityAtVersion(newMockEntity(aggregateID, 5), 1)
-				return agg
+			haveAggregate: func() *aggregatestore.Aggregate[mockEntity] {
+				return aggregatestore.NewAggregate(newMockEntity(aggregateID.UUID()), 1)
 			},
-			haveOpts:    aggregatestore.HydrateOptions{ToVersion: 3},
-			wantVersion: 3,
-			wantEntity: &mockEntity{
+			haveHydrateOpts: aggregatestore.HydrateOptions{ToVersion: 3},
+			wantVersion:     3,
+			wantEntity: mockEntity{
 				ID:               aggregateID,
 				numAppliedEvents: 2,
 			},
@@ -679,27 +720,38 @@ func TestEventSourcedStore_HydrateAggregate(t *testing.T) {
 		{
 			name: "hydrates an aggregate from version 1 to version 2",
 			haveEventStore: func() eventstore.Store {
+				events := []*eventstore.WritableEvent{}
+				for _, event := range []estoria.EntityEvent[mockEntity]{
+					mockEntityEventA{A: "a"},
+					mockEntityEventB{B: "b"},
+					mockEntityEventC{C: "c"},
+					mockEntityEventD{D: "d"},
+					mockEntityEventE{E: "e"},
+				} {
+					events = append(events, &eventstore.WritableEvent{
+						ID:   typeid.FromUUID(event.EventType(), uuid.Must(uuid.NewV4())),
+						Data: mustJSONMarshal(event),
+					})
+				}
 				store, _ := memory.NewEventStore()
-				store.AppendStream(context.Background(), aggregateID, []*eventstore.WritableEvent{
-					{ID: typeid.Must(typeid.NewUUID("mockEntityEventA")).(typeid.UUID), Data: mockEntityEventA{}.marshaledData()},
-					{ID: typeid.Must(typeid.NewUUID("mockEntityEventB")).(typeid.UUID), Data: mockEntityEventB{}.marshaledData()},
-					{ID: typeid.Must(typeid.NewUUID("mockEntityEventC")).(typeid.UUID), Data: mockEntityEventC{}.marshaledData()},
-					{ID: typeid.Must(typeid.NewUUID("mockEntityEventD")).(typeid.UUID), Data: mockEntityEventD{}.marshaledData()},
-					{ID: typeid.Must(typeid.NewUUID("mockEntityEventE")).(typeid.UUID), Data: mockEntityEventE{}.marshaledData()},
-				}, eventstore.AppendStreamOptions{})
+				store.AppendStream(context.Background(), aggregateID, events, eventstore.AppendStreamOptions{})
 				return store
 			},
-			haveEntityFactory: func(id uuid.UUID) *mockEntity {
-				return newMockEntity(typeid.FromUUID("mockentity", id), 5)
+			haveStoreOpts: []aggregatestore.EventSourcedStoreOption[mockEntity]{
+				aggregatestore.WithEventTypes(
+					mockEntityEventA{},
+					mockEntityEventB{},
+					mockEntityEventC{},
+					mockEntityEventD{},
+					mockEntityEventE{},
+				),
 			},
-			haveAggregate: func() *aggregatestore.Aggregate[*mockEntity] {
-				agg := &aggregatestore.Aggregate[*mockEntity]{}
-				agg.State().SetEntityAtVersion(newMockEntity(aggregateID, 5), 1)
-				return agg
+			haveAggregate: func() *aggregatestore.Aggregate[mockEntity] {
+				return aggregatestore.NewAggregate(newMockEntity(aggregateID.UUID()), 1)
 			},
-			haveOpts:    aggregatestore.HydrateOptions{ToVersion: 2},
-			wantVersion: 2,
-			wantEntity: &mockEntity{
+			haveHydrateOpts: aggregatestore.HydrateOptions{ToVersion: 2},
+			wantVersion:     2,
+			wantEntity: mockEntity{
 				ID:               aggregateID,
 				numAppliedEvents: 1,
 			},
@@ -707,27 +759,38 @@ func TestEventSourcedStore_HydrateAggregate(t *testing.T) {
 		{
 			name: "hydrates an aggregate from version 1 to version N-1",
 			haveEventStore: func() eventstore.Store {
+				events := []*eventstore.WritableEvent{}
+				for _, event := range []estoria.EntityEvent[mockEntity]{
+					mockEntityEventA{A: "a"},
+					mockEntityEventB{B: "b"},
+					mockEntityEventC{C: "c"},
+					mockEntityEventD{D: "d"},
+					mockEntityEventE{E: "e"},
+				} {
+					events = append(events, &eventstore.WritableEvent{
+						ID:   typeid.FromUUID(event.EventType(), uuid.Must(uuid.NewV4())),
+						Data: mustJSONMarshal(event),
+					})
+				}
 				store, _ := memory.NewEventStore()
-				store.AppendStream(context.Background(), aggregateID, []*eventstore.WritableEvent{
-					{ID: typeid.Must(typeid.NewUUID("mockEntityEventA")).(typeid.UUID), Data: mockEntityEventA{}.marshaledData()},
-					{ID: typeid.Must(typeid.NewUUID("mockEntityEventB")).(typeid.UUID), Data: mockEntityEventB{}.marshaledData()},
-					{ID: typeid.Must(typeid.NewUUID("mockEntityEventC")).(typeid.UUID), Data: mockEntityEventC{}.marshaledData()},
-					{ID: typeid.Must(typeid.NewUUID("mockEntityEventD")).(typeid.UUID), Data: mockEntityEventD{}.marshaledData()},
-					{ID: typeid.Must(typeid.NewUUID("mockEntityEventE")).(typeid.UUID), Data: mockEntityEventE{}.marshaledData()},
-				}, eventstore.AppendStreamOptions{})
+				store.AppendStream(context.Background(), aggregateID, events, eventstore.AppendStreamOptions{})
 				return store
 			},
-			haveEntityFactory: func(id uuid.UUID) *mockEntity {
-				return newMockEntity(typeid.FromUUID("mockentity", id), 5)
+			haveStoreOpts: []aggregatestore.EventSourcedStoreOption[mockEntity]{
+				aggregatestore.WithEventTypes(
+					mockEntityEventA{},
+					mockEntityEventB{},
+					mockEntityEventC{},
+					mockEntityEventD{},
+					mockEntityEventE{},
+				),
 			},
-			haveAggregate: func() *aggregatestore.Aggregate[*mockEntity] {
-				agg := &aggregatestore.Aggregate[*mockEntity]{}
-				agg.State().SetEntityAtVersion(newMockEntity(aggregateID, 5), 1)
-				return agg
+			haveAggregate: func() *aggregatestore.Aggregate[mockEntity] {
+				return aggregatestore.NewAggregate(newMockEntity(aggregateID.UUID()), 1)
 			},
-			haveOpts:    aggregatestore.HydrateOptions{ToVersion: 4},
-			wantVersion: 4,
-			wantEntity: &mockEntity{
+			haveHydrateOpts: aggregatestore.HydrateOptions{ToVersion: 4},
+			wantVersion:     4,
+			wantEntity: mockEntity{
 				ID:               aggregateID,
 				numAppliedEvents: 3,
 			},
@@ -735,27 +798,38 @@ func TestEventSourcedStore_HydrateAggregate(t *testing.T) {
 		{
 			name: "hydrates an aggregate from a specific version to the latest version using default options",
 			haveEventStore: func() eventstore.Store {
+				events := []*eventstore.WritableEvent{}
+				for _, event := range []estoria.EntityEvent[mockEntity]{
+					mockEntityEventA{A: "a"},
+					mockEntityEventB{B: "b"},
+					mockEntityEventC{C: "c"},
+					mockEntityEventD{D: "d"},
+					mockEntityEventE{E: "e"},
+				} {
+					events = append(events, &eventstore.WritableEvent{
+						ID:   typeid.FromUUID(event.EventType(), uuid.Must(uuid.NewV4())),
+						Data: mustJSONMarshal(event),
+					})
+				}
 				store, _ := memory.NewEventStore()
-				store.AppendStream(context.Background(), aggregateID, []*eventstore.WritableEvent{
-					{ID: typeid.Must(typeid.NewUUID("mockEntityEventA")).(typeid.UUID), Data: mockEntityEventA{}.marshaledData()},
-					{ID: typeid.Must(typeid.NewUUID("mockEntityEventB")).(typeid.UUID), Data: mockEntityEventB{}.marshaledData()},
-					{ID: typeid.Must(typeid.NewUUID("mockEntityEventC")).(typeid.UUID), Data: mockEntityEventC{}.marshaledData()},
-					{ID: typeid.Must(typeid.NewUUID("mockEntityEventD")).(typeid.UUID), Data: mockEntityEventD{}.marshaledData()},
-					{ID: typeid.Must(typeid.NewUUID("mockEntityEventE")).(typeid.UUID), Data: mockEntityEventE{}.marshaledData()},
-				}, eventstore.AppendStreamOptions{})
+				store.AppendStream(context.Background(), aggregateID, events, eventstore.AppendStreamOptions{})
 				return store
 			},
-			haveEntityFactory: func(id uuid.UUID) *mockEntity {
-				return newMockEntity(typeid.FromUUID("mockentity", id), 5)
+			haveStoreOpts: []aggregatestore.EventSourcedStoreOption[mockEntity]{
+				aggregatestore.WithEventTypes(
+					mockEntityEventA{},
+					mockEntityEventB{},
+					mockEntityEventC{},
+					mockEntityEventD{},
+					mockEntityEventE{},
+				),
 			},
-			haveAggregate: func() *aggregatestore.Aggregate[*mockEntity] {
-				agg := &aggregatestore.Aggregate[*mockEntity]{}
-				agg.State().SetEntityAtVersion(newMockEntity(aggregateID, 5), 3)
-				return agg
+			haveAggregate: func() *aggregatestore.Aggregate[mockEntity] {
+				return aggregatestore.NewAggregate(newMockEntity(aggregateID.UUID()), 3)
 			},
-			haveOpts:    aggregatestore.HydrateOptions{},
-			wantVersion: 5,
-			wantEntity: &mockEntity{
+			haveHydrateOpts: aggregatestore.HydrateOptions{},
+			wantVersion:     5,
+			wantEntity: mockEntity{
 				ID:               aggregateID,
 				numAppliedEvents: 2,
 			},
@@ -763,55 +837,77 @@ func TestEventSourcedStore_HydrateAggregate(t *testing.T) {
 		{
 			name: "hydrates an aggregate from a specific version to another specific version",
 			haveEventStore: func() eventstore.Store {
+				events := []*eventstore.WritableEvent{}
+				for _, event := range []estoria.EntityEvent[mockEntity]{
+					mockEntityEventA{A: "a"},
+					mockEntityEventB{B: "b"},
+					mockEntityEventC{C: "c"},
+					mockEntityEventD{D: "d"},
+					mockEntityEventE{E: "e"},
+				} {
+					events = append(events, &eventstore.WritableEvent{
+						ID:   typeid.FromUUID(event.EventType(), uuid.Must(uuid.NewV4())),
+						Data: mustJSONMarshal(event),
+					})
+				}
 				store, _ := memory.NewEventStore()
-				store.AppendStream(context.Background(), aggregateID, []*eventstore.WritableEvent{
-					{ID: typeid.Must(typeid.NewUUID("mockEntityEventA")).(typeid.UUID), Data: mockEntityEventA{}.marshaledData()},
-					{ID: typeid.Must(typeid.NewUUID("mockEntityEventB")).(typeid.UUID), Data: mockEntityEventB{}.marshaledData()},
-					{ID: typeid.Must(typeid.NewUUID("mockEntityEventC")).(typeid.UUID), Data: mockEntityEventC{}.marshaledData()},
-					{ID: typeid.Must(typeid.NewUUID("mockEntityEventD")).(typeid.UUID), Data: mockEntityEventD{}.marshaledData()},
-					{ID: typeid.Must(typeid.NewUUID("mockEntityEventE")).(typeid.UUID), Data: mockEntityEventE{}.marshaledData()},
-				}, eventstore.AppendStreamOptions{})
+				store.AppendStream(context.Background(), aggregateID, events, eventstore.AppendStreamOptions{})
 				return store
 			},
-			haveEntityFactory: func(id uuid.UUID) *mockEntity {
-				return newMockEntity(typeid.FromUUID("mockentity", id), 5)
+			haveStoreOpts: []aggregatestore.EventSourcedStoreOption[mockEntity]{
+				aggregatestore.WithEventTypes(
+					mockEntityEventA{},
+					mockEntityEventB{},
+					mockEntityEventC{},
+					mockEntityEventD{},
+					mockEntityEventE{},
+				),
 			},
-			haveAggregate: func() *aggregatestore.Aggregate[*mockEntity] {
-				agg := &aggregatestore.Aggregate[*mockEntity]{}
-				agg.State().SetEntityAtVersion(newMockEntity(aggregateID, 5), 2)
-				return agg
+			haveAggregate: func() *aggregatestore.Aggregate[mockEntity] {
+				return aggregatestore.NewAggregate(newMockEntity(aggregateID.UUID()), 3)
 			},
-			haveOpts:    aggregatestore.HydrateOptions{ToVersion: 4},
-			wantVersion: 4,
-			wantEntity: &mockEntity{
+			haveHydrateOpts: aggregatestore.HydrateOptions{ToVersion: 4},
+			wantVersion:     4,
+			wantEntity: mockEntity{
 				ID:               aggregateID,
-				numAppliedEvents: 2,
+				numAppliedEvents: 1,
 			},
 		},
 		{
-			name: "hydrates an aggregate from a specific version to version N-1",
+			name: "hydrates an aggregate from a specific version to version N+1",
 			haveEventStore: func() eventstore.Store {
+				events := []*eventstore.WritableEvent{}
+				for _, event := range []estoria.EntityEvent[mockEntity]{
+					mockEntityEventA{A: "a"},
+					mockEntityEventB{B: "b"},
+					mockEntityEventC{C: "c"},
+					mockEntityEventD{D: "d"},
+					mockEntityEventE{E: "e"},
+				} {
+					events = append(events, &eventstore.WritableEvent{
+						ID:   typeid.FromUUID(event.EventType(), uuid.Must(uuid.NewV4())),
+						Data: mustJSONMarshal(event),
+					})
+				}
 				store, _ := memory.NewEventStore()
-				store.AppendStream(context.Background(), aggregateID, []*eventstore.WritableEvent{
-					{ID: typeid.Must(typeid.NewUUID("mockEntityEventA")).(typeid.UUID), Data: mockEntityEventA{}.marshaledData()},
-					{ID: typeid.Must(typeid.NewUUID("mockEntityEventB")).(typeid.UUID), Data: mockEntityEventB{}.marshaledData()},
-					{ID: typeid.Must(typeid.NewUUID("mockEntityEventC")).(typeid.UUID), Data: mockEntityEventC{}.marshaledData()},
-					{ID: typeid.Must(typeid.NewUUID("mockEntityEventD")).(typeid.UUID), Data: mockEntityEventD{}.marshaledData()},
-					{ID: typeid.Must(typeid.NewUUID("mockEntityEventE")).(typeid.UUID), Data: mockEntityEventE{}.marshaledData()},
-				}, eventstore.AppendStreamOptions{})
+				store.AppendStream(context.Background(), aggregateID, events, eventstore.AppendStreamOptions{})
 				return store
 			},
-			haveEntityFactory: func(id uuid.UUID) *mockEntity {
-				return newMockEntity(typeid.FromUUID("mockentity", id), 5)
+			haveStoreOpts: []aggregatestore.EventSourcedStoreOption[mockEntity]{
+				aggregatestore.WithEventTypes(
+					mockEntityEventA{},
+					mockEntityEventB{},
+					mockEntityEventC{},
+					mockEntityEventD{},
+					mockEntityEventE{},
+				),
 			},
-			haveAggregate: func() *aggregatestore.Aggregate[*mockEntity] {
-				agg := &aggregatestore.Aggregate[*mockEntity]{}
-				agg.State().SetEntityAtVersion(newMockEntity(aggregateID, 5), 3)
-				return agg
+			haveAggregate: func() *aggregatestore.Aggregate[mockEntity] {
+				return aggregatestore.NewAggregate(newMockEntity(aggregateID.UUID()), 3)
 			},
-			haveOpts:    aggregatestore.HydrateOptions{ToVersion: 4},
-			wantVersion: 4,
-			wantEntity: &mockEntity{
+			haveHydrateOpts: aggregatestore.HydrateOptions{ToVersion: 4},
+			wantVersion:     4,
+			wantEntity: mockEntity{
 				ID:               aggregateID,
 				numAppliedEvents: 1,
 			},
@@ -819,27 +915,38 @@ func TestEventSourcedStore_HydrateAggregate(t *testing.T) {
 		{
 			name: "hydrates an aggregate from version N-1 to the latest version using default options",
 			haveEventStore: func() eventstore.Store {
+				events := []*eventstore.WritableEvent{}
+				for _, event := range []estoria.EntityEvent[mockEntity]{
+					mockEntityEventA{A: "a"},
+					mockEntityEventB{B: "b"},
+					mockEntityEventC{C: "c"},
+					mockEntityEventD{D: "d"},
+					mockEntityEventE{E: "e"},
+				} {
+					events = append(events, &eventstore.WritableEvent{
+						ID:   typeid.FromUUID(event.EventType(), uuid.Must(uuid.NewV4())),
+						Data: mustJSONMarshal(event),
+					})
+				}
 				store, _ := memory.NewEventStore()
-				store.AppendStream(context.Background(), aggregateID, []*eventstore.WritableEvent{
-					{ID: typeid.Must(typeid.NewUUID("mockEntityEventA")).(typeid.UUID), Data: mockEntityEventA{}.marshaledData()},
-					{ID: typeid.Must(typeid.NewUUID("mockEntityEventB")).(typeid.UUID), Data: mockEntityEventB{}.marshaledData()},
-					{ID: typeid.Must(typeid.NewUUID("mockEntityEventC")).(typeid.UUID), Data: mockEntityEventC{}.marshaledData()},
-					{ID: typeid.Must(typeid.NewUUID("mockEntityEventD")).(typeid.UUID), Data: mockEntityEventD{}.marshaledData()},
-					{ID: typeid.Must(typeid.NewUUID("mockEntityEventE")).(typeid.UUID), Data: mockEntityEventE{}.marshaledData()},
-				}, eventstore.AppendStreamOptions{})
+				store.AppendStream(context.Background(), aggregateID, events, eventstore.AppendStreamOptions{})
 				return store
 			},
-			haveEntityFactory: func(id uuid.UUID) *mockEntity {
-				return newMockEntity(typeid.FromUUID("mockentity", id), 5)
+			haveStoreOpts: []aggregatestore.EventSourcedStoreOption[mockEntity]{
+				aggregatestore.WithEventTypes(
+					mockEntityEventA{},
+					mockEntityEventB{},
+					mockEntityEventC{},
+					mockEntityEventD{},
+					mockEntityEventE{},
+				),
 			},
-			haveAggregate: func() *aggregatestore.Aggregate[*mockEntity] {
-				agg := &aggregatestore.Aggregate[*mockEntity]{}
-				agg.State().SetEntityAtVersion(newMockEntity(aggregateID, 5), 4)
-				return agg
+			haveAggregate: func() *aggregatestore.Aggregate[mockEntity] {
+				return aggregatestore.NewAggregate(newMockEntity(aggregateID.UUID()), 4)
 			},
-			haveOpts:    aggregatestore.HydrateOptions{},
-			wantVersion: 5,
-			wantEntity: &mockEntity{
+			haveHydrateOpts: aggregatestore.HydrateOptions{},
+			wantVersion:     5,
+			wantEntity: mockEntity{
 				ID:               aggregateID,
 				numAppliedEvents: 1,
 			},
@@ -847,27 +954,38 @@ func TestEventSourcedStore_HydrateAggregate(t *testing.T) {
 		{
 			name: "is a no-op when the aggregate is already at the target version",
 			haveEventStore: func() eventstore.Store {
+				events := []*eventstore.WritableEvent{}
+				for _, event := range []estoria.EntityEvent[mockEntity]{
+					mockEntityEventA{A: "a"},
+					mockEntityEventB{B: "b"},
+					mockEntityEventC{C: "c"},
+					mockEntityEventD{D: "d"},
+					mockEntityEventE{E: "e"},
+				} {
+					events = append(events, &eventstore.WritableEvent{
+						ID:   typeid.FromUUID(event.EventType(), uuid.Must(uuid.NewV4())),
+						Data: mustJSONMarshal(event),
+					})
+				}
 				store, _ := memory.NewEventStore()
-				store.AppendStream(context.Background(), aggregateID, []*eventstore.WritableEvent{
-					{ID: typeid.Must(typeid.NewUUID("mockEntityEventA")).(typeid.UUID), Data: mockEntityEventA{}.marshaledData()},
-					{ID: typeid.Must(typeid.NewUUID("mockEntityEventB")).(typeid.UUID), Data: mockEntityEventB{}.marshaledData()},
-					{ID: typeid.Must(typeid.NewUUID("mockEntityEventC")).(typeid.UUID), Data: mockEntityEventC{}.marshaledData()},
-					{ID: typeid.Must(typeid.NewUUID("mockEntityEventD")).(typeid.UUID), Data: mockEntityEventD{}.marshaledData()},
-					{ID: typeid.Must(typeid.NewUUID("mockEntityEventE")).(typeid.UUID), Data: mockEntityEventE{}.marshaledData()},
-				}, eventstore.AppendStreamOptions{})
+				store.AppendStream(context.Background(), aggregateID, events, eventstore.AppendStreamOptions{})
 				return store
 			},
-			haveEntityFactory: func(id uuid.UUID) *mockEntity {
-				return newMockEntity(typeid.FromUUID("mockentity", id), 5)
+			haveStoreOpts: []aggregatestore.EventSourcedStoreOption[mockEntity]{
+				aggregatestore.WithEventTypes(
+					mockEntityEventA{},
+					mockEntityEventB{},
+					mockEntityEventC{},
+					mockEntityEventD{},
+					mockEntityEventE{},
+				),
 			},
-			haveAggregate: func() *aggregatestore.Aggregate[*mockEntity] {
-				agg := &aggregatestore.Aggregate[*mockEntity]{}
-				agg.State().SetEntityAtVersion(newMockEntity(aggregateID, 5), 5)
-				return agg
+			haveAggregate: func() *aggregatestore.Aggregate[mockEntity] {
+				return aggregatestore.NewAggregate(newMockEntity(aggregateID.UUID()), 5)
 			},
-			haveOpts:    aggregatestore.HydrateOptions{ToVersion: 5},
-			wantVersion: 5,
-			wantEntity: &mockEntity{
+			haveHydrateOpts: aggregatestore.HydrateOptions{ToVersion: 5},
+			wantVersion:     5,
+			wantEntity: mockEntity{
 				ID:               aggregateID,
 				numAppliedEvents: 0,
 			},
@@ -875,29 +993,31 @@ func TestEventSourcedStore_HydrateAggregate(t *testing.T) {
 		{
 			name: "returns an error when the event stream reader is nil",
 			haveEventStore: func() eventstore.Store {
+				events := []*eventstore.WritableEvent{}
+				for _, event := range []estoria.EntityEvent[mockEntity]{
+					mockEntityEventA{A: "a"},
+					mockEntityEventB{B: "b"},
+					mockEntityEventC{C: "c"},
+					mockEntityEventD{D: "d"},
+					mockEntityEventE{E: "e"},
+				} {
+					events = append(events, &eventstore.WritableEvent{
+						ID:   typeid.FromUUID(event.EventType(), uuid.Must(uuid.NewV4())),
+						Data: mustJSONMarshal(event),
+					})
+				}
 				store, _ := memory.NewEventStore()
-				store.AppendStream(context.Background(), aggregateID, []*eventstore.WritableEvent{
-					{ID: typeid.Must(typeid.NewUUID("mockEntityEventA")).(typeid.UUID), Data: mockEntityEventA{}.marshaledData()},
-					{ID: typeid.Must(typeid.NewUUID("mockEntityEventB")).(typeid.UUID), Data: mockEntityEventB{}.marshaledData()},
-					{ID: typeid.Must(typeid.NewUUID("mockEntityEventC")).(typeid.UUID), Data: mockEntityEventC{}.marshaledData()},
-					{ID: typeid.Must(typeid.NewUUID("mockEntityEventD")).(typeid.UUID), Data: mockEntityEventD{}.marshaledData()},
-					{ID: typeid.Must(typeid.NewUUID("mockEntityEventE")).(typeid.UUID), Data: mockEntityEventE{}.marshaledData()},
-				}, eventstore.AppendStreamOptions{})
+				store.AppendStream(context.Background(), aggregateID, events, eventstore.AppendStreamOptions{})
 				return store
 			},
-			haveStoreOpts: []aggregatestore.EventSourcedStoreOption[*mockEntity]{
-				aggregatestore.WithEventStreamReader[*mockEntity](nil),
+			haveStoreOpts: []aggregatestore.EventSourcedStoreOption[mockEntity]{
+				aggregatestore.WithEventStreamReader[mockEntity](nil),
 			},
-			haveEntityFactory: func(id uuid.UUID) *mockEntity {
-				return newMockEntity(typeid.FromUUID("mockentity", id), 5)
+			haveAggregate: func() *aggregatestore.Aggregate[mockEntity] {
+				return aggregatestore.NewAggregate(newMockEntity(aggregateID.UUID()), 0)
 			},
-			haveAggregate: func() *aggregatestore.Aggregate[*mockEntity] {
-				agg := &aggregatestore.Aggregate[*mockEntity]{}
-				agg.State().SetEntityAtVersion(newMockEntity(aggregateID, 5), 0)
-				return agg
-			},
-			haveOpts: aggregatestore.HydrateOptions{},
-			wantErr:  errors.New("event store has no event stream reader"),
+			haveHydrateOpts: aggregatestore.HydrateOptions{},
+			wantErr:         errors.New("event store has no event stream reader"),
 		},
 		{
 			name: "returns an error when the aggregate is nil",
@@ -905,14 +1025,11 @@ func TestEventSourcedStore_HydrateAggregate(t *testing.T) {
 				store, _ := memory.NewEventStore()
 				return store
 			},
-			haveEntityFactory: func(id uuid.UUID) *mockEntity {
-				return newMockEntity(typeid.FromUUID("mockentity", id), 5)
-			},
-			haveAggregate: func() *aggregatestore.Aggregate[*mockEntity] {
+			haveAggregate: func() *aggregatestore.Aggregate[mockEntity] {
 				return nil
 			},
-			haveOpts: aggregatestore.HydrateOptions{},
-			wantErr:  aggregatestore.ErrNilAggregate,
+			haveHydrateOpts: aggregatestore.HydrateOptions{},
+			wantErr:         aggregatestore.ErrNilAggregate,
 		},
 		{
 			name: "returns an error when the target version is invalid",
@@ -920,16 +1037,11 @@ func TestEventSourcedStore_HydrateAggregate(t *testing.T) {
 				store, _ := memory.NewEventStore()
 				return store
 			},
-			haveEntityFactory: func(id uuid.UUID) *mockEntity {
-				return newMockEntity(typeid.FromUUID("mockentity", id), 5)
+			haveAggregate: func() *aggregatestore.Aggregate[mockEntity] {
+				return aggregatestore.NewAggregate(newMockEntity(aggregateID.UUID()), 5)
 			},
-			haveAggregate: func() *aggregatestore.Aggregate[*mockEntity] {
-				agg := &aggregatestore.Aggregate[*mockEntity]{}
-				agg.State().SetEntityAtVersion(newMockEntity(aggregateID, 5), 5)
-				return agg
-			},
-			haveOpts: aggregatestore.HydrateOptions{ToVersion: -1},
-			wantErr:  errors.New("invalid target version"),
+			haveHydrateOpts: aggregatestore.HydrateOptions{ToVersion: -1},
+			wantErr:         errors.New("invalid target version"),
 		},
 		{
 			name: "returns an error when the aggregate is at a more recent version than the target version",
@@ -937,16 +1049,11 @@ func TestEventSourcedStore_HydrateAggregate(t *testing.T) {
 				store, _ := memory.NewEventStore()
 				return store
 			},
-			haveEntityFactory: func(id uuid.UUID) *mockEntity {
-				return newMockEntity(typeid.FromUUID("mockentity", id), 5)
+			haveAggregate: func() *aggregatestore.Aggregate[mockEntity] {
+				return aggregatestore.NewAggregate(newMockEntity(aggregateID.UUID()), 5)
 			},
-			haveAggregate: func() *aggregatestore.Aggregate[*mockEntity] {
-				agg := &aggregatestore.Aggregate[*mockEntity]{}
-				agg.State().SetEntityAtVersion(newMockEntity(aggregateID, 5), 5)
-				return agg
-			},
-			haveOpts: aggregatestore.HydrateOptions{ToVersion: 3},
-			wantErr:  errors.New("aggregate is at more recent version (5) than requested version (3)"),
+			haveHydrateOpts: aggregatestore.HydrateOptions{ToVersion: 3},
+			wantErr:         errors.New("aggregate is at more recent version (5) than requested version (3)"),
 		},
 		{
 			name: "returns an error when the event stream is not found",
@@ -954,181 +1061,159 @@ func TestEventSourcedStore_HydrateAggregate(t *testing.T) {
 				store, _ := memory.NewEventStore()
 				return store
 			},
-			haveEntityFactory: func(id uuid.UUID) *mockEntity {
-				return newMockEntity(typeid.FromUUID("mockentity", id), 5)
-			},
-			haveAggregate: func() *aggregatestore.Aggregate[*mockEntity] {
-				agg := &aggregatestore.Aggregate[*mockEntity]{}
-				agg.State().SetEntityAtVersion(newMockEntity(aggregateID, 5), 0)
-				return agg
+			haveAggregate: func() *aggregatestore.Aggregate[mockEntity] {
+				return aggregatestore.NewAggregate(newMockEntity(aggregateID.UUID()), 0)
 			},
 			wantErr: errors.New("aggregate not found"),
 		},
 		{
 			name: "returns an error when unable to obtain an event stream iterator",
 			haveEventStore: func() eventstore.Store {
+				events := []*eventstore.WritableEvent{}
+				for _, event := range []estoria.EntityEvent[mockEntity]{
+					mockEntityEventA{A: "a"},
+					mockEntityEventB{B: "b"},
+					mockEntityEventC{C: "c"},
+					mockEntityEventD{D: "d"},
+					mockEntityEventE{E: "e"},
+				} {
+					events = append(events, &eventstore.WritableEvent{
+						ID:   typeid.FromUUID(event.EventType(), uuid.Must(uuid.NewV4())),
+						Data: mustJSONMarshal(event),
+					})
+				}
 				store, _ := memory.NewEventStore()
-				store.AppendStream(context.Background(), aggregateID, []*eventstore.WritableEvent{
-					{ID: typeid.Must(typeid.NewUUID("mockEntityEventA")).(typeid.UUID), Data: mockEntityEventA{}.marshaledData()},
-					{ID: typeid.Must(typeid.NewUUID("mockEntityEventB")).(typeid.UUID), Data: mockEntityEventB{}.marshaledData()},
-					{ID: typeid.Must(typeid.NewUUID("mockEntityEventC")).(typeid.UUID), Data: mockEntityEventC{}.marshaledData()},
-					{ID: typeid.Must(typeid.NewUUID("mockEntityEventD")).(typeid.UUID), Data: mockEntityEventD{}.marshaledData()},
-					{ID: typeid.Must(typeid.NewUUID("mockEntityEventE")).(typeid.UUID), Data: mockEntityEventE{}.marshaledData()},
-				}, eventstore.AppendStreamOptions{})
+				store.AppendStream(context.Background(), aggregateID, events, eventstore.AppendStreamOptions{})
 				return store
 			},
-			haveStoreOpts: []aggregatestore.EventSourcedStoreOption[*mockEntity]{
-				aggregatestore.WithEventStreamReader[*mockEntity](mockStreamReader{
+			haveStoreOpts: []aggregatestore.EventSourcedStoreOption[mockEntity]{
+				aggregatestore.WithEventStreamReader[mockEntity](mockStreamReader{
 					readStreamErr: errors.New("mock error"),
 				}),
 			},
-			haveEntityFactory: func(id uuid.UUID) *mockEntity {
-				return newMockEntity(typeid.FromUUID("mockentity", id), 5)
+			haveAggregate: func() *aggregatestore.Aggregate[mockEntity] {
+				return aggregatestore.NewAggregate(newMockEntity(aggregateID.UUID()), 0)
 			},
-			haveAggregate: func() *aggregatestore.Aggregate[*mockEntity] {
-				agg := &aggregatestore.Aggregate[*mockEntity]{}
-				agg.State().SetEntityAtVersion(newMockEntity(aggregateID, 5), 0)
-				return agg
-			},
-			haveOpts: aggregatestore.HydrateOptions{},
-			wantErr:  errors.New("reading event stream: mock error"),
+			haveHydrateOpts: aggregatestore.HydrateOptions{},
+			wantErr:         errors.New("reading event stream: mock error"),
 		},
 		{
 			name: "returns an error when unable to read an event from the event stream",
 			haveEventStore: func() eventstore.Store {
+				events := []*eventstore.WritableEvent{}
+				for _, event := range []estoria.EntityEvent[mockEntity]{
+					mockEntityEventA{A: "a"},
+					mockEntityEventB{B: "b"},
+					mockEntityEventC{C: "c"},
+					mockEntityEventD{D: "d"},
+					mockEntityEventE{E: "e"},
+				} {
+					events = append(events, &eventstore.WritableEvent{
+						ID:   typeid.FromUUID(event.EventType(), uuid.Must(uuid.NewV4())),
+						Data: mustJSONMarshal(event),
+					})
+				}
 				store, _ := memory.NewEventStore()
-				store.AppendStream(context.Background(), aggregateID, []*eventstore.WritableEvent{
-					{ID: typeid.Must(typeid.NewUUID("mockEntityEventA")).(typeid.UUID), Data: mockEntityEventA{}.marshaledData()},
-					{ID: typeid.Must(typeid.NewUUID("mockEntityEventB")).(typeid.UUID), Data: mockEntityEventB{}.marshaledData()},
-					{ID: typeid.Must(typeid.NewUUID("mockEntityEventC")).(typeid.UUID), Data: mockEntityEventC{}.marshaledData()},
-					{ID: typeid.Must(typeid.NewUUID("mockEntityEventD")).(typeid.UUID), Data: mockEntityEventD{}.marshaledData()},
-					{ID: typeid.Must(typeid.NewUUID("mockEntityEventE")).(typeid.UUID), Data: mockEntityEventE{}.marshaledData()},
-				}, eventstore.AppendStreamOptions{})
+				store.AppendStream(context.Background(), aggregateID, events, eventstore.AppendStreamOptions{})
 				return store
 			},
-			haveEntityFactory: func(id uuid.UUID) *mockEntity {
-				return newMockEntity(typeid.FromUUID("mockentity", id), 5)
-			},
-			haveStoreOpts: []aggregatestore.EventSourcedStoreOption[*mockEntity]{
-				aggregatestore.WithEventStreamReader[*mockEntity](mockStreamReader{
+			haveStoreOpts: []aggregatestore.EventSourcedStoreOption[mockEntity]{
+				aggregatestore.WithEventStreamReader[mockEntity](mockStreamReader{
 					readStreamIterator: mockStreamIterator{
 						nextErr: errors.New("mock error"),
 					},
 				}),
 			},
-			haveAggregate: func() *aggregatestore.Aggregate[*mockEntity] {
-				agg := &aggregatestore.Aggregate[*mockEntity]{}
-				agg.State().SetEntityAtVersion(newMockEntity(aggregateID, 5), 0)
-				return agg
+			haveAggregate: func() *aggregatestore.Aggregate[mockEntity] {
+				return aggregatestore.NewAggregate(newMockEntity(aggregateID.UUID()), 0)
 			},
 			wantErr: errors.New("reading event: mock error"),
 		},
 		{
 			name: "returns an error when encountering an unregistered event type",
 			haveEventStore: func() eventstore.Store {
+				events := []*eventstore.WritableEvent{}
+				for _, event := range []estoria.EntityEvent[mockEntity]{
+					mockEntityEventA{A: "a"},
+				} {
+					events = append(events, &eventstore.WritableEvent{
+						ID:   typeid.FromUUID(event.EventType(), uuid.Must(uuid.NewV4())),
+						Data: mustJSONMarshal(event),
+					})
+				}
 				store, _ := memory.NewEventStore()
-				store.AppendStream(context.Background(), aggregateID, []*eventstore.WritableEvent{
-					{ID: typeid.Must(typeid.NewUUID("mockEntityEventA")).(typeid.UUID), Data: mockEntityEventA{}.marshaledData()},
-					{ID: typeid.Must(typeid.NewUUID("mockEntityEventB")).(typeid.UUID), Data: mockEntityEventB{}.marshaledData()},
-					{ID: typeid.Must(typeid.NewUUID("mockEntityEventC")).(typeid.UUID), Data: mockEntityEventC{}.marshaledData()},
-					{ID: typeid.Must(typeid.NewUUID("mockEntityEventD")).(typeid.UUID), Data: mockEntityEventD{}.marshaledData()},
-					{ID: typeid.Must(typeid.NewUUID("mockEntityEventE")).(typeid.UUID), Data: mockEntityEventE{}.marshaledData()},
-				}, eventstore.AppendStreamOptions{})
+				store.AppendStream(context.Background(), aggregateID, events, eventstore.AppendStreamOptions{})
 				return store
 			},
-			haveEntityFactory: func(id uuid.UUID) *mockEntity {
-				return newMockEntity(typeid.FromUUID("mockentity", id), 3)
+			haveAggregate: func() *aggregatestore.Aggregate[mockEntity] {
+				return aggregatestore.NewAggregate(newMockEntity(aggregateID.UUID()), 0)
 			},
-			haveAggregate: func() *aggregatestore.Aggregate[*mockEntity] {
-				agg := &aggregatestore.Aggregate[*mockEntity]{}
-				agg.State().SetEntityAtVersion(newMockEntity(aggregateID, 3), 0)
-				return agg
-			},
-			wantErr: errors.New("obtaining entity prototype: no prototype registered for event type mockEntityEventD"),
+			wantErr: errors.New("obtaining entity prototype: no prototype registered for event type mockEntityEventA"),
 		},
 		{
 			name: "returns an error when unable to unmarshal an event store event",
 			haveEventStore: func() eventstore.Store {
+				events := []*eventstore.WritableEvent{}
+				for _, event := range []estoria.EntityEvent[mockEntity]{
+					mockEntityEventA{A: "a"},
+				} {
+					events = append(events, &eventstore.WritableEvent{
+						ID:   typeid.FromUUID(event.EventType(), uuid.Must(uuid.NewV4())),
+						Data: mustJSONMarshal(event),
+					})
+				}
 				store, _ := memory.NewEventStore()
-				store.AppendStream(context.Background(), aggregateID, []*eventstore.WritableEvent{
-					{ID: typeid.Must(typeid.NewUUID("mockEntityEventA")).(typeid.UUID), Data: mockEntityEventA{}.marshaledData()},
-					{ID: typeid.Must(typeid.NewUUID("mockEntityEventB")).(typeid.UUID), Data: mockEntityEventB{}.marshaledData()},
-					{ID: typeid.Must(typeid.NewUUID("mockEntityEventC")).(typeid.UUID), Data: mockEntityEventC{}.marshaledData()},
-					{ID: typeid.Must(typeid.NewUUID("mockEntityEventD")).(typeid.UUID), Data: mockEntityEventD{}.marshaledData()},
-					{ID: typeid.Must(typeid.NewUUID("mockEntityEventE")).(typeid.UUID), Data: mockEntityEventE{}.marshaledData()},
-				}, eventstore.AppendStreamOptions{})
+				store.AppendStream(context.Background(), aggregateID, events, eventstore.AppendStreamOptions{})
 				return store
 			},
-			haveEntityFactory: func(id uuid.UUID) *mockEntity {
-				return newMockEntity(typeid.FromUUID("mockentity", id), 5)
+			haveStoreOpts: []aggregatestore.EventSourcedStoreOption[mockEntity]{
+				aggregatestore.WithEntityEventMarshaler(
+					mockEventMarshaler[mockEntity]{
+						unmarshalErr: errors.New("mock error"),
+					},
+				),
+				aggregatestore.WithEventTypes(
+					mockEntityEventA{},
+				),
 			},
-			haveStoreOpts: []aggregatestore.EventSourcedStoreOption[*mockEntity]{
-				aggregatestore.WithEventMarshaler[*mockEntity](mockEventMarshaler{
-					unmarshalErr: errors.New("mock error"),
-				}),
-			},
-			haveAggregate: func() *aggregatestore.Aggregate[*mockEntity] {
-				agg := &aggregatestore.Aggregate[*mockEntity]{}
-				agg.State().SetEntityAtVersion(newMockEntity(aggregateID, 5), 0)
-				return agg
+			haveAggregate: func() *aggregatestore.Aggregate[mockEntity] {
+				return aggregatestore.NewAggregate(newMockEntity(aggregateID.UUID()), 0)
 			},
 			wantErr: errors.New("unmarshaling event data: mock error"),
 		},
 		{
-			name: "returns an error when encountering an unexpected end of unapplied events",
-			haveEventStore: func() eventstore.Store {
-				store, _ := memory.NewEventStore()
-				store.AppendStream(context.Background(), aggregateID, []*eventstore.WritableEvent{
-					{ID: typeid.Must(typeid.NewUUID("mockEntityEventA")).(typeid.UUID), Data: mockEntityEventA{}.marshaledData()},
-					{ID: typeid.Must(typeid.NewUUID("mockEntityEventB")).(typeid.UUID), Data: mockEntityEventB{}.marshaledData()},
-					{ID: typeid.Must(typeid.NewUUID("mockEntityEventC")).(typeid.UUID), Data: mockEntityEventC{}.marshaledData()},
-					{ID: typeid.Must(typeid.NewUUID("mockEntityEventD")).(typeid.UUID), Data: mockEntityEventD{}.marshaledData()},
-					{ID: typeid.Must(typeid.NewUUID("mockEntityEventE")).(typeid.UUID), Data: mockEntityEventE{}.marshaledData()},
-				}, eventstore.AppendStreamOptions{})
-				return store
-			},
-			haveEntityFactory: func(id uuid.UUID) *mockEntity {
-				entity := newMockEntity(typeid.FromUUID("mockentity", id), 5)
-				entity.applyEventErr = aggregatestore.ErrNoUnappliedEvents
-				return entity
-			},
-			haveAggregate: func() *aggregatestore.Aggregate[*mockEntity] {
-				agg := &aggregatestore.Aggregate[*mockEntity]{}
-				agg.State().SetEntityAtVersion(func() *mockEntity {
-					entity := newMockEntity(aggregateID, 5)
-					entity.applyEventErr = aggregatestore.ErrNoUnappliedEvents
-					return entity
-				}(), 0)
-				return agg
-			},
-			wantErr: errors.New("applying aggregate event: unexpected end of unapplied events while hydrating aggregate"),
-		},
-		{
 			name: "returns an error when unable to apply an event to the aggregate",
 			haveEventStore: func() eventstore.Store {
+				events := []*eventstore.WritableEvent{}
+				for _, event := range []estoria.EntityEvent[mockEntity]{
+					mockEntityEventA{A: "a"},
+					mockEntityEventB{B: "b"},
+					mockEntityEventC{C: "c"},
+					mockEntityEventD{D: "d"},
+					mockEntityEventF{F: "f"},
+					mockEntityEventE{E: "e"},
+				} {
+					events = append(events, &eventstore.WritableEvent{
+						ID:   typeid.FromUUID(event.EventType(), uuid.Must(uuid.NewV4())),
+						Data: mustJSONMarshal(event),
+					})
+				}
 				store, _ := memory.NewEventStore()
-				store.AppendStream(context.Background(), aggregateID, []*eventstore.WritableEvent{
-					{ID: typeid.Must(typeid.NewUUID("mockEntityEventA")).(typeid.UUID), Data: mockEntityEventA{}.marshaledData()},
-					{ID: typeid.Must(typeid.NewUUID("mockEntityEventB")).(typeid.UUID), Data: mockEntityEventB{}.marshaledData()},
-					{ID: typeid.Must(typeid.NewUUID("mockEntityEventC")).(typeid.UUID), Data: mockEntityEventC{}.marshaledData()},
-					{ID: typeid.Must(typeid.NewUUID("mockEntityEventD")).(typeid.UUID), Data: mockEntityEventD{}.marshaledData()},
-					{ID: typeid.Must(typeid.NewUUID("mockEntityEventE")).(typeid.UUID), Data: mockEntityEventE{}.marshaledData()},
-				}, eventstore.AppendStreamOptions{})
+				store.AppendStream(context.Background(), aggregateID, events, eventstore.AppendStreamOptions{})
 				return store
 			},
-			haveEntityFactory: func(id uuid.UUID) *mockEntity {
-				entity := newMockEntity(typeid.FromUUID("mockentity", id), 5)
-				entity.applyEventErr = errors.New("mock error")
-				return entity
+			haveStoreOpts: []aggregatestore.EventSourcedStoreOption[mockEntity]{
+				aggregatestore.WithEventTypes(
+					mockEntityEventA{},
+					mockEntityEventB{},
+					mockEntityEventC{},
+					mockEntityEventD{},
+					mockEntityEventE{},
+					mockEntityEventF{},
+				),
 			},
-			haveAggregate: func() *aggregatestore.Aggregate[*mockEntity] {
-				agg := &aggregatestore.Aggregate[*mockEntity]{}
-				agg.State().SetEntityAtVersion(func() *mockEntity {
-					entity := newMockEntity(aggregateID, 5)
-					entity.applyEventErr = errors.New("mock error")
-					return entity
-				}(), 0)
-				return agg
+			haveAggregate: func() *aggregatestore.Aggregate[mockEntity] {
+				return aggregatestore.NewAggregate(newMockEntity(aggregateID.UUID()), 0)
 			},
 			wantErr: errors.New("applying aggregate event: applying event: mock error"),
 		},
@@ -1136,7 +1221,7 @@ func TestEventSourcedStore_HydrateAggregate(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			store, err := aggregatestore.NewEventSourcedStore(tt.haveEventStore(), tt.haveEntityFactory, tt.haveStoreOpts...)
+			store, err := aggregatestore.NewEventSourcedStore(tt.haveEventStore(), newMockEntity, tt.haveStoreOpts...)
 			if err != nil {
 				t.Errorf("unexpected error creating store: %v", err)
 			}
@@ -1147,7 +1232,7 @@ func TestEventSourcedStore_HydrateAggregate(t *testing.T) {
 				hadID = aggregate.ID()
 			}
 
-			gotErr := store.Hydrate(context.Background(), aggregate, tt.haveOpts)
+			gotErr := store.Hydrate(context.Background(), aggregate, tt.haveHydrateOpts)
 
 			if tt.wantErr != nil {
 				if gotErr == nil || gotErr.Error() != tt.wantErr.Error() {
@@ -1170,10 +1255,6 @@ func TestEventSourcedStore_HydrateAggregate(t *testing.T) {
 			}
 			// aggregate has a valid entity
 			gotEntity := aggregate.Entity()
-			if gotEntity == nil {
-				t.Errorf("unexpected nil entity")
-				return
-			}
 			// entity has the correct ID
 			if gotEntity.ID.String() != tt.wantEntity.ID.String() {
 				t.Errorf("want entity ID %s, got %s", tt.wantEntity.ID.String(), gotEntity.ID.String())
@@ -1191,15 +1272,14 @@ func TestEventSourcedStore_SaveAggregate(t *testing.T) {
 
 	aggregateID := typeid.Must(typeid.NewUUID("mockentity")).(typeid.UUID)
 	for _, tt := range []struct {
-		name              string
-		haveEventStore    func() eventstore.Store
-		haveEntityFactory func(id uuid.UUID) *mockEntity
-		haveStoreOpts     []aggregatestore.EventSourcedStoreOption[*mockEntity]
-		haveAggregate     func() *aggregatestore.Aggregate[*mockEntity]
-		haveOpts          aggregatestore.SaveOptions
-		wantVersion       int64
-		wantEntity        *mockEntity
-		wantErr           error
+		name           string
+		haveEventStore func() eventstore.Store
+		haveStoreOpts  []aggregatestore.EventSourcedStoreOption[mockEntity]
+		haveAggregate  func() *aggregatestore.Aggregate[mockEntity]
+		haveOpts       aggregatestore.SaveOptions
+		wantVersion    int64
+		wantEntity     mockEntity
+		wantErr        error
 	}{
 		{
 			name: "saves a new aggregate with a single event using default options",
@@ -1207,22 +1287,13 @@ func TestEventSourcedStore_SaveAggregate(t *testing.T) {
 				store, _ := memory.NewEventStore()
 				return store
 			},
-			haveEntityFactory: func(id uuid.UUID) *mockEntity {
-				return newMockEntity(typeid.FromUUID("mockentity", id), 1)
-			},
-			haveAggregate: func() *aggregatestore.Aggregate[*mockEntity] {
-				agg := &aggregatestore.Aggregate[*mockEntity]{}
-				agg.State().SetEntityAtVersion(newMockEntity(aggregateID, 1), 0)
-				agg.Append(&aggregatestore.AggregateEvent{
-					ID:          typeid.Must(typeid.NewUUID("mockEntityEventA")).(typeid.UUID),
-					Version:     1,
-					Timestamp:   time.Now(),
-					EntityEvent: mockEntityEventA{},
-				})
+			haveAggregate: func() *aggregatestore.Aggregate[mockEntity] {
+				agg := aggregatestore.NewAggregate(newMockEntity(aggregateID.UUID()), 0)
+				agg.Append(mockEntityEventA{})
 				return agg
 			},
 			wantVersion: 1,
-			wantEntity: &mockEntity{
+			wantEntity: mockEntity{
 				ID:               aggregateID,
 				numAppliedEvents: 1,
 			},
@@ -1233,36 +1304,17 @@ func TestEventSourcedStore_SaveAggregate(t *testing.T) {
 				store, _ := memory.NewEventStore()
 				return store
 			},
-			haveEntityFactory: func(id uuid.UUID) *mockEntity {
-				return newMockEntity(typeid.FromUUID("mockentity", id), 1)
-			},
-			haveAggregate: func() *aggregatestore.Aggregate[*mockEntity] {
-				agg := &aggregatestore.Aggregate[*mockEntity]{}
-				agg.State().SetEntityAtVersion(newMockEntity(aggregateID, 3), 0)
+			haveAggregate: func() *aggregatestore.Aggregate[mockEntity] {
+				agg := aggregatestore.NewAggregate(newMockEntity(aggregateID.UUID()), 0)
 				agg.Append(
-					&aggregatestore.AggregateEvent{
-						ID:          typeid.Must(typeid.NewUUID("mockEntityEventA")).(typeid.UUID),
-						Version:     1,
-						Timestamp:   time.Now(),
-						EntityEvent: mockEntityEventA{},
-					},
-					&aggregatestore.AggregateEvent{
-						ID:          typeid.Must(typeid.NewUUID("mockEntityEventB")).(typeid.UUID),
-						Version:     2,
-						Timestamp:   time.Now(),
-						EntityEvent: mockEntityEventB{},
-					},
-					&aggregatestore.AggregateEvent{
-						ID:          typeid.Must(typeid.NewUUID("mockEntityEventC")).(typeid.UUID),
-						Version:     3,
-						Timestamp:   time.Now(),
-						EntityEvent: mockEntityEventC{},
-					},
+					mockEntityEventA{},
+					mockEntityEventB{},
+					mockEntityEventC{},
 				)
 				return agg
 			},
 			wantVersion: 3,
-			wantEntity: &mockEntity{
+			wantEntity: mockEntity{
 				ID:               aggregateID,
 				numAppliedEvents: 3,
 			},
@@ -1270,32 +1322,30 @@ func TestEventSourcedStore_SaveAggregate(t *testing.T) {
 		{
 			name: "saves an existing aggregate with a single new event using default options",
 			haveEventStore: func() eventstore.Store {
+				events := []*eventstore.WritableEvent{}
+				for _, event := range []estoria.EntityEvent[mockEntity]{
+					mockEntityEventA{A: "a"},
+					mockEntityEventB{B: "b"},
+					mockEntityEventC{C: "c"},
+				} {
+					events = append(events, &eventstore.WritableEvent{
+						ID:   typeid.FromUUID(event.EventType(), uuid.Must(uuid.NewV4())),
+						Data: mustJSONMarshal(event),
+					})
+				}
 				store, _ := memory.NewEventStore()
-				store.AppendStream(context.Background(), aggregateID, []*eventstore.WritableEvent{
-					{ID: typeid.Must(typeid.NewUUID("mockEntityEventA")).(typeid.UUID), Data: mockEntityEventA{}.marshaledData()},
-					{ID: typeid.Must(typeid.NewUUID("mockEntityEventB")).(typeid.UUID), Data: mockEntityEventB{}.marshaledData()},
-					{ID: typeid.Must(typeid.NewUUID("mockEntityEventC")).(typeid.UUID), Data: mockEntityEventC{}.marshaledData()},
-				}, eventstore.AppendStreamOptions{})
+				store.AppendStream(context.Background(), aggregateID, events, eventstore.AppendStreamOptions{})
 				return store
 			},
-			haveEntityFactory: func(id uuid.UUID) *mockEntity {
-				return newMockEntity(typeid.FromUUID("mockentity", id), 5)
-			},
-			haveAggregate: func() *aggregatestore.Aggregate[*mockEntity] {
-				agg := &aggregatestore.Aggregate[*mockEntity]{}
-				agg.State().SetEntityAtVersion(newMockEntity(aggregateID, 5), 3)
+			haveAggregate: func() *aggregatestore.Aggregate[mockEntity] {
+				agg := aggregatestore.NewAggregate(newMockEntity(aggregateID.UUID()), 3)
 				agg.Append(
-					&aggregatestore.AggregateEvent{
-						ID:          typeid.Must(typeid.NewUUID("mockEntityEventD")).(typeid.UUID),
-						Version:     4,
-						Timestamp:   time.Now(),
-						EntityEvent: mockEntityEventD{},
-					},
+					mockEntityEventD{},
 				)
 				return agg
 			},
 			wantVersion: 4,
-			wantEntity: &mockEntity{
+			wantEntity: mockEntity{
 				ID:               aggregateID,
 				numAppliedEvents: 1,
 			},
@@ -1303,44 +1353,32 @@ func TestEventSourcedStore_SaveAggregate(t *testing.T) {
 		{
 			name: "saves an existing aggregate with multiple new events using default options",
 			haveEventStore: func() eventstore.Store {
+				events := []*eventstore.WritableEvent{}
+				for _, event := range []estoria.EntityEvent[mockEntity]{
+					mockEntityEventA{A: "a"},
+					mockEntityEventB{B: "b"},
+					mockEntityEventC{C: "c"},
+				} {
+					events = append(events, &eventstore.WritableEvent{
+						ID:   typeid.FromUUID(event.EventType(), uuid.Must(uuid.NewV4())),
+						Data: mustJSONMarshal(event),
+					})
+				}
 				store, _ := memory.NewEventStore()
-				store.AppendStream(context.Background(), aggregateID, []*eventstore.WritableEvent{
-					{ID: typeid.Must(typeid.NewUUID("mockEntityEventA")).(typeid.UUID), Data: mockEntityEventA{}.marshaledData()},
-					{ID: typeid.Must(typeid.NewUUID("mockEntityEventB")).(typeid.UUID), Data: mockEntityEventB{}.marshaledData()},
-					{ID: typeid.Must(typeid.NewUUID("mockEntityEventC")).(typeid.UUID), Data: mockEntityEventC{}.marshaledData()},
-				}, eventstore.AppendStreamOptions{})
+				store.AppendStream(context.Background(), aggregateID, events, eventstore.AppendStreamOptions{})
 				return store
 			},
-			haveEntityFactory: func(id uuid.UUID) *mockEntity {
-				return newMockEntity(typeid.FromUUID("mockentity", id), 5)
-			},
-			haveAggregate: func() *aggregatestore.Aggregate[*mockEntity] {
-				agg := &aggregatestore.Aggregate[*mockEntity]{}
-				agg.State().SetEntityAtVersion(newMockEntity(aggregateID, 5), 3)
+			haveAggregate: func() *aggregatestore.Aggregate[mockEntity] {
+				agg := aggregatestore.NewAggregate(newMockEntity(aggregateID.UUID()), 3)
 				agg.Append(
-					&aggregatestore.AggregateEvent{
-						ID:          typeid.Must(typeid.NewUUID("mockEntityEventD")).(typeid.UUID),
-						Version:     4,
-						Timestamp:   time.Now(),
-						EntityEvent: mockEntityEventD{},
-					},
-					&aggregatestore.AggregateEvent{
-						ID:          typeid.Must(typeid.NewUUID("mockEntityEventD")).(typeid.UUID),
-						Version:     5,
-						Timestamp:   time.Now(),
-						EntityEvent: mockEntityEventD{},
-					},
-					&aggregatestore.AggregateEvent{
-						ID:          typeid.Must(typeid.NewUUID("mockEntityEventE")).(typeid.UUID),
-						Version:     6,
-						Timestamp:   time.Now(),
-						EntityEvent: mockEntityEventE{},
-					},
+					mockEntityEventD{},
+					mockEntityEventD{},
+					mockEntityEventE{},
 				)
 				return agg
 			},
 			wantVersion: 6,
-			wantEntity: &mockEntity{
+			wantEntity: mockEntity{
 				ID:               aggregateID,
 				numAppliedEvents: 3,
 			},
@@ -1348,24 +1386,26 @@ func TestEventSourcedStore_SaveAggregate(t *testing.T) {
 		{
 			name: "is a no-op when saving an aggregate with no unsaved events",
 			haveEventStore: func() eventstore.Store {
+				events := []*eventstore.WritableEvent{}
+				for _, event := range []estoria.EntityEvent[mockEntity]{
+					mockEntityEventA{A: "a"},
+					mockEntityEventB{B: "b"},
+					mockEntityEventC{C: "c"},
+				} {
+					events = append(events, &eventstore.WritableEvent{
+						ID:   typeid.FromUUID(event.EventType(), uuid.Must(uuid.NewV4())),
+						Data: mustJSONMarshal(event),
+					})
+				}
 				store, _ := memory.NewEventStore()
-				store.AppendStream(context.Background(), aggregateID, []*eventstore.WritableEvent{
-					{ID: typeid.Must(typeid.NewUUID("mockEntityEventA")).(typeid.UUID), Data: mockEntityEventA{}.marshaledData()},
-					{ID: typeid.Must(typeid.NewUUID("mockEntityEventB")).(typeid.UUID), Data: mockEntityEventB{}.marshaledData()},
-					{ID: typeid.Must(typeid.NewUUID("mockEntityEventC")).(typeid.UUID), Data: mockEntityEventC{}.marshaledData()},
-				}, eventstore.AppendStreamOptions{})
+				store.AppendStream(context.Background(), aggregateID, events, eventstore.AppendStreamOptions{})
 				return store
 			},
-			haveEntityFactory: func(id uuid.UUID) *mockEntity {
-				return newMockEntity(typeid.FromUUID("mockentity", id), 5)
-			},
-			haveAggregate: func() *aggregatestore.Aggregate[*mockEntity] {
-				agg := &aggregatestore.Aggregate[*mockEntity]{}
-				agg.State().SetEntityAtVersion(newMockEntity(aggregateID, 5), 3)
-				return agg
+			haveAggregate: func() *aggregatestore.Aggregate[mockEntity] {
+				return aggregatestore.NewAggregate(newMockEntity(aggregateID.UUID()), 3)
 			},
 			wantVersion: 3,
-			wantEntity: &mockEntity{
+			wantEntity: mockEntity{
 				ID:               aggregateID,
 				numAppliedEvents: 0,
 			},
@@ -1373,45 +1413,33 @@ func TestEventSourcedStore_SaveAggregate(t *testing.T) {
 		{
 			name: "skips applying events to the aggregate after saving when the SkipApply option is true",
 			haveEventStore: func() eventstore.Store {
+				events := []*eventstore.WritableEvent{}
+				for _, event := range []estoria.EntityEvent[mockEntity]{
+					mockEntityEventA{A: "a"},
+					mockEntityEventB{B: "b"},
+					mockEntityEventC{C: "c"},
+				} {
+					events = append(events, &eventstore.WritableEvent{
+						ID:   typeid.FromUUID(event.EventType(), uuid.Must(uuid.NewV4())),
+						Data: mustJSONMarshal(event),
+					})
+				}
 				store, _ := memory.NewEventStore()
-				store.AppendStream(context.Background(), aggregateID, []*eventstore.WritableEvent{
-					{ID: typeid.Must(typeid.NewUUID("mockEntityEventA")).(typeid.UUID), Data: mockEntityEventA{}.marshaledData()},
-					{ID: typeid.Must(typeid.NewUUID("mockEntityEventB")).(typeid.UUID), Data: mockEntityEventB{}.marshaledData()},
-					{ID: typeid.Must(typeid.NewUUID("mockEntityEventC")).(typeid.UUID), Data: mockEntityEventC{}.marshaledData()},
-				}, eventstore.AppendStreamOptions{})
+				store.AppendStream(context.Background(), aggregateID, events, eventstore.AppendStreamOptions{})
 				return store
 			},
-			haveEntityFactory: func(id uuid.UUID) *mockEntity {
-				return newMockEntity(typeid.FromUUID("mockentity", id), 5)
-			},
-			haveAggregate: func() *aggregatestore.Aggregate[*mockEntity] {
-				agg := &aggregatestore.Aggregate[*mockEntity]{}
-				agg.State().SetEntityAtVersion(newMockEntity(aggregateID, 5), 3)
+			haveAggregate: func() *aggregatestore.Aggregate[mockEntity] {
+				agg := aggregatestore.NewAggregate(newMockEntity(aggregateID.UUID()), 3)
 				agg.Append(
-					&aggregatestore.AggregateEvent{
-						ID:          typeid.Must(typeid.NewUUID("mockEntityEventD")).(typeid.UUID),
-						Version:     4,
-						Timestamp:   time.Now(),
-						EntityEvent: mockEntityEventD{},
-					},
-					&aggregatestore.AggregateEvent{
-						ID:          typeid.Must(typeid.NewUUID("mockEntityEventD")).(typeid.UUID),
-						Version:     5,
-						Timestamp:   time.Now(),
-						EntityEvent: mockEntityEventD{},
-					},
-					&aggregatestore.AggregateEvent{
-						ID:          typeid.Must(typeid.NewUUID("mockEntityEventE")).(typeid.UUID),
-						Version:     6,
-						Timestamp:   time.Now(),
-						EntityEvent: mockEntityEventE{},
-					},
+					mockEntityEventD{},
+					mockEntityEventD{},
+					mockEntityEventE{},
 				)
 				return agg
 			},
 			haveOpts:    aggregatestore.SaveOptions{SkipApply: true},
 			wantVersion: 3,
-			wantEntity: &mockEntity{
+			wantEntity: mockEntity{
 				ID:               aggregateID,
 				numAppliedEvents: 0,
 			},
@@ -1422,10 +1450,7 @@ func TestEventSourcedStore_SaveAggregate(t *testing.T) {
 				store, _ := memory.NewEventStore()
 				return store
 			},
-			haveEntityFactory: func(id uuid.UUID) *mockEntity {
-				return newMockEntity(typeid.FromUUID("mockentity", id), 5)
-			},
-			haveAggregate: func() *aggregatestore.Aggregate[*mockEntity] {
+			haveAggregate: func() *aggregatestore.Aggregate[mockEntity] {
 				return nil
 			},
 			wantErr: aggregatestore.ErrNilAggregate,
@@ -1436,16 +1461,11 @@ func TestEventSourcedStore_SaveAggregate(t *testing.T) {
 				store, _ := memory.NewEventStore()
 				return store
 			},
-			haveEntityFactory: func(id uuid.UUID) *mockEntity {
-				return newMockEntity(typeid.FromUUID("mockentity", id), 5)
+			haveStoreOpts: []aggregatestore.EventSourcedStoreOption[mockEntity]{
+				aggregatestore.WithEventStreamWriter[mockEntity](nil),
 			},
-			haveStoreOpts: []aggregatestore.EventSourcedStoreOption[*mockEntity]{
-				aggregatestore.WithEventStreamWriter[*mockEntity](nil),
-			},
-			haveAggregate: func() *aggregatestore.Aggregate[*mockEntity] {
-				agg := &aggregatestore.Aggregate[*mockEntity]{}
-				agg.State().SetEntityAtVersion(newMockEntity(aggregateID, 5), 0)
-				return agg
+			haveAggregate: func() *aggregatestore.Aggregate[mockEntity] {
+				return aggregatestore.NewAggregate(newMockEntity(aggregateID.UUID()), 0)
 			},
 			wantErr: errors.New("event store has no event stream writer"),
 		},
@@ -1455,39 +1475,10 @@ func TestEventSourcedStore_SaveAggregate(t *testing.T) {
 				store, _ := memory.NewEventStore()
 				return store
 			},
-			haveEntityFactory: func(id uuid.UUID) *mockEntity {
-				return newMockEntity(typeid.FromUUID("mockentity", id), 5)
-			},
-			haveAggregate: func() *aggregatestore.Aggregate[*mockEntity] {
-				agg := &aggregatestore.Aggregate[*mockEntity]{}
-				agg.State().SetEntityAtVersion(newMockEntity(aggregateID, 5), 0)
-				return agg
+			haveAggregate: func() *aggregatestore.Aggregate[mockEntity] {
+				return aggregatestore.NewAggregate(newMockEntity(aggregateID.UUID()), 0)
 			},
 			wantErr: errors.New("new aggregate has no events to save"),
-		},
-		{
-			name: "returns an error when an unsaved event has a different version than the next expected version",
-			haveEventStore: func() eventstore.Store {
-				store, _ := memory.NewEventStore()
-				return store
-			},
-			haveEntityFactory: func(id uuid.UUID) *mockEntity {
-				return newMockEntity(typeid.FromUUID("mockentity", id), 5)
-			},
-			haveAggregate: func() *aggregatestore.Aggregate[*mockEntity] {
-				agg := &aggregatestore.Aggregate[*mockEntity]{}
-				agg.State().SetEntityAtVersion(newMockEntity(aggregateID, 5), 3)
-				agg.Append(
-					&aggregatestore.AggregateEvent{
-						ID:          typeid.Must(typeid.NewUUID("mockEntityEventA")).(typeid.UUID),
-						Version:     5,
-						Timestamp:   time.Now(),
-						EntityEvent: mockEntityEventA{},
-					},
-				)
-				return agg
-			},
-			wantErr: errors.New("event version mismatch: next is 4, event specifies 5"),
 		},
 		{
 			name: "returns an error when unable to marshal an event store event",
@@ -1495,24 +1486,17 @@ func TestEventSourcedStore_SaveAggregate(t *testing.T) {
 				store, _ := memory.NewEventStore()
 				return store
 			},
-			haveEntityFactory: func(id uuid.UUID) *mockEntity {
-				return newMockEntity(typeid.FromUUID("mockentity", id), 5)
-			},
-			haveStoreOpts: []aggregatestore.EventSourcedStoreOption[*mockEntity]{
-				aggregatestore.WithEventMarshaler[*mockEntity](mockEventMarshaler{
-					marshalErr: errors.New("mock error"),
-				}),
-			},
-			haveAggregate: func() *aggregatestore.Aggregate[*mockEntity] {
-				agg := &aggregatestore.Aggregate[*mockEntity]{}
-				agg.State().SetEntityAtVersion(newMockEntity(aggregateID, 5), 0)
-				agg.Append(
-					&aggregatestore.AggregateEvent{
-						ID:          typeid.Must(typeid.NewUUID("mockEntityEventA")).(typeid.UUID),
-						Version:     1,
-						Timestamp:   time.Now(),
-						EntityEvent: mockEntityEventA{},
+			haveStoreOpts: []aggregatestore.EventSourcedStoreOption[mockEntity]{
+				aggregatestore.WithEntityEventMarshaler(
+					mockEventMarshaler[mockEntity]{
+						marshalErr: errors.New("mock error"),
 					},
+				),
+			},
+			haveAggregate: func() *aggregatestore.Aggregate[mockEntity] {
+				agg := aggregatestore.NewAggregate(newMockEntity(aggregateID.UUID()), 0)
+				agg.Append(
+					mockEntityEventA{},
 				)
 				return agg
 			},
@@ -1524,53 +1508,36 @@ func TestEventSourcedStore_SaveAggregate(t *testing.T) {
 				store, _ := memory.NewEventStore()
 				return store
 			},
-			haveEntityFactory: func(id uuid.UUID) *mockEntity {
-				return newMockEntity(typeid.FromUUID("mockentity", id), 5)
-			},
-			haveStoreOpts: []aggregatestore.EventSourcedStoreOption[*mockEntity]{
-				aggregatestore.WithEventStreamWriter[*mockEntity](mockStreamWriter{
+			haveStoreOpts: []aggregatestore.EventSourcedStoreOption[mockEntity]{
+				aggregatestore.WithEventStreamWriter[mockEntity](mockStreamWriter{
 					appendStreamErr: errors.New("mock error"),
 				}),
 			},
-			haveAggregate: func() *aggregatestore.Aggregate[*mockEntity] {
-				agg := &aggregatestore.Aggregate[*mockEntity]{}
-				agg.State().SetEntityAtVersion(newMockEntity(aggregateID, 5), 0)
+			haveAggregate: func() *aggregatestore.Aggregate[mockEntity] {
+				agg := aggregatestore.NewAggregate(newMockEntity(aggregateID.UUID()), 0)
 				agg.Append(
-					&aggregatestore.AggregateEvent{
-						ID:          typeid.Must(typeid.NewUUID("mockEntityEventA")).(typeid.UUID),
-						Version:     1,
-						Timestamp:   time.Now(),
-						EntityEvent: mockEntityEventA{},
-					},
+					mockEntityEventA{},
 				)
 				return agg
 			},
 			wantErr: errors.New("saving events to stream: mock error"),
 		},
 		{
-			name: "returns an errow when unable to apply an event to the aggregate",
+			name: "returns an error when unable to apply an event to the aggregate",
 			haveEventStore: func() eventstore.Store {
 				store, _ := memory.NewEventStore()
 				return store
 			},
-			haveEntityFactory: func(id uuid.UUID) *mockEntity {
-				entity := newMockEntity(typeid.FromUUID("mockentity", id), 5)
-				entity.applyEventErr = errors.New("mock error")
-				return entity
-			},
-			haveAggregate: func() *aggregatestore.Aggregate[*mockEntity] {
-				agg := &aggregatestore.Aggregate[*mockEntity]{}
-				agg.State().SetEntityAtVersion(func() *mockEntity {
-					entity := newMockEntity(aggregateID, 5)
-					entity.applyEventErr = errors.New("mock error")
-					return entity
-				}(), 0)
+			haveAggregate: func() *aggregatestore.Aggregate[mockEntity] {
+				agg := aggregatestore.NewAggregate(newMockEntity(aggregateID.UUID()), 0)
 				agg.Append(
-					&aggregatestore.AggregateEvent{
-						ID:          typeid.Must(typeid.NewUUID("mockEntityEventA")).(typeid.UUID),
-						Version:     1,
-						Timestamp:   time.Now(),
-						EntityEvent: mockEntityEventA{},
+					mockEntityEventA{
+						A: "a",
+						mockEntityEventBase: mockEntityEventBase{
+							ApplyToFn: func(_ context.Context, e mockEntity) (mockEntity, error) {
+								return e, errors.New("mock error")
+							},
+						},
 					},
 				)
 				return agg
@@ -1581,7 +1548,7 @@ func TestEventSourcedStore_SaveAggregate(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			store, err := aggregatestore.NewEventSourcedStore(tt.haveEventStore(), tt.haveEntityFactory, tt.haveStoreOpts...)
+			store, err := aggregatestore.NewEventSourcedStore(tt.haveEventStore(), newMockEntity, tt.haveStoreOpts...)
 			if err != nil {
 				t.Errorf("unexpected error creating store: %v", err)
 			}
@@ -1615,10 +1582,6 @@ func TestEventSourcedStore_SaveAggregate(t *testing.T) {
 			}
 			// aggregate has a valid entity
 			gotEntity := aggregate.Entity()
-			if gotEntity == nil {
-				t.Errorf("unexpected nil entity")
-				return
-			}
 			// entity has the correct ID
 			if gotEntity.ID.String() != tt.wantEntity.ID.String() {
 				t.Errorf("want entity ID %s, got %s", tt.wantEntity.ID.String(), gotEntity.ID.String())
@@ -1631,23 +1594,10 @@ func TestEventSourcedStore_SaveAggregate(t *testing.T) {
 	}
 }
 
-func newMockEntity(id typeid.UUID, numEventTypes int) *mockEntity {
-	eventTypes := []estoria.EntityEvent{
-		mockEntityEventA{},
-		mockEntityEventB{},
-		mockEntityEventC{},
-		mockEntityEventD{},
-		mockEntityEventE{},
+func mustJSONMarshal(v any) []byte {
+	b, err := json.Marshal(v)
+	if err != nil {
+		panic(err)
 	}
-
-	entity := &mockEntity{
-		ID:         id,
-		eventTypes: []estoria.EntityEvent{},
-	}
-
-	for i := range numEventTypes {
-		entity.eventTypes = append(entity.eventTypes, eventTypes[i])
-	}
-
-	return entity
+	return b
 }

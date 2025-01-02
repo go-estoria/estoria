@@ -1,6 +1,7 @@
 package snapshotstore
 
 import (
+	"context"
 	"errors"
 	"time"
 
@@ -11,7 +12,24 @@ import (
 type AggregateSnapshot struct {
 	AggregateID      typeid.UUID
 	AggregateVersion int64
+	Timestamp        time.Time
 	Data             []byte
+}
+
+// A SnapshotReader reads snapshots.
+type SnapshotReader interface {
+	ReadSnapshot(ctx context.Context, aggregateID typeid.UUID, opts ReadSnapshotOptions) (*AggregateSnapshot, error)
+}
+
+// A SnapshotWriter writes snapshots.
+type SnapshotWriter interface {
+	WriteSnapshot(ctx context.Context, snap *AggregateSnapshot) error
+}
+
+// A SnapshotStore reads and writes snapshots.
+type SnapshotStore interface {
+	SnapshotReader
+	SnapshotWriter
 }
 
 // An EventCountSnapshotPolicy takes a snapshot every N events.
