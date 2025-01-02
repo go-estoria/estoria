@@ -1,5 +1,7 @@
 # estoria
 
+[![Go Report Card](https://goreportcard.com/badge/github.com/go-estoria/estoria)](https://goreportcard.com/report/github.com/go-estoria/estoria)
+
 Estoria is an event sourcing toolkit for Go.
 
 >**Note**: This project is in early beta. While functional, the API is not yet stable and is not suitable for production use.
@@ -26,7 +28,3 @@ See [estoria-examples](https://github.com/go-estoria/estoria-examples) for runna
 ## Component Providers
 
 See [estoria-contrib](https://github.com/go-estoria/estoria-contrib) for officially-supported event store, snapshot store, and aggregate cache implementations.
-
-## License
-
-Estoria is licensed under the MIT License.
