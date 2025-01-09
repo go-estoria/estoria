@@ -7,8 +7,14 @@ import (
 
 	"github.com/go-estoria/estoria"
 	"github.com/go-estoria/estoria/eventstore"
+	"github.com/go-estoria/estoria/snapshotstore"
 	"github.com/go-estoria/estoria/typeid"
 )
+
+type SnapshotMarshaler interface {
+	MarshalSnapshot(snap *snapshotstore.AggregateSnapshot) ([]byte, error)
+	UnmarshalSnapshot(data []byte, dest *snapshotstore.AggregateSnapshot) error
+}
 
 type EventStreamStore struct {
 	eventReader eventstore.StreamReader
@@ -20,11 +26,11 @@ func NewEventStreamStore(eventStore eventstore.Store) *EventStreamStore {
 	return &EventStreamStore{
 		eventReader: eventStore,
 		eventWriter: eventStore,
-		marshaler:   JSONSnapshotMarshaler{},
+		marshaler:   snapshotstore.JSONSnapshotMarshaler{},
 	}
 }
 
-func (s *EventStreamStore) ReadSnapshot(ctx context.Context, aggregateID typeid.UUID, _ ReadSnapshotOptions) (*AggregateSnapshot, error) {
+func (s *EventStreamStore) ReadSnapshot(ctx context.Context, aggregateID typeid.UUID, _ snapshotstore.ReadSnapshotOptions) (*snapshotstore.AggregateSnapshot, error) {
 	estoria.GetLogger().Debug("finding snapshot", "aggregate_id", aggregateID)
 
 	snapshotStreamID := typeid.FromUUID(aggregateID.TypeName()+"snapshot", aggregateID.UUID())
@@ -41,7 +47,7 @@ func (s *EventStreamStore) ReadSnapshot(ctx context.Context, aggregateID typeid.
 	event, err := stream.Next(ctx)
 	switch {
 	case errors.Is(err, eventstore.ErrEndOfEventStream):
-		return nil, ErrSnapshotNotFound
+		return nil, snapshotstore.ErrSnapshotNotFound
 	case err != nil:
 		return nil, fmt.Errorf("reading snapshot event: %w", err)
 	case event == nil:
@@ -52,7 +58,7 @@ func (s *EventStreamStore) ReadSnapshot(ctx context.Context, aggregateID typeid.
 		"stream_id", snapshotStreamID,
 		"stream_version", event.StreamVersion)
 
-	var snapshot AggregateSnapshot
+	var snapshot snapshotstore.AggregateSnapshot
 	if err := s.marshaler.UnmarshalSnapshot(event.Data, &snapshot); err != nil {
 		return nil, fmt.Errorf("unmarshaling snapshot: %w", err)
 	}
@@ -60,7 +66,7 @@ func (s *EventStreamStore) ReadSnapshot(ctx context.Context, aggregateID typeid.
 	return &snapshot, nil
 }
 
-func (s *EventStreamStore) WriteSnapshot(ctx context.Context, snap *AggregateSnapshot) error {
+func (s *EventStreamStore) WriteSnapshot(ctx context.Context, snap *snapshotstore.AggregateSnapshot) error {
 	estoria.GetLogger().Debug("writing snapshot",
 		"aggregate_id", snap.AggregateID,
 		"aggregate_version",

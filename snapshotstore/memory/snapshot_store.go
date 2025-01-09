@@ -1,45 +1,45 @@
-package snapshotstore
+package memory
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 
 	"github.com/go-estoria/estoria"
+	"github.com/go-estoria/estoria/snapshotstore"
 	"github.com/go-estoria/estoria/typeid"
 )
 
 // A RetentionPolicy determines which snapshots the store should retain.
 type RetentionPolicy interface {
 	// ShouldRetain returns true if the snapshot should be retained.
-	ShouldRetain(snap *AggregateSnapshot, snapshotIndex, totalSnapshots int64) bool
+	ShouldRetain(snap *snapshotstore.AggregateSnapshot, snapshotIndex, totalSnapshots int64) bool
 }
 
 type SnapshotMarshaler interface {
-	MarshalSnapshot(snap *AggregateSnapshot) ([]byte, error)
-	UnmarshalSnapshot(data []byte, dest *AggregateSnapshot) error
+	MarshalSnapshot(snap *snapshotstore.AggregateSnapshot) ([]byte, error)
+	UnmarshalSnapshot(data []byte, dest *snapshotstore.AggregateSnapshot) error
 }
 
-type MemoryStore struct {
-	snapshots map[typeid.UUID][]*AggregateSnapshot
+type SnapshotStore struct {
+	snapshots map[typeid.UUID][]*snapshotstore.AggregateSnapshot
 	marshaler SnapshotMarshaler
 	retention RetentionPolicy
 }
 
-func NewMemoryStore() *MemoryStore {
-	return &MemoryStore{
-		snapshots: map[typeid.UUID][]*AggregateSnapshot{},
-		marshaler: JSONSnapshotMarshaler{},
-		retention: MaxSnapshotsRetentionPolicy{N: 1},
+func NewSnapshotStore() *SnapshotStore {
+	return &SnapshotStore{
+		snapshots: map[typeid.UUID][]*snapshotstore.AggregateSnapshot{},
+		marshaler: snapshotstore.JSONSnapshotMarshaler{},
+		retention: snapshotstore.MaxSnapshotsRetentionPolicy{N: 1},
 	}
 }
 
-func (s *MemoryStore) ReadSnapshot(_ context.Context, aggregateID typeid.UUID, opts ReadSnapshotOptions) (*AggregateSnapshot, error) {
+func (s *SnapshotStore) ReadSnapshot(_ context.Context, aggregateID typeid.UUID, opts snapshotstore.ReadSnapshotOptions) (*snapshotstore.AggregateSnapshot, error) {
 	estoria.GetLogger().Debug("finding snapshot", "aggregate_id", aggregateID)
 
 	snapshots, ok := s.snapshots[aggregateID]
 	if !ok || len(snapshots) == 0 {
-		return nil, ErrSnapshotNotFound
+		return nil, snapshotstore.ErrSnapshotNotFound
 	}
 
 	if opts.MaxVersion > 0 {
@@ -50,7 +50,7 @@ func (s *MemoryStore) ReadSnapshot(_ context.Context, aggregateID typeid.UUID, o
 			}
 		}
 
-		return nil, ErrSnapshotNotFound
+		return nil, snapshotstore.ErrSnapshotNotFound
 	}
 
 	snap := snapshots[len(snapshots)-1]
@@ -58,7 +58,7 @@ func (s *MemoryStore) ReadSnapshot(_ context.Context, aggregateID typeid.UUID, o
 	return snap, nil
 }
 
-func (s *MemoryStore) WriteSnapshot(_ context.Context, snap *AggregateSnapshot) error {
+func (s *SnapshotStore) WriteSnapshot(_ context.Context, snap *snapshotstore.AggregateSnapshot) error {
 	estoria.GetLogger().Debug("writing snapshot",
 		"aggregate_id", snap.AggregateID,
 		"aggregate_version",
@@ -67,7 +67,7 @@ func (s *MemoryStore) WriteSnapshot(_ context.Context, snap *AggregateSnapshot) 
 
 	snapshots, ok := s.snapshots[snap.AggregateID]
 	if !ok {
-		s.snapshots[snap.AggregateID] = []*AggregateSnapshot{}
+		s.snapshots[snap.AggregateID] = []*snapshotstore.AggregateSnapshot{}
 		snapshots = s.snapshots[snap.AggregateID]
 	}
 
@@ -79,7 +79,7 @@ func (s *MemoryStore) WriteSnapshot(_ context.Context, snap *AggregateSnapshot) 
 
 	s.snapshots[snap.AggregateID] = append(s.snapshots[snap.AggregateID], snap)
 
-	retained := []*AggregateSnapshot{}
+	retained := []*snapshotstore.AggregateSnapshot{}
 	for i, snap := range s.snapshots[snap.AggregateID] {
 		if !s.retention.ShouldRetain(snap, int64(i), int64(len(s.snapshots[snap.AggregateID]))) {
 			estoria.GetLogger().Debug("deleting snapshot per retention policy", "aggregate_id", snap.AggregateID, "aggregate_version", snap.AggregateVersion)
@@ -94,14 +94,4 @@ func (s *MemoryStore) WriteSnapshot(_ context.Context, snap *AggregateSnapshot) 
 	estoria.GetLogger().Debug("wrote snapshot", "aggregate_id", snap.AggregateID, "aggregate_version", snap.AggregateVersion)
 
 	return nil
-}
-
-type JSONSnapshotMarshaler struct{}
-
-func (m JSONSnapshotMarshaler) MarshalSnapshot(snap *AggregateSnapshot) ([]byte, error) {
-	return json.Marshal(snap)
-}
-
-func (m JSONSnapshotMarshaler) UnmarshalSnapshot(data []byte, dest *AggregateSnapshot) error {
-	return json.Unmarshal(data, dest)
 }
