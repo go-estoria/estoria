@@ -2,6 +2,7 @@ package memory
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 
 	"github.com/go-estoria/estoria"
@@ -94,4 +95,14 @@ func (s *SnapshotStore) WriteSnapshot(_ context.Context, snap *snapshotstore.Agg
 	estoria.GetLogger().Debug("wrote snapshot", "aggregate_id", snap.AggregateID, "aggregate_version", snap.AggregateVersion)
 
 	return nil
+}
+
+type JSONSnapshotMarshaler struct{}
+
+func (m JSONSnapshotMarshaler) MarshalSnapshot(snap *snapshotstore.AggregateSnapshot) ([]byte, error) {
+	return json.Marshal(snap)
+}
+
+func (m JSONSnapshotMarshaler) UnmarshalSnapshot(data []byte, dest *snapshotstore.AggregateSnapshot) error {
+	return json.Unmarshal(data, dest)
 }
