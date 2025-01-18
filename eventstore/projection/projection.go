@@ -58,7 +58,11 @@ func (f EventHandlerFunc) Handle(ctx context.Context, event *eventstore.Event) e
 
 // Result contains the result of a projection.
 type Result struct {
+	// NumProjectedEvents is the number of events that were successfully projected.
 	NumProjectedEvents int64
+
+	// NumFailedEvents is the number of events that failed to project.
+	NumFailedEvents int64
 }
 
 func (p *StreamProjection) Project(ctx context.Context, eventHandler EventHandler) (*Result, error) {
@@ -87,6 +91,7 @@ func (p *StreamProjection) Project(ctx context.Context, eventHandler EventHandle
 
 		if err := eventHandler.Handle(ctx, event); err != nil {
 			if p.continueOnHandlerError {
+				result.NumFailedEvents++
 				p.log.Error("error handling event", "stream_id", p.streamID, "event_id", event.ID, "stream_version", event.StreamVersion, "error", err)
 				continue
 			}
