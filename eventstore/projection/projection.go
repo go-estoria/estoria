@@ -20,19 +20,15 @@ type StreamProjection struct {
 }
 
 // New creates a new StreamProjection.
-func New(events eventstore.StreamReader, streamID typeid.UUID, opts ...StreamProjectionOption) (*StreamProjection, error) {
-	switch {
-	case events == nil:
+func New(events eventstore.StreamReader, opts ...StreamProjectionOption) (*StreamProjection, error) {
+	if events == nil {
 		return nil, errors.New("event stream reader is required")
-	case streamID.IsEmpty():
-		return nil, errors.New("stream ID is required")
 	}
 
 	projection := &StreamProjection{
-		events:   events,
-		streamID: streamID,
-		readOps:  eventstore.ReadStreamOptions{},
-		log:      estoria.GetLogger().WithGroup("projection"),
+		events:  events,
+		readOps: eventstore.ReadStreamOptions{},
+		log:     estoria.GetLogger().WithGroup("projection"),
 	}
 
 	for _, opt := range opts {
@@ -60,8 +56,8 @@ type Result struct {
 	NumProjectedEvents int64
 }
 
-func (p *StreamProjection) Project(ctx context.Context, eventHandler EventHandler) (*Result, error) {
-	iter, err := p.events.ReadStream(ctx, p.streamID, p.readOps)
+func (p *StreamProjection) Project(ctx context.Context, streamID typeid.UUID, eventHandler EventHandler) (*Result, error) {
+	iter, err := p.events.ReadStream(ctx, streamID, p.readOps)
 	if err != nil {
 		return nil, fmt.Errorf("obtaining stream iterator: %w", err)
 	}

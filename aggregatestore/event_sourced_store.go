@@ -116,7 +116,7 @@ func (s *EventSourcedStore[E]) Hydrate(ctx context.Context, aggregate *Aggregate
 	}
 
 	// create a stream projection for the aggregate
-	projector, err := projection.New(s.eventReader, aggregate.ID(),
+	projector, err := projection.New(s.eventReader,
 		projection.WithReadStreamOptions(readOpts),
 		projection.WithLogger(s.log.WithGroup("projection")),
 	)
@@ -125,7 +125,7 @@ func (s *EventSourcedStore[E]) Hydrate(ctx context.Context, aggregate *Aggregate
 	}
 
 	// apply the events to the aggregate
-	result, err := projector.Project(ctx, s.eventHandlerForAggregate(aggregate))
+	result, err := projector.Project(ctx, aggregate.ID(), s.eventHandlerForAggregate(aggregate))
 	if errors.Is(err, eventstore.ErrStreamNotFound) {
 		return HydrateError{AggregateID: aggregate.ID(), Err: ErrAggregateNotFound}
 	} else if err != nil {
