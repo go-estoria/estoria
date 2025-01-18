@@ -4,8 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log/slog"
 
+	"github.com/go-estoria/estoria"
 	"github.com/go-estoria/estoria/eventstore"
 	"github.com/go-estoria/estoria/typeid"
 )
@@ -14,9 +14,11 @@ type StreamProjection struct {
 	events   eventstore.StreamReader
 	streamID typeid.UUID
 	readOps  eventstore.ReadStreamOptions
+
+	log estoria.Logger
 }
 
-func NewStreamProjection(events eventstore.StreamReader, streamID typeid.UUID, readOpts *eventstore.ReadStreamOptions) (*StreamProjection, error) {
+func NewStreamProjection(events eventstore.StreamReader, streamID typeid.UUID, opts ...StreamProjectionOption) (*StreamProjection, error) {
 	switch {
 	case events == nil:
 		return nil, errors.New("event stream reader is required")
@@ -24,17 +26,18 @@ func NewStreamProjection(events eventstore.StreamReader, streamID typeid.UUID, r
 		return nil, errors.New("stream ID is required")
 	}
 
-	if readOpts == nil {
-		readOpts = &eventstore.ReadStreamOptions{}
-	}
-
-	slog.Info("created stream projection")
-
-	return &StreamProjection{
+	projection := &StreamProjection{
 		events:   events,
 		streamID: streamID,
-		readOps:  *readOpts,
-	}, nil
+		readOps:  eventstore.ReadStreamOptions{},
+		log:      estoria.GetLogger().WithGroup("projection"),
+	}
+
+	for _, opt := range opts {
+		opt(projection)
+	}
+
+	return projection, nil
 }
 
 type EventProjectionFunc func(event *eventstore.Event) error
@@ -61,7 +64,7 @@ func (p *StreamProjection) Project(ctx context.Context, applyEvent EventProjecti
 			return result, fmt.Errorf("reading event: %w", err)
 		}
 
-		slog.Info("projecting event")
+		p.log.Debug("projecting event", "stream_id", p.streamID, "event_id", event.ID, "stream_version", event.StreamVersion)
 
 		if err := applyEvent(event); err != nil {
 			return result, fmt.Errorf("processing event: %w", err)
@@ -70,5 +73,21 @@ func (p *StreamProjection) Project(ctx context.Context, applyEvent EventProjecti
 		result.NumProjectedEvents++
 	}
 
+	p.log.Debug("projected events", "stream_id", p.streamID, "count", result.NumProjectedEvents)
+
 	return result, nil
+}
+
+type StreamProjectionOption func(*StreamProjection)
+
+func WithReadStreamOptions(opts eventstore.ReadStreamOptions) StreamProjectionOption {
+	return func(p *StreamProjection) {
+		p.readOps = opts
+	}
+}
+
+func WithLogger(log estoria.Logger) StreamProjectionOption {
+	return func(p *StreamProjection) {
+		p.log = log
+	}
 }

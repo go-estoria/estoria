@@ -115,18 +115,11 @@ func (s *EventSourcedStore[E]) Hydrate(ctx context.Context, aggregate *Aggregate
 		readOpts.Count = opts.ToVersion - aggregate.Version()
 	}
 
-	// load the aggregate's events
-	// stream, err := s.eventReader.ReadStream(ctx, aggregate.ID(), readOpts)
-	// if errors.Is(err, eventstore.ErrStreamNotFound) {
-	// 	return HydrateError{AggregateID: aggregate.ID(), Err: ErrAggregateNotFound}
-	// } else if err != nil {
-	// 	return HydrateError{AggregateID: aggregate.ID(), Operation: "reading event stream", Err: err}
-	// }
-
-	// defer stream.Close(ctx)
-
 	// create a stream projection for the aggregate
-	projector, err := projection.NewStreamProjection(s.eventReader, aggregate.ID(), &readOpts)
+	projector, err := projection.NewStreamProjection(s.eventReader, aggregate.ID(),
+		projection.WithReadStreamOptions(readOpts),
+		projection.WithLogger(s.log.WithGroup("projection")),
+	)
 	if err != nil {
 		return HydrateError{AggregateID: aggregate.ID(), Operation: "creating event stream projection", Err: err}
 	}
@@ -167,42 +160,6 @@ func (s *EventSourcedStore[E]) Hydrate(ctx context.Context, aggregate *Aggregate
 	}
 
 	s.log.Info("projected events", "count", result.NumProjectedEvents)
-
-	// // apply the events to the aggregate
-	// for {
-	// 	event, err := stream.Next(ctx)
-	// 	if errors.Is(err, eventstore.ErrEndOfEventStream) {
-	// 		s.log.Debug("end of event stream", "aggregate_id", aggregate.ID())
-	// 		break
-	// 	} else if err != nil {
-	// 		return HydrateError{AggregateID: aggregate.ID(), Operation: "reading event", Err: err}
-	// 	}
-
-	// 	newEvent, ok := s.entityEventPrototypes[event.ID.TypeName()]
-	// 	if !ok {
-	// 		return HydrateError{
-	// 			AggregateID: aggregate.ID(),
-	// 			Operation:   "obtaining entity prototype",
-	// 			Err:         errors.New("no prototype registered for event type " + event.ID.TypeName()),
-	// 		}
-	// 	}
-
-	// 	entityEvent := newEvent()
-	// 	if err := s.entityEventMarshaler.UnmarshalEntityEvent(event.Data, entityEvent); err != nil {
-	// 		return HydrateError{AggregateID: aggregate.ID(), Operation: "unmarshaling event data", Err: err}
-	// 	}
-
-	// 	// enqueue and apply the event immediately
-	// 	aggregate.State().WillApply(&AggregateEvent[E, estoria.EntityEvent[E]]{
-	// 		ID:          event.ID,
-	// 		Version:     event.StreamVersion,
-	// 		Timestamp:   event.Timestamp,
-	// 		EntityEvent: entityEvent,
-	// 	})
-	// 	if err := aggregate.State().ApplyNext(ctx); err != nil {
-	// 		return HydrateError{AggregateID: aggregate.ID(), Operation: "applying aggregate event", Err: err}
-	// 	}
-	// }
 
 	s.log.Debug("hydrated aggregate",
 		"aggregate_id", aggregate.ID(),
