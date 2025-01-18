@@ -12,9 +12,10 @@ import (
 
 // A StreamProjection reads events from an event stream and executes a projection function for each event.
 type StreamProjection struct {
-	events   eventstore.StreamReader
-	streamID typeid.UUID
-	readOps  eventstore.ReadStreamOptions
+	events                 eventstore.StreamReader
+	streamID               typeid.UUID
+	readOps                eventstore.ReadStreamOptions
+	continueOnHandlerError bool
 
 	log estoria.Logger
 }
@@ -81,6 +82,11 @@ func (p *StreamProjection) Project(ctx context.Context, eventHandler EventHandle
 		p.log.Debug("projecting event", "stream_id", p.streamID, "event_id", event.ID, "stream_version", event.StreamVersion)
 
 		if err := eventHandler.Handle(ctx, event); err != nil {
+			if p.continueOnHandlerError {
+				p.log.Error("error handling event", "stream_id", p.streamID, "event_id", event.ID, "stream_version", event.StreamVersion, "error", err)
+				continue
+			}
+
 			return result, fmt.Errorf("processing event: %w", err)
 		}
 
@@ -94,6 +100,14 @@ func (p *StreamProjection) Project(ctx context.Context, eventHandler EventHandle
 
 // A StreamProjectionOption is an option for configuring a StreamProjection.
 type StreamProjectionOption func(*StreamProjection)
+
+// WithContinueOnHandlerError sets whether to continue projecting events
+// if an error occurs while handling any individual event.
+func WithContinueOnHandlerError(shouldContinue bool) StreamProjectionOption {
+	return func(p *StreamProjection) {
+		p.continueOnHandlerError = shouldContinue
+	}
+}
 
 // WithReadStreamOptions sets the options used for reading the event stream.
 func WithReadStreamOptions(opts eventstore.ReadStreamOptions) StreamProjectionOption {
