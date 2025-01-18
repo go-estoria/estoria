@@ -128,7 +128,7 @@ func (s *SnapshottingStore[E]) Hydrate(ctx context.Context, aggregate *Aggregate
 	}
 
 	log.Debug("loaded snapshot", "version", snap.AggregateVersion)
-	aggregate.State().SetEntityAtVersion(entity, snap.AggregateVersion)
+	aggregate.state.SetEntityAtVersion(entity, snap.AggregateVersion)
 
 	if opts.ToVersion > 0 && snap.AggregateVersion == opts.ToVersion {
 		return nil
@@ -157,7 +157,7 @@ func (s *SnapshottingStore[E]) Save(ctx context.Context, aggregate *Aggregate[E]
 	now := time.Now()
 
 	for {
-		err := aggregate.State().ApplyNext(ctx)
+		err := aggregate.state.ApplyNext(ctx)
 		if errors.Is(err, ErrNoUnappliedEvents) {
 			break
 		} else if err != nil {

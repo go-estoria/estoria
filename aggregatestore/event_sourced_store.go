@@ -149,7 +149,7 @@ func (s *EventSourcedStore[E]) Save(ctx context.Context, aggregate *Aggregate[E]
 		return SaveError{AggregateID: aggregate.ID(), Err: errors.New("event store has no event stream writer")}
 	}
 
-	unsavedEvents := aggregate.State().UnsavedEvents()
+	unsavedEvents := aggregate.state.UnsavedEvents()
 	if len(unsavedEvents) == 0 {
 		if aggregate.Version() == 0 {
 			return SaveError{AggregateID: aggregate.ID(), Err: errors.New("new aggregate has no events to save")}
@@ -187,10 +187,10 @@ func (s *EventSourcedStore[E]) Save(ctx context.Context, aggregate *Aggregate[E]
 
 	// queue the events for application
 	for _, unsavedEvent := range unsavedEvents {
-		aggregate.State().WillApply(unsavedEvent)
+		aggregate.state.WillApply(unsavedEvent)
 	}
 
-	aggregate.State().ClearUnsavedEvents()
+	aggregate.state.ClearUnsavedEvents()
 
 	if opts.SkipApply {
 		return nil
@@ -198,7 +198,7 @@ func (s *EventSourcedStore[E]) Save(ctx context.Context, aggregate *Aggregate[E]
 
 	// apply the events to the aggregate
 	for {
-		if err := aggregate.State().ApplyNext(ctx); errors.Is(err, ErrNoUnappliedEvents) {
+		if err := aggregate.state.ApplyNext(ctx); errors.Is(err, ErrNoUnappliedEvents) {
 			return nil
 		} else if err != nil {
 			return SaveError{AggregateID: aggregate.ID(), Operation: "applying aggregate event", Err: err}
@@ -239,13 +239,13 @@ func (s *EventSourcedStore[E]) eventHandlerForAggregate(aggregate *Aggregate[E])
 		}
 
 		// enqueue and apply the event immediately
-		aggregate.State().WillApply(&AggregateEvent[E, estoria.EntityEvent[E]]{
+		aggregate.state.WillApply(&AggregateEvent[E, estoria.EntityEvent[E]]{
 			ID:          event.ID,
 			Version:     event.StreamVersion,
 			Timestamp:   event.Timestamp,
 			EntityEvent: entityEvent,
 		})
-		if err := aggregate.State().ApplyNext(ctx); err != nil {
+		if err := aggregate.state.ApplyNext(ctx); err != nil {
 			return HydrateError{AggregateID: aggregate.ID(), Operation: "applying aggregate event", Err: err}
 		}
 
