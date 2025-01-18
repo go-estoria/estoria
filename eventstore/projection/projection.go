@@ -10,6 +10,7 @@ import (
 	"github.com/go-estoria/estoria/typeid"
 )
 
+// A StreamProjection reads events from an event stream and executes a projection function for each event.
 type StreamProjection struct {
 	events   eventstore.StreamReader
 	streamID typeid.UUID
@@ -18,6 +19,7 @@ type StreamProjection struct {
 	log estoria.Logger
 }
 
+// NewStreamProjection creates a new StreamProjection.
 func NewStreamProjection(events eventstore.StreamReader, streamID typeid.UUID, opts ...StreamProjectionOption) (*StreamProjection, error) {
 	switch {
 	case events == nil:
@@ -40,13 +42,24 @@ func NewStreamProjection(events eventstore.StreamReader, streamID typeid.UUID, o
 	return projection, nil
 }
 
-type EventProjectionFunc func(event *eventstore.Event) error
+// An EventHandler handles an individual event.
+type EventHandler interface {
+	Handle(ctx context.Context, event *eventstore.Event) error
+}
+
+// An EventHandlerFunc is a function that handles an event during projection.
+type EventHandlerFunc func(ctx context.Context, event *eventstore.Event) error
+
+// Handle implements the EventHandler interface, allowing an EventHandlerFunc to be used as an EventHandler.
+func (f EventHandlerFunc) Handle(ctx context.Context, event *eventstore.Event) error {
+	return f(ctx, event)
+}
 
 type Result struct {
 	NumProjectedEvents int64
 }
 
-func (p *StreamProjection) Project(ctx context.Context, applyEvent EventProjectionFunc) (*Result, error) {
+func (p *StreamProjection) Project(ctx context.Context, eventHandler EventHandler) (*Result, error) {
 	iter, err := p.events.ReadStream(ctx, p.streamID, p.readOps)
 	if err != nil {
 		return nil, fmt.Errorf("obtaining stream iterator: %w", err)
@@ -66,7 +79,7 @@ func (p *StreamProjection) Project(ctx context.Context, applyEvent EventProjecti
 
 		p.log.Debug("projecting event", "stream_id", p.streamID, "event_id", event.ID, "stream_version", event.StreamVersion)
 
-		if err := applyEvent(event); err != nil {
+		if err := eventHandler.Handle(ctx, event); err != nil {
 			return result, fmt.Errorf("processing event: %w", err)
 		}
 
