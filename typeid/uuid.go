@@ -65,6 +65,10 @@ func (id *UUID) UnmarshalBinary(data []byte) error {
 	return nil
 }
 
+func (id UUID) IsEmpty() bool {
+	return id.typ == "" || id.val.IsNil()
+}
+
 func (id UUID) String() string {
 	return id.typ + sep + id.val.String()
 }
