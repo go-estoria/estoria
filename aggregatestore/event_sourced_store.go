@@ -116,7 +116,7 @@ func (s *EventSourcedStore[E]) Hydrate(ctx context.Context, aggregate *Aggregate
 	}
 
 	// create a stream projection for the aggregate
-	projector, err := projection.NewStreamProjection(s.eventReader, aggregate.ID(),
+	projector, err := projection.New(s.eventReader, aggregate.ID(),
 		projection.WithReadStreamOptions(readOpts),
 		projection.WithLogger(s.log.WithGroup("projection")),
 	)
@@ -125,34 +125,7 @@ func (s *EventSourcedStore[E]) Hydrate(ctx context.Context, aggregate *Aggregate
 	}
 
 	// apply the events to the aggregate
-	result, err := projector.Project(ctx, projection.EventHandlerFunc(func(ctx context.Context, event *eventstore.Event) error {
-		newEvent, ok := s.entityEventPrototypes[event.ID.TypeName()]
-		if !ok {
-			return HydrateError{
-				AggregateID: aggregate.ID(),
-				Operation:   "obtaining entity prototype",
-				Err:         errors.New("no prototype registered for event type " + event.ID.TypeName()),
-			}
-		}
-
-		entityEvent := newEvent()
-		if err := s.entityEventMarshaler.UnmarshalEntityEvent(event.Data, entityEvent); err != nil {
-			return HydrateError{AggregateID: aggregate.ID(), Operation: "unmarshaling event data", Err: err}
-		}
-
-		// enqueue and apply the event immediately
-		aggregate.State().WillApply(&AggregateEvent[E, estoria.EntityEvent[E]]{
-			ID:          event.ID,
-			Version:     event.StreamVersion,
-			Timestamp:   event.Timestamp,
-			EntityEvent: entityEvent,
-		})
-		if err := aggregate.State().ApplyNext(ctx); err != nil {
-			return HydrateError{AggregateID: aggregate.ID(), Operation: "applying aggregate event", Err: err}
-		}
-
-		return nil
-	}))
+	result, err := projector.Project(ctx, s.eventHandlerForAggregate(aggregate))
 	if errors.Is(err, eventstore.ErrStreamNotFound) {
 		return HydrateError{AggregateID: aggregate.ID(), Err: ErrAggregateNotFound}
 	} else if err != nil {
@@ -246,6 +219,38 @@ func (s *EventSourcedStore[E]) Use(eventPrototypes ...estoria.EntityEvent[E]) er
 	}
 
 	return nil
+}
+
+// Returns a projection.EventHandlerFunc that decodes and applies an entity event to an aggregate.
+func (s *EventSourcedStore[E]) eventHandlerForAggregate(aggregate *Aggregate[E]) projection.EventHandlerFunc {
+	return projection.EventHandlerFunc(func(ctx context.Context, event *eventstore.Event) error {
+		newEvent, ok := s.entityEventPrototypes[event.ID.TypeName()]
+		if !ok {
+			return HydrateError{
+				AggregateID: aggregate.ID(),
+				Operation:   "obtaining entity prototype",
+				Err:         errors.New("no prototype registered for event type " + event.ID.TypeName()),
+			}
+		}
+
+		entityEvent := newEvent()
+		if err := s.entityEventMarshaler.UnmarshalEntityEvent(event.Data, entityEvent); err != nil {
+			return HydrateError{AggregateID: aggregate.ID(), Operation: "unmarshaling event data", Err: err}
+		}
+
+		// enqueue and apply the event immediately
+		aggregate.State().WillApply(&AggregateEvent[E, estoria.EntityEvent[E]]{
+			ID:          event.ID,
+			Version:     event.StreamVersion,
+			Timestamp:   event.Timestamp,
+			EntityEvent: entityEvent,
+		})
+		if err := aggregate.State().ApplyNext(ctx); err != nil {
+			return HydrateError{AggregateID: aggregate.ID(), Operation: "applying aggregate event", Err: err}
+		}
+
+		return nil
+	})
 }
 
 type EventSourcedStoreOption[E estoria.Entity] func(*EventSourcedStore[E]) error

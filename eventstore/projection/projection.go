@@ -19,8 +19,8 @@ type StreamProjection struct {
 	log estoria.Logger
 }
 
-// NewStreamProjection creates a new StreamProjection.
-func NewStreamProjection(events eventstore.StreamReader, streamID typeid.UUID, opts ...StreamProjectionOption) (*StreamProjection, error) {
+// New creates a new StreamProjection.
+func New(events eventstore.StreamReader, streamID typeid.UUID, opts ...StreamProjectionOption) (*StreamProjection, error) {
 	switch {
 	case events == nil:
 		return nil, errors.New("event stream reader is required")
