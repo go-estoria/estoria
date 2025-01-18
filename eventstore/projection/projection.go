@@ -55,6 +55,7 @@ func (f EventHandlerFunc) Handle(ctx context.Context, event *eventstore.Event) e
 	return f(ctx, event)
 }
 
+// Result contains the result of a projection.
 type Result struct {
 	NumProjectedEvents int64
 }
@@ -91,14 +92,17 @@ func (p *StreamProjection) Project(ctx context.Context, eventHandler EventHandle
 	return result, nil
 }
 
+// A StreamProjectionOption is an option for configuring a StreamProjection.
 type StreamProjectionOption func(*StreamProjection)
 
+// WithReadStreamOptions sets the options used for reading the event stream.
 func WithReadStreamOptions(opts eventstore.ReadStreamOptions) StreamProjectionOption {
 	return func(p *StreamProjection) {
 		p.readOps = opts
 	}
 }
 
+// WithLogger sets the logger for the StreamProjection.
 func WithLogger(log estoria.Logger) StreamProjectionOption {
 	return func(p *StreamProjection) {
 		p.log = log
