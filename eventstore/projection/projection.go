@@ -62,6 +62,10 @@ type Result struct {
 }
 
 func (p *StreamProjection) Project(ctx context.Context, eventHandler EventHandler) (*Result, error) {
+	if eventHandler == nil {
+		return nil, errors.New("event handler is required")
+	}
+
 	iter, err := p.events.ReadStream(ctx, p.streamID, p.readOps)
 	if err != nil {
 		return nil, fmt.Errorf("obtaining stream iterator: %w", err)
