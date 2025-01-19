@@ -95,6 +95,8 @@ type StreamProjectionOption func(*StreamProjection)
 
 // WithContinueOnHandlerError sets whether to continue projecting events
 // if an error occurs while handling any individual event.
+//
+// The default behavior is to stop projecting events if an error occurs.
 func WithContinueOnHandlerError(shouldContinue bool) StreamProjectionOption {
 	return func(p *StreamProjection) {
 		p.continueOnHandlerError = shouldContinue
