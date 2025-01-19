@@ -115,24 +115,28 @@ func (s *EventSourcedStore[E]) Hydrate(ctx context.Context, aggregate *Aggregate
 		readOpts.Count = opts.ToVersion - aggregate.Version()
 	}
 
+	iter, err := s.eventReader.ReadStream(ctx, aggregate.ID(), readOpts)
+	if errors.Is(err, eventstore.ErrStreamNotFound) {
+		return HydrateError{AggregateID: aggregate.ID(), Err: ErrAggregateNotFound}
+	} else if err != nil {
+		return HydrateError{AggregateID: aggregate.ID(), Operation: "reading event stream", Err: err}
+	}
+
+	defer iter.Close(ctx)
+
 	// create a stream projection for the aggregate
-	projector, err := projection.New(s.eventReader, aggregate.ID(),
-		projection.WithReadStreamOptions(readOpts),
-		projection.WithLogger(s.log.WithGroup("projection")),
-	)
+	projector, err := projection.New(iter, projection.WithLogger(s.log.WithGroup("projection")))
 	if err != nil {
 		return HydrateError{AggregateID: aggregate.ID(), Operation: "creating event stream projection", Err: err}
 	}
 
 	// apply the events to the aggregate
 	result, err := projector.Project(ctx, s.eventHandlerForAggregate(aggregate))
-	if errors.Is(err, eventstore.ErrStreamNotFound) {
-		return HydrateError{AggregateID: aggregate.ID(), Err: ErrAggregateNotFound}
-	} else if err != nil {
+	if err != nil {
 		return HydrateError{AggregateID: aggregate.ID(), Operation: "projecting event stream", Err: err}
 	}
 
-	s.log.Info("projected events", "count", result.NumProjectedEvents)
+	s.log.Info("applied events to aggregate", "count", result.NumProjectedEvents)
 
 	s.log.Debug("hydrated aggregate",
 		"aggregate_id", aggregate.ID(),

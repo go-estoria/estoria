@@ -7,33 +7,25 @@ import (
 
 	"github.com/go-estoria/estoria"
 	"github.com/go-estoria/estoria/eventstore"
-	"github.com/go-estoria/estoria/typeid"
 )
 
 // A StreamProjection reads events from an event stream and executes a projection function for each event.
 type StreamProjection struct {
-	events                 eventstore.StreamReader
-	streamID               typeid.UUID
-	readOps                eventstore.ReadStreamOptions
+	iter                   eventstore.StreamIterator
 	continueOnHandlerError bool
 
 	log estoria.Logger
 }
 
 // New creates a new StreamProjection.
-func New(events eventstore.StreamReader, streamID typeid.UUID, opts ...StreamProjectionOption) (*StreamProjection, error) {
-	switch {
-	case events == nil:
-		return nil, errors.New("event stream reader is required")
-	case streamID.IsEmpty():
-		return nil, errors.New("stream ID is required")
+func New(iter eventstore.StreamIterator, opts ...StreamProjectionOption) (*StreamProjection, error) {
+	if iter == nil {
+		return nil, errors.New("event stream iterator is required")
 	}
 
 	projection := &StreamProjection{
-		events:   events,
-		streamID: streamID,
-		readOps:  eventstore.ReadStreamOptions{},
-		log:      estoria.GetLogger().WithGroup("projection"),
+		iter: iter,
+		log:  estoria.GetLogger().WithGroup("projection"),
 	}
 
 	for _, opt := range opts {
@@ -70,29 +62,22 @@ func (p *StreamProjection) Project(ctx context.Context, eventHandler EventHandle
 		return nil, errors.New("event handler is required")
 	}
 
-	iter, err := p.events.ReadStream(ctx, p.streamID, p.readOps)
-	if err != nil {
-		return nil, fmt.Errorf("obtaining stream iterator: %w", err)
-	}
-
-	defer iter.Close(ctx)
-
 	result := &Result{}
 
 	for {
-		event, err := iter.Next(ctx)
+		event, err := p.iter.Next(ctx)
 		if errors.Is(err, eventstore.ErrEndOfEventStream) {
 			break
 		} else if err != nil {
 			return result, fmt.Errorf("reading event: %w", err)
 		}
 
-		p.log.Debug("projecting event", "stream_id", p.streamID, "event_id", event.ID, "stream_version", event.StreamVersion)
+		p.log.Debug("projecting event", "stream_id", event.StreamID, "event_id", event.ID, "stream_version", event.StreamVersion)
 
 		if err := eventHandler.Handle(ctx, event); err != nil {
 			if p.continueOnHandlerError {
 				result.NumFailedEvents++
-				p.log.Error("error handling event", "stream_id", p.streamID, "event_id", event.ID, "stream_version", event.StreamVersion, "error", err)
+				p.log.Error("error handling event", "stream_id", event.StreamID, "event_id", event.ID, "stream_version", event.StreamVersion, "error", err)
 				continue
 			}
 
@@ -101,8 +86,6 @@ func (p *StreamProjection) Project(ctx context.Context, eventHandler EventHandle
 
 		result.NumProjectedEvents++
 	}
-
-	p.log.Debug("projected events", "stream_id", p.streamID, "count", result.NumProjectedEvents)
 
 	return result, nil
 }
@@ -115,13 +98,6 @@ type StreamProjectionOption func(*StreamProjection)
 func WithContinueOnHandlerError(shouldContinue bool) StreamProjectionOption {
 	return func(p *StreamProjection) {
 		p.continueOnHandlerError = shouldContinue
-	}
-}
-
-// WithReadStreamOptions sets the options used for reading the event stream.
-func WithReadStreamOptions(opts eventstore.ReadStreamOptions) StreamProjectionOption {
-	return func(p *StreamProjection) {
-		p.readOps = opts
 	}
 }
 
