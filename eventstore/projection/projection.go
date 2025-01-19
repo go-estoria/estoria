@@ -75,8 +75,9 @@ func (p *StreamProjection) Project(ctx context.Context, eventHandler EventHandle
 		p.log.Debug("projecting event", "stream_id", event.StreamID, "event_id", event.ID, "stream_version", event.StreamVersion)
 
 		if err := eventHandler.Handle(ctx, event); err != nil {
+			result.NumFailedEvents++
+
 			if p.continueOnHandlerError {
-				result.NumFailedEvents++
 				p.log.Error("error handling event", "stream_id", event.StreamID, "event_id", event.ID, "stream_version", event.StreamVersion, "error", err)
 				continue
 			}
