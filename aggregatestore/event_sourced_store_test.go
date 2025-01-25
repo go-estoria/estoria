@@ -191,9 +191,15 @@ func (m mockStreamWriter) AppendStream(_ context.Context, _ typeid.UUID, _ []*ev
 }
 
 type mockStreamIterator struct {
+	allEvents []*eventstore.Event
+	allErr    error
 	nextEvent *eventstore.Event
 	nextErr   error
 	closeErr  error
+}
+
+func (m mockStreamIterator) All(_ context.Context) ([]*eventstore.Event, error) {
+	return m.allEvents, m.allErr
 }
 
 func (m mockStreamIterator) Next(_ context.Context) (*eventstore.Event, error) {
