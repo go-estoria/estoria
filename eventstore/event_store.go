@@ -24,6 +24,9 @@ type StreamReader interface {
 
 // An StreamIterator reads events from a stream.
 type StreamIterator interface {
+	// All reads all events from the stream and returns them in a slice.
+	All(ctx context.Context) ([]*Event, error)
+
 	// Next reads the next event from the stream.
 	// It returns ErrEndOfEventStream when there are no more events.
 	Next(ctx context.Context) (*Event, error)
