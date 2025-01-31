@@ -24,9 +24,6 @@ type StreamReader interface {
 
 // An StreamIterator reads events from a stream.
 type StreamIterator interface {
-	// All reads all events from the stream and returns them in a slice.
-	All(ctx context.Context) ([]*Event, error)
-
 	// Next reads the next event from the stream.
 	// It returns ErrEndOfEventStream when there are no more events.
 	Next(ctx context.Context) (*Event, error)
@@ -164,5 +161,21 @@ var ErrStreamNotFound = errors.New("stream not found")
 // ErrStreamIteratorClosed is returned when an operation is attempted on a closed stream iterator.
 var ErrStreamIteratorClosed = errors.New("stream iterator closed")
 
-// ErrEndOfEventStream is returned when there are no more events in the stream.
+// ErrEndOfEventStream is returned by a stream iterator when there are no more events in the stream.
 var ErrEndOfEventStream = errors.New("end of event stream")
+
+func ReadAll(ctx context.Context, iter StreamIterator) ([]*Event, error) {
+	events := []*Event{}
+	for {
+		event, err := iter.Next(ctx)
+		if errors.Is(err, ErrEndOfEventStream) {
+			break
+		} else if err != nil {
+			return nil, fmt.Errorf("reading event: %w", err)
+		}
+
+		events = append(events, event)
+	}
+
+	return events, nil
+}

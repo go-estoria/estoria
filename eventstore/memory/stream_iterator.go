@@ -2,7 +2,6 @@ package memory
 
 import (
 	"context"
-	"errors"
 
 	"github.com/go-estoria/estoria/eventstore"
 	"github.com/go-estoria/estoria/typeid"
@@ -16,23 +15,6 @@ type streamIterator struct {
 	limit     int64
 	retrieved int64
 	marshaler EventMarshaler
-}
-
-func (i *streamIterator) All(ctx context.Context) ([]*eventstore.Event, error) {
-	events := make([]*eventstore.Event, 0, len(i.events))
-
-	for {
-		event, err := i.Next(ctx)
-		if errors.Is(err, eventstore.ErrEndOfEventStream) {
-			break
-		} else if err != nil {
-			return nil, err
-		}
-
-		events = append(events, event)
-	}
-
-	return events, nil
 }
 
 func (i *streamIterator) Next(_ context.Context) (*eventstore.Event, error) {
