@@ -1133,7 +1133,7 @@ func TestEventSourcedStore_HydrateAggregate(t *testing.T) {
 			haveAggregate: func() *aggregatestore.Aggregate[mockEntity] {
 				return aggregatestore.NewAggregate(newMockEntity(aggregateID.UUID()), 0)
 			},
-			wantErr: errors.New("reading event: mock error"),
+			wantErr: errors.New("projecting event stream: reading event: mock error"),
 		},
 		{
 			name: "returns an error when encountering an unregistered event type",
@@ -1154,7 +1154,7 @@ func TestEventSourcedStore_HydrateAggregate(t *testing.T) {
 			haveAggregate: func() *aggregatestore.Aggregate[mockEntity] {
 				return aggregatestore.NewAggregate(newMockEntity(aggregateID.UUID()), 0)
 			},
-			wantErr: errors.New("obtaining entity prototype: no prototype registered for event type mockEntityEventA"),
+			wantErr: errors.New("projecting event stream: processing event: obtaining entity prototype: no prototype registered for event type mockEntityEventA"),
 		},
 		{
 			name: "returns an error when unable to unmarshal an event store event",
@@ -1185,7 +1185,7 @@ func TestEventSourcedStore_HydrateAggregate(t *testing.T) {
 			haveAggregate: func() *aggregatestore.Aggregate[mockEntity] {
 				return aggregatestore.NewAggregate(newMockEntity(aggregateID.UUID()), 0)
 			},
-			wantErr: errors.New("unmarshaling event data: mock error"),
+			wantErr: errors.New("projecting event stream: processing event: unmarshaling event data: mock error"),
 		},
 		{
 			name: "returns an error when unable to apply an event to the aggregate",
@@ -1221,7 +1221,7 @@ func TestEventSourcedStore_HydrateAggregate(t *testing.T) {
 			haveAggregate: func() *aggregatestore.Aggregate[mockEntity] {
 				return aggregatestore.NewAggregate(newMockEntity(aggregateID.UUID()), 0)
 			},
-			wantErr: errors.New("applying aggregate event: applying event: mock error"),
+			wantErr: errors.New("projecting event stream: processing event: applying aggregate event: applying event: mock error"),
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
