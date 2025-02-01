@@ -177,8 +177,9 @@ func (s *EventSourcedStore[E]) Save(ctx context.Context, aggregate *Aggregate[E]
 		}
 
 		events[i] = &eventstore.WritableEvent{
-			ID:   unsavedEvent.ID,
-			Data: data,
+			ID:        unsavedEvent.ID,
+			Data:      data,
+			Timestamp: unsavedEvent.Timestamp,
 		}
 	}
 
