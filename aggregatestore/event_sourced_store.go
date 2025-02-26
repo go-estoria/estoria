@@ -165,11 +165,12 @@ func (s *EventSourcedStore[E]) Save(ctx context.Context, aggregate *Aggregate[E]
 
 	s.log.Debug("saving aggregate to event store", "aggregate_id", aggregate.ID(), "events", len(unsavedEvents))
 
+	now := time.Now()
 	events := make([]*eventstore.WritableEvent, len(unsavedEvents))
 
 	for i, unsavedEvent := range unsavedEvents {
-		unsavedEvent.Version = aggregate.Version() + int64(i) + 1
-		unsavedEvent.Timestamp = time.Now()
+		unsavedEvent.Version = aggregate.Version() + int64(i) + 1 // TODO: this should be removed, assigning version should be done by event store
+		unsavedEvent.Timestamp = now
 
 		data, err := s.entityEventMarshaler.MarshalEntityEvent(unsavedEvent.EntityEvent)
 		if err != nil {
