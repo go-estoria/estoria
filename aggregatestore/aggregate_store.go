@@ -68,6 +68,11 @@ func (e InitializeError) Error() string {
 	return e.Operation + ": " + e.Err.Error()
 }
 
+// Unwrap returns the underlying error.
+func (e InitializeError) Unwrap() error {
+	return e.Err
+}
+
 // A CreateError is an error that occurred while creating an aggregate.
 type CreateError struct {
 	AggregateID typeid.UUID
@@ -84,6 +89,11 @@ func (e CreateError) Error() string {
 	return e.Operation + ": " + e.Err.Error()
 }
 
+// Unwrap returns the underlying error.
+func (e CreateError) Unwrap() error {
+	return e.Err
+}
+
 // A LoadError is an error that occurred while loading an aggregate.
 type LoadError struct {
 	AggregateID typeid.UUID
@@ -97,6 +107,11 @@ func (e LoadError) Error() string {
 		return e.Err.Error()
 	}
 	return e.Operation + ": " + e.Err.Error()
+}
+
+// Unwrap returns the underlying error.
+func (e LoadError) Unwrap() error {
+	return e.Err
 }
 
 // A HydrateError is an error that occurred while hydrating an aggregate.
@@ -115,6 +130,11 @@ func (e HydrateError) Error() string {
 	return e.Operation + ": " + e.Err.Error()
 }
 
+// Unwrap returns the underlying error.
+func (e HydrateError) Unwrap() error {
+	return e.Err
+}
+
 // A SaveError is an error that occurred while saving an aggregate.
 type SaveError struct {
 	AggregateID typeid.UUID
@@ -129,6 +149,11 @@ func (e SaveError) Error() string {
 	}
 
 	return e.Operation + ": " + e.Err.Error()
+}
+
+// Unwrap returns the underlying error.
+func (e SaveError) Unwrap() error {
+	return e.Err
 }
 
 // ErrAggregateNotFound indicates that an aggregate was not found in the aggregate store.

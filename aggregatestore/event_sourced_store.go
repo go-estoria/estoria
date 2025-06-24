@@ -169,7 +169,6 @@ func (s *EventSourcedStore[E]) Save(ctx context.Context, aggregate *Aggregate[E]
 	events := make([]*eventstore.WritableEvent, len(unsavedEvents))
 
 	for i, unsavedEvent := range unsavedEvents {
-		unsavedEvent.Version = aggregate.Version() + int64(i) + 1 // TODO: this should be removed, assigning version should be done by event store
 		unsavedEvent.Timestamp = now
 
 		data, err := s.entityEventMarshaler.MarshalEntityEvent(unsavedEvent.EntityEvent)
@@ -192,7 +191,8 @@ func (s *EventSourcedStore[E]) Save(ctx context.Context, aggregate *Aggregate[E]
 	}
 
 	// queue the events for application
-	for _, unsavedEvent := range unsavedEvents {
+	for i, unsavedEvent := range unsavedEvents {
+		unsavedEvent.Version = aggregate.Version() + int64(i) + 1
 		aggregate.state.WillApply(unsavedEvent)
 	}
 
