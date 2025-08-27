@@ -314,7 +314,7 @@ func TestNewEventSourcedStore(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			gotStore, err := aggregatestore.NewEventSourcedStore(tt.haveEventStore(), newMockEntity, tt.haveOpts...)
+			gotStore, err := aggregatestore.New(tt.haveEventStore(), newMockEntity, tt.haveOpts...)
 
 			if tt.wantErr != nil {
 				if err == nil || err.Error() != tt.wantErr.Error() {
@@ -433,7 +433,7 @@ func TestEventSourcedStore_LoadAggregate(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			store, err := aggregatestore.NewEventSourcedStore(tt.haveEventStore(), newMockEntity, tt.haveStoreOpts...)
+			store, err := aggregatestore.New(tt.haveEventStore(), newMockEntity, tt.haveStoreOpts...)
 			if err != nil {
 				t.Errorf("unexpected error creating store: %v", err)
 			}
@@ -1154,7 +1154,7 @@ func TestEventSourcedStore_HydrateAggregate(t *testing.T) {
 			haveAggregate: func() *aggregatestore.Aggregate[mockEntity] {
 				return aggregatestore.NewAggregate(newMockEntity(aggregateID.UUID()), 0)
 			},
-			wantErr: errors.New("projecting event stream: processing event: obtaining entity prototype: no prototype registered for event type mockEntityEventA"),
+			wantErr: errors.New("projecting event stream: processing event: obtaining entity prototype: no prototype registered for event type 'mockEntityEventA'"),
 		},
 		{
 			name: "returns an error when unable to unmarshal an event store event",
@@ -1185,7 +1185,7 @@ func TestEventSourcedStore_HydrateAggregate(t *testing.T) {
 			haveAggregate: func() *aggregatestore.Aggregate[mockEntity] {
 				return aggregatestore.NewAggregate(newMockEntity(aggregateID.UUID()), 0)
 			},
-			wantErr: errors.New("projecting event stream: processing event: unmarshaling event data: mock error"),
+			wantErr: errors.New("projecting event stream: processing event: unmarshaling event data: failed to unmarshal event data for event type 'mockEntityEventA': mock error"),
 		},
 		{
 			name: "returns an error when unable to apply an event to the aggregate",
@@ -1221,13 +1221,13 @@ func TestEventSourcedStore_HydrateAggregate(t *testing.T) {
 			haveAggregate: func() *aggregatestore.Aggregate[mockEntity] {
 				return aggregatestore.NewAggregate(newMockEntity(aggregateID.UUID()), 0)
 			},
-			wantErr: errors.New("projecting event stream: processing event: applying aggregate event: applying event: mock error"),
+			wantErr: errors.New("projecting event stream: processing event: applying aggregate event: failed to apply event type 'mockEntityEventF': applying event: mock error"),
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			store, err := aggregatestore.NewEventSourcedStore(tt.haveEventStore(), newMockEntity, tt.haveStoreOpts...)
+			store, err := aggregatestore.New(tt.haveEventStore(), newMockEntity, tt.haveStoreOpts...)
 			if err != nil {
 				t.Errorf("unexpected error creating store: %v", err)
 			}
@@ -1554,7 +1554,7 @@ func TestEventSourcedStore_SaveAggregate(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			store, err := aggregatestore.NewEventSourcedStore(tt.haveEventStore(), newMockEntity, tt.haveStoreOpts...)
+			store, err := aggregatestore.New(tt.haveEventStore(), newMockEntity, tt.haveStoreOpts...)
 			if err != nil {
 				t.Errorf("unexpected error creating store: %v", err)
 			}

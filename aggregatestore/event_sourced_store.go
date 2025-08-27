@@ -28,8 +28,8 @@ type EventSourcedStore[E estoria.Entity] struct {
 
 var _ Store[estoria.Entity] = (*EventSourcedStore[estoria.Entity])(nil)
 
-// NewEventSourcedStore creates a new EventSourcedStore.
-func NewEventSourcedStore[E estoria.Entity](
+// New creates a new event sourced aggregate store.
+func New[E estoria.Entity](
 	eventStore eventstore.Store,
 	entityFactory estoria.EntityFactory[E],
 	opts ...EventSourcedStoreOption[E],
@@ -230,18 +230,29 @@ func (s *EventSourcedStore[E]) Use(eventPrototypes ...estoria.EntityEvent[E]) er
 // Returns a projection.EventHandlerFunc that decodes and applies an entity event to an aggregate.
 func (s *EventSourcedStore[E]) eventHandlerForAggregate(aggregate *Aggregate[E]) projection.EventHandlerFunc {
 	return projection.EventHandlerFunc(func(ctx context.Context, event *eventstore.Event) error {
-		newEvent, ok := s.entityEventPrototypes[event.ID.TypeName()]
-		if !ok {
-			return HydrateError{
-				AggregateID: aggregate.ID(),
-				Operation:   "obtaining entity prototype",
-				Err:         errors.New("no prototype registered for event type " + event.ID.TypeName()),
-			}
+		if event == nil {
+			return NewHydrateError(aggregate.ID(), "event handler", errors.New("received nil event in event handler"))
+		}
+
+		eventType := event.ID.TypeName()
+		newEvent, ok := s.entityEventPrototypes[eventType]
+		if !ok || newEvent == nil {
+			return NewHydrateError(aggregate.ID(), "obtaining entity prototype",
+				fmt.Errorf("no prototype registered for event type '%s'", eventType),
+			)
 		}
 
 		entityEvent := newEvent()
+		if entityEvent == nil {
+			return NewHydrateError(aggregate.ID(), "creating entity event instance",
+				fmt.Errorf("prototype.New() returned nil for event type '%s'", eventType),
+			)
+		}
+
 		if err := s.entityEventMarshaler.UnmarshalEntityEvent(event.Data, entityEvent); err != nil {
-			return HydrateError{AggregateID: aggregate.ID(), Operation: "unmarshaling event data", Err: err}
+			return NewHydrateError(aggregate.ID(), "unmarshaling event data",
+				fmt.Errorf("failed to unmarshal event data for event type '%s': %w", eventType, err),
+			)
 		}
 
 		// enqueue and apply the event immediately
@@ -252,7 +263,9 @@ func (s *EventSourcedStore[E]) eventHandlerForAggregate(aggregate *Aggregate[E])
 			EntityEvent: entityEvent,
 		})
 		if err := aggregate.state.ApplyNext(ctx); err != nil {
-			return HydrateError{AggregateID: aggregate.ID(), Operation: "applying aggregate event", Err: err}
+			return NewHydrateError(aggregate.ID(), "applying aggregate event",
+				fmt.Errorf("failed to apply event type '%s': %w", eventType, err),
+			)
 		}
 
 		return nil

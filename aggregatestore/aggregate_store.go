@@ -121,6 +121,14 @@ type HydrateError struct {
 	Err         error
 }
 
+func NewHydrateError(id typeid.UUID, operation string, err error) HydrateError {
+	return HydrateError{
+		AggregateID: id,
+		Operation:   operation,
+		Err:         err,
+	}
+}
+
 // Error implements the error interface.
 func (e HydrateError) Error() string {
 	if e.Operation == "" {

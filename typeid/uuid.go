@@ -21,7 +21,7 @@ type UUID struct {
 }
 
 func (id UUID) MarshalJSON() ([]byte, error) {
-	return []byte(fmt.Sprintf(`"%s"`, id.String())), nil
+	return fmt.Appendf(nil, `"%s"`, id.String()), nil
 }
 
 func (id *UUID) UnmarshalJSON(data []byte) error {
