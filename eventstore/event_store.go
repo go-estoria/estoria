@@ -88,10 +88,7 @@ type Event struct {
 
 // A WritableEvent is an event that can be written to an event store.
 type WritableEvent struct {
-	ID typeid.UUID
-
-	// Timestamp is the time the event occurred. If zero (default), the current time is used.
-	Timestamp time.Time
+	Type string
 
 	// Data is the serialized event data.
 	Data []byte
@@ -128,7 +125,6 @@ func (e EventUnmarshalingError) Unwrap() error {
 // StreamVersionMismatchError is returned when the expected stream version does not match the actual stream version.
 type StreamVersionMismatchError struct {
 	StreamID        typeid.UUID
-	EventID         typeid.UUID
 	ExpectedVersion int64
 	ActualVersion   int64
 }

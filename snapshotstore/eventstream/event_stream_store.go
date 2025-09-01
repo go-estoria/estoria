@@ -77,11 +77,6 @@ func (s *EventStreamStore) WriteSnapshot(ctx context.Context, snap *snapshotstor
 
 	snapshotStreamID := typeid.FromUUID(snapshotStreamPrefix, snap.AggregateID.UUID())
 
-	eventID, err := typeid.NewUUID(snapshotStreamPrefix)
-	if err != nil {
-		return fmt.Errorf("generating snapshot event ID: %w", err)
-	}
-
 	// event data includes the aggregate ID, aggregate version, and snapshot data
 	eventData, err := s.marshaler.MarshalSnapshot(snap)
 	if err != nil {
@@ -90,14 +85,14 @@ func (s *EventStreamStore) WriteSnapshot(ctx context.Context, snap *snapshotstor
 
 	if err := s.eventWriter.AppendStream(ctx, snapshotStreamID, []*eventstore.WritableEvent{
 		{
-			ID:   eventID,
+			Type: snapshotStreamPrefix,
 			Data: eventData,
 		},
 	}, eventstore.AppendStreamOptions{}); err != nil {
 		return fmt.Errorf("appending snapshot stream: %w", err)
 	}
 
-	estoria.GetLogger().Debug("wrote snapshot", "aggregate_id", snap.AggregateID, "snapshot_event_id", eventID)
+	estoria.GetLogger().Debug("wrote snapshot", "aggregate_id", snap.AggregateID, "prefix", snapshotStreamPrefix)
 
 	return nil
 }

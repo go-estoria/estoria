@@ -357,7 +357,7 @@ func TestEventSourcedStore_LoadAggregate(t *testing.T) {
 					mockEntityEventC{C: "c"},
 				} {
 					events = append(events, &eventstore.WritableEvent{
-						ID:   typeid.FromUUID(event.EventType(), uuid.Must(uuid.NewV4())),
+						Type: event.EventType(),
 						Data: mustJSONMarshal(event),
 					})
 				}
@@ -389,7 +389,7 @@ func TestEventSourcedStore_LoadAggregate(t *testing.T) {
 					mockEntityEventC{C: "c"},
 				} {
 					events = append(events, &eventstore.WritableEvent{
-						ID:   typeid.FromUUID(event.EventType(), uuid.Must(uuid.NewV4())),
+						Type: event.EventType(),
 						Data: mustJSONMarshal(event),
 					})
 				}
@@ -501,7 +501,7 @@ func TestEventSourcedStore_HydrateAggregate(t *testing.T) {
 					mockEntityEventE{E: "e"},
 				} {
 					events = append(events, &eventstore.WritableEvent{
-						ID:   typeid.FromUUID(event.EventType(), uuid.Must(uuid.NewV4())),
+						Type: event.EventType(),
 						Data: mustJSONMarshal(event),
 					})
 				}
@@ -540,7 +540,7 @@ func TestEventSourcedStore_HydrateAggregate(t *testing.T) {
 					mockEntityEventE{E: "e"},
 				} {
 					events = append(events, &eventstore.WritableEvent{
-						ID:   typeid.FromUUID(event.EventType(), uuid.Must(uuid.NewV4())),
+						Type: event.EventType(),
 						Data: mustJSONMarshal(event),
 					})
 				}
@@ -579,7 +579,7 @@ func TestEventSourcedStore_HydrateAggregate(t *testing.T) {
 					mockEntityEventE{E: "e"},
 				} {
 					events = append(events, &eventstore.WritableEvent{
-						ID:   typeid.FromUUID(event.EventType(), uuid.Must(uuid.NewV4())),
+						Type: event.EventType(),
 						Data: mustJSONMarshal(event),
 					})
 				}
@@ -618,7 +618,7 @@ func TestEventSourcedStore_HydrateAggregate(t *testing.T) {
 					mockEntityEventE{E: "e"},
 				} {
 					events = append(events, &eventstore.WritableEvent{
-						ID:   typeid.FromUUID(event.EventType(), uuid.Must(uuid.NewV4())),
+						Type: event.EventType(),
 						Data: mustJSONMarshal(event),
 					})
 				}
@@ -657,7 +657,7 @@ func TestEventSourcedStore_HydrateAggregate(t *testing.T) {
 					mockEntityEventE{E: "e"},
 				} {
 					events = append(events, &eventstore.WritableEvent{
-						ID:   typeid.FromUUID(event.EventType(), uuid.Must(uuid.NewV4())),
+						Type: event.EventType(),
 						Data: mustJSONMarshal(event),
 					})
 				}
@@ -696,7 +696,7 @@ func TestEventSourcedStore_HydrateAggregate(t *testing.T) {
 					mockEntityEventE{E: "e"},
 				} {
 					events = append(events, &eventstore.WritableEvent{
-						ID:   typeid.FromUUID(event.EventType(), uuid.Must(uuid.NewV4())),
+						Type: event.EventType(),
 						Data: mustJSONMarshal(event),
 					})
 				}
@@ -735,7 +735,7 @@ func TestEventSourcedStore_HydrateAggregate(t *testing.T) {
 					mockEntityEventE{E: "e"},
 				} {
 					events = append(events, &eventstore.WritableEvent{
-						ID:   typeid.FromUUID(event.EventType(), uuid.Must(uuid.NewV4())),
+						Type: event.EventType(),
 						Data: mustJSONMarshal(event),
 					})
 				}
@@ -774,7 +774,7 @@ func TestEventSourcedStore_HydrateAggregate(t *testing.T) {
 					mockEntityEventE{E: "e"},
 				} {
 					events = append(events, &eventstore.WritableEvent{
-						ID:   typeid.FromUUID(event.EventType(), uuid.Must(uuid.NewV4())),
+						Type: event.EventType(),
 						Data: mustJSONMarshal(event),
 					})
 				}
@@ -813,7 +813,7 @@ func TestEventSourcedStore_HydrateAggregate(t *testing.T) {
 					mockEntityEventE{E: "e"},
 				} {
 					events = append(events, &eventstore.WritableEvent{
-						ID:   typeid.FromUUID(event.EventType(), uuid.Must(uuid.NewV4())),
+						Type: event.EventType(),
 						Data: mustJSONMarshal(event),
 					})
 				}
@@ -852,7 +852,7 @@ func TestEventSourcedStore_HydrateAggregate(t *testing.T) {
 					mockEntityEventE{E: "e"},
 				} {
 					events = append(events, &eventstore.WritableEvent{
-						ID:   typeid.FromUUID(event.EventType(), uuid.Must(uuid.NewV4())),
+						Type: event.EventType(),
 						Data: mustJSONMarshal(event),
 					})
 				}
@@ -891,7 +891,7 @@ func TestEventSourcedStore_HydrateAggregate(t *testing.T) {
 					mockEntityEventE{E: "e"},
 				} {
 					events = append(events, &eventstore.WritableEvent{
-						ID:   typeid.FromUUID(event.EventType(), uuid.Must(uuid.NewV4())),
+						Type: event.EventType(),
 						Data: mustJSONMarshal(event),
 					})
 				}
@@ -930,7 +930,7 @@ func TestEventSourcedStore_HydrateAggregate(t *testing.T) {
 					mockEntityEventE{E: "e"},
 				} {
 					events = append(events, &eventstore.WritableEvent{
-						ID:   typeid.FromUUID(event.EventType(), uuid.Must(uuid.NewV4())),
+						Type: event.EventType(),
 						Data: mustJSONMarshal(event),
 					})
 				}
@@ -969,7 +969,7 @@ func TestEventSourcedStore_HydrateAggregate(t *testing.T) {
 					mockEntityEventE{E: "e"},
 				} {
 					events = append(events, &eventstore.WritableEvent{
-						ID:   typeid.FromUUID(event.EventType(), uuid.Must(uuid.NewV4())),
+						Type: event.EventType(),
 						Data: mustJSONMarshal(event),
 					})
 				}
@@ -1008,7 +1008,7 @@ func TestEventSourcedStore_HydrateAggregate(t *testing.T) {
 					mockEntityEventE{E: "e"},
 				} {
 					events = append(events, &eventstore.WritableEvent{
-						ID:   typeid.FromUUID(event.EventType(), uuid.Must(uuid.NewV4())),
+						Type: event.EventType(),
 						Data: mustJSONMarshal(event),
 					})
 				}
@@ -1084,7 +1084,7 @@ func TestEventSourcedStore_HydrateAggregate(t *testing.T) {
 					mockEntityEventE{E: "e"},
 				} {
 					events = append(events, &eventstore.WritableEvent{
-						ID:   typeid.FromUUID(event.EventType(), uuid.Must(uuid.NewV4())),
+						Type: event.EventType(),
 						Data: mustJSONMarshal(event),
 					})
 				}
@@ -1115,7 +1115,7 @@ func TestEventSourcedStore_HydrateAggregate(t *testing.T) {
 					mockEntityEventE{E: "e"},
 				} {
 					events = append(events, &eventstore.WritableEvent{
-						ID:   typeid.FromUUID(event.EventType(), uuid.Must(uuid.NewV4())),
+						Type: event.EventType(),
 						Data: mustJSONMarshal(event),
 					})
 				}
@@ -1143,7 +1143,7 @@ func TestEventSourcedStore_HydrateAggregate(t *testing.T) {
 					mockEntityEventA{A: "a"},
 				} {
 					events = append(events, &eventstore.WritableEvent{
-						ID:   typeid.FromUUID(event.EventType(), uuid.Must(uuid.NewV4())),
+						Type: event.EventType(),
 						Data: mustJSONMarshal(event),
 					})
 				}
@@ -1164,7 +1164,7 @@ func TestEventSourcedStore_HydrateAggregate(t *testing.T) {
 					mockEntityEventA{A: "a"},
 				} {
 					events = append(events, &eventstore.WritableEvent{
-						ID:   typeid.FromUUID(event.EventType(), uuid.Must(uuid.NewV4())),
+						Type: event.EventType(),
 						Data: mustJSONMarshal(event),
 					})
 				}
@@ -1200,7 +1200,7 @@ func TestEventSourcedStore_HydrateAggregate(t *testing.T) {
 					mockEntityEventE{E: "e"},
 				} {
 					events = append(events, &eventstore.WritableEvent{
-						ID:   typeid.FromUUID(event.EventType(), uuid.Must(uuid.NewV4())),
+						Type: event.EventType(),
 						Data: mustJSONMarshal(event),
 					})
 				}
@@ -1335,7 +1335,7 @@ func TestEventSourcedStore_SaveAggregate(t *testing.T) {
 					mockEntityEventC{C: "c"},
 				} {
 					events = append(events, &eventstore.WritableEvent{
-						ID:   typeid.FromUUID(event.EventType(), uuid.Must(uuid.NewV4())),
+						Type: event.EventType(),
 						Data: mustJSONMarshal(event),
 					})
 				}
@@ -1366,7 +1366,7 @@ func TestEventSourcedStore_SaveAggregate(t *testing.T) {
 					mockEntityEventC{C: "c"},
 				} {
 					events = append(events, &eventstore.WritableEvent{
-						ID:   typeid.FromUUID(event.EventType(), uuid.Must(uuid.NewV4())),
+						Type: event.EventType(),
 						Data: mustJSONMarshal(event),
 					})
 				}
@@ -1399,7 +1399,7 @@ func TestEventSourcedStore_SaveAggregate(t *testing.T) {
 					mockEntityEventC{C: "c"},
 				} {
 					events = append(events, &eventstore.WritableEvent{
-						ID:   typeid.FromUUID(event.EventType(), uuid.Must(uuid.NewV4())),
+						Type: event.EventType(),
 						Data: mustJSONMarshal(event),
 					})
 				}
@@ -1426,7 +1426,7 @@ func TestEventSourcedStore_SaveAggregate(t *testing.T) {
 					mockEntityEventC{C: "c"},
 				} {
 					events = append(events, &eventstore.WritableEvent{
-						ID:   typeid.FromUUID(event.EventType(), uuid.Must(uuid.NewV4())),
+						Type: event.EventType(),
 						Data: mustJSONMarshal(event),
 					})
 				}

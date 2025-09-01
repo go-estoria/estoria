@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"time"
 
 	"github.com/go-estoria/estoria"
 	"github.com/go-estoria/estoria/eventstore"
@@ -165,21 +164,17 @@ func (s *EventSourcedStore[E]) Save(ctx context.Context, aggregate *Aggregate[E]
 
 	s.log.Debug("saving aggregate to event store", "aggregate_id", aggregate.ID(), "events", len(unsavedEvents))
 
-	now := time.Now()
 	events := make([]*eventstore.WritableEvent, len(unsavedEvents))
 
 	for i, unsavedEvent := range unsavedEvents {
-		unsavedEvent.Timestamp = now
-
 		data, err := s.entityEventMarshaler.MarshalEntityEvent(unsavedEvent.EntityEvent)
 		if err != nil {
 			return SaveError{AggregateID: aggregate.ID(), Operation: "marshaling event data", Err: err}
 		}
 
 		events[i] = &eventstore.WritableEvent{
-			ID:        unsavedEvent.ID,
-			Data:      data,
-			Timestamp: unsavedEvent.Timestamp,
+			Type: unsavedEvent.ID.TypeName(),
+			Data: data,
 		}
 	}
 

@@ -56,7 +56,6 @@ func (s *EventStore) AppendStream(ctx context.Context, streamID typeid.UUID, eve
 	if opts.ExpectVersion > 0 && opts.ExpectVersion != int64(len(stream)) {
 		return eventstore.StreamVersionMismatchError{
 			StreamID:        streamID,
-			EventID:         events[0].ID,
 			ExpectedVersion: opts.ExpectVersion,
 			ActualVersion:   int64(len(stream)),
 		}
@@ -66,8 +65,13 @@ func (s *EventStore) AppendStream(ctx context.Context, streamID typeid.UUID, eve
 
 	tx := []*eventStoreDocument{}
 	for i, writableEvent := range events {
+		eventID, err := typeid.NewUUID(writableEvent.Type)
+		if err != nil {
+			return eventstore.EventMarshalingError{StreamID: streamID, Err: fmt.Errorf("generating event ID: %w", err)}
+		}
+
 		event := &eventstore.Event{
-			ID:            writableEvent.ID,
+			ID:            eventID,
 			StreamID:      streamID,
 			StreamVersion: int64(len(stream) + i + 1),
 			Timestamp:     time.Now(),
