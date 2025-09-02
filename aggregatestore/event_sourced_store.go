@@ -135,11 +135,10 @@ func (s *EventSourcedStore[E]) Hydrate(ctx context.Context, aggregate *Aggregate
 		return HydrateError{AggregateID: aggregate.ID(), Operation: "projecting event stream", Err: err}
 	}
 
-	s.log.Info("applied events to aggregate", "count", result.NumProjectedEvents)
-
 	s.log.Debug("hydrated aggregate",
 		"aggregate_id", aggregate.ID(),
-		"version", aggregate.Version())
+		"version", aggregate.Version(),
+		"events_applied", result.NumProjectedEvents)
 
 	return nil
 }
