@@ -52,7 +52,7 @@ func (s *mockAggregateStore[E]) Save(ctx context.Context, aggregate *aggregatest
 }
 
 type mockEntity struct {
-	ID               typeid.UUID
+	ID               typeid.ID
 	numAppliedEvents int64
 }
 
@@ -60,10 +60,10 @@ var _ estoria.Entity = mockEntity{}
 
 func newMockEntity(id uuid.UUID) mockEntity {
 	return mockEntity{
-		ID: typeid.FromUUID("mockentity", id),
+		ID: typeid.New("mockentity", id),
 	}
 }
 
-func (e mockEntity) EntityID() typeid.UUID {
+func (e mockEntity) EntityID() typeid.ID {
 	return e.ID
 }

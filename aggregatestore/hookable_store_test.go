@@ -212,8 +212,8 @@ func TestHookableStore_Load(t *testing.T) {
 			}
 
 			// aggregate has the correct ID
-			if gotAggregate.ID().String() != typeid.FromUUID("mockentity", aggregateID).String() {
-				t.Errorf("want aggregate ID %s, got %s", typeid.FromUUID("mockentity", aggregateID), gotAggregate.ID())
+			if gotAggregate.ID().String() != typeid.New("mockentity", aggregateID).String() {
+				t.Errorf("want aggregate ID %s, got %s", typeid.New("mockentity", aggregateID), gotAggregate.ID())
 			}
 			// aggregate has the correct version
 			if gotAggregate.Version() != tt.wantAggregate.Version() {
@@ -281,8 +281,8 @@ func TestHookableStore_Hydrate(t *testing.T) {
 			}
 
 			// aggregate has the correct ID
-			if gotAggregate.ID().String() != typeid.FromUUID("mockentity", aggregateID).String() {
-				t.Errorf("want aggregate ID %s, got %s", typeid.FromUUID("mockentity", aggregateID), gotAggregate.ID())
+			if gotAggregate.ID().String() != typeid.New("mockentity", aggregateID).String() {
+				t.Errorf("want aggregate ID %s, got %s", typeid.New("mockentity", aggregateID), gotAggregate.ID())
 			}
 			// aggregate has the correct version
 			if gotAggregate.Version() != tt.wantAggregate.Version() {
@@ -457,8 +457,8 @@ func TestHookableStore_Save(t *testing.T) {
 			}
 
 			// aggregate has the correct ID
-			if gotAggregate.ID().String() != typeid.FromUUID("mockentity", aggregateID).String() {
-				t.Errorf("want aggregate ID %s, got %s", typeid.FromUUID("mockentity", aggregateID), gotAggregate.ID())
+			if gotAggregate.ID().String() != typeid.New("mockentity", aggregateID).String() {
+				t.Errorf("want aggregate ID %s, got %s", typeid.New("mockentity", aggregateID), gotAggregate.ID())
 			}
 			// aggregate has the correct version
 			if gotAggregate.Version() != tt.wantAggregate.Version() {

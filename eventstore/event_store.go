@@ -19,7 +19,7 @@ type Store interface {
 type StreamReader interface {
 	// ReadStream creates an event stream iterator for reading events from a stream.
 	// The starting point, direction, and number of events to read can be specified in the options.
-	ReadStream(ctx context.Context, id typeid.UUID, opts ReadStreamOptions) (StreamIterator, error)
+	ReadStream(ctx context.Context, id typeid.ID, opts ReadStreamOptions) (StreamIterator, error)
 }
 
 // An StreamIterator reads events from a stream.
@@ -65,7 +65,7 @@ const (
 type StreamWriter interface {
 	// AppendStream appends events to an event stream.
 	// The expected version of the stream can be specified in the options.
-	AppendStream(ctx context.Context, streamID typeid.UUID, events []*WritableEvent, opts AppendStreamOptions) error
+	AppendStream(ctx context.Context, streamID typeid.ID, events []*WritableEvent, opts AppendStreamOptions) error
 }
 
 // AppendStreamOptions are options for appending events to a stream.
@@ -79,8 +79,8 @@ type AppendStreamOptions struct {
 
 // An Event is an event that has been read from an event store.
 type Event struct {
-	ID            typeid.UUID
-	StreamID      typeid.UUID
+	ID            typeid.ID
+	StreamID      typeid.ID
 	StreamVersion int64
 	Timestamp     time.Time
 	Data          []byte
@@ -95,8 +95,8 @@ type WritableEvent struct {
 }
 
 type EventMarshalingError struct {
-	StreamID typeid.UUID
-	EventID  typeid.UUID
+	StreamID typeid.ID
+	EventID  typeid.ID
 	Err      error
 }
 
@@ -109,8 +109,8 @@ func (e EventMarshalingError) Unwrap() error {
 }
 
 type EventUnmarshalingError struct {
-	StreamID typeid.UUID
-	EventID  typeid.UUID
+	StreamID typeid.ID
+	EventID  typeid.ID
 	Err      error
 }
 
@@ -124,7 +124,7 @@ func (e EventUnmarshalingError) Unwrap() error {
 
 // StreamVersionMismatchError is returned when the expected stream version does not match the actual stream version.
 type StreamVersionMismatchError struct {
-	StreamID        typeid.UUID
+	StreamID        typeid.ID
 	ExpectedVersion int64
 	ActualVersion   int64
 }

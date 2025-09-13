@@ -43,7 +43,7 @@ func NewEventStore(opts ...EventStoreOption) (*EventStore, error) {
 }
 
 // AppendStream appends events to a stream.
-func (s *EventStore) AppendStream(ctx context.Context, streamID typeid.UUID, events []*eventstore.WritableEvent, opts eventstore.AppendStreamOptions) error {
+func (s *EventStore) AppendStream(ctx context.Context, streamID typeid.ID, events []*eventstore.WritableEvent, opts eventstore.AppendStreamOptions) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -65,13 +65,8 @@ func (s *EventStore) AppendStream(ctx context.Context, streamID typeid.UUID, eve
 
 	tx := []*eventStoreDocument{}
 	for i, writableEvent := range events {
-		eventID, err := typeid.NewUUID(writableEvent.Type)
-		if err != nil {
-			return eventstore.EventMarshalingError{StreamID: streamID, Err: fmt.Errorf("generating event ID: %w", err)}
-		}
-
 		event := &eventstore.Event{
-			ID:            eventID,
+			ID:            typeid.NewV4(writableEvent.Type),
 			StreamID:      streamID,
 			StreamVersion: int64(len(stream) + i + 1),
 			Timestamp:     time.Now(),
@@ -100,7 +95,7 @@ func (s *EventStore) AppendStream(ctx context.Context, streamID typeid.UUID, eve
 }
 
 // ReadStream reads events from a stream.
-func (s *EventStore) ReadStream(_ context.Context, streamID typeid.UUID, opts eventstore.ReadStreamOptions) (eventstore.StreamIterator, error) {
+func (s *EventStore) ReadStream(_ context.Context, streamID typeid.ID, opts eventstore.ReadStreamOptions) (eventstore.StreamIterator, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 

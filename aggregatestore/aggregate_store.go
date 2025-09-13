@@ -91,7 +91,7 @@ func (e InitializeError) Unwrap() error {
 
 // A CreateError is an error that occurred while creating an aggregate.
 type CreateError struct {
-	AggregateID typeid.UUID
+	AggregateID typeid.ID
 	Operation   string
 	Err         error
 }
@@ -112,7 +112,7 @@ func (e CreateError) Unwrap() error {
 
 // A LoadError is an error that occurred while loading an aggregate.
 type LoadError struct {
-	AggregateID typeid.UUID
+	AggregateID typeid.ID
 	Operation   string
 	Err         error
 }
@@ -132,12 +132,12 @@ func (e LoadError) Unwrap() error {
 
 // A HydrateError is an error that occurred while hydrating an aggregate.
 type HydrateError struct {
-	AggregateID typeid.UUID
+	AggregateID typeid.ID
 	Operation   string
 	Err         error
 }
 
-func NewHydrateError(id typeid.UUID, operation string, err error) HydrateError {
+func NewHydrateError(id typeid.ID, operation string, err error) HydrateError {
 	return HydrateError{
 		AggregateID: id,
 		Operation:   operation,
@@ -161,7 +161,7 @@ func (e HydrateError) Unwrap() error {
 
 // A SaveError is an error that occurred while saving an aggregate.
 type SaveError struct {
-	AggregateID typeid.UUID
+	AggregateID typeid.ID
 	Operation   string
 	Err         error
 }

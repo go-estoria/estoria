@@ -8,7 +8,7 @@ import (
 )
 
 type streamIterator struct {
-	streamID  typeid.UUID
+	streamID  typeid.ID
 	events    []*eventStoreDocument
 	cursor    int64
 	direction eventstore.ReadStreamDirection

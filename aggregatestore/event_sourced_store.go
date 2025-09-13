@@ -184,7 +184,7 @@ func (s *EventSourcedStore[E]) Save(ctx context.Context, aggregate *Aggregate[E]
 		}
 
 		events[i] = &eventstore.WritableEvent{
-			Type: unsavedEvent.ID.TypeName(),
+			Type: unsavedEvent.ID.Type,
 			Data: data,
 		}
 	}
@@ -244,7 +244,7 @@ func (s *EventSourcedStore[E]) eventHandlerForAggregate(aggregate *Aggregate[E])
 			return NewHydrateError(aggregate.ID(), "event handler", errors.New("received nil event in event handler"))
 		}
 
-		eventType := event.ID.TypeName()
+		eventType := event.ID.Type
 		newEvent, ok := s.entityEventPrototypes[eventType]
 		if !ok || newEvent == nil {
 			return NewHydrateError(aggregate.ID(), "obtaining entity prototype",

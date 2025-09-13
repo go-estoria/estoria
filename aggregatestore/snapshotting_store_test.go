@@ -15,11 +15,11 @@ import (
 )
 
 type mockSnapshotStore struct {
-	ReadSnapshotFn  func(context.Context, typeid.UUID, snapshotstore.ReadSnapshotOptions) (*snapshotstore.AggregateSnapshot, error)
+	ReadSnapshotFn  func(context.Context, typeid.ID, snapshotstore.ReadSnapshotOptions) (*snapshotstore.AggregateSnapshot, error)
 	WriteSnapshotFn func(context.Context, *snapshotstore.AggregateSnapshot) error
 }
 
-func (m *mockSnapshotStore) ReadSnapshot(ctx context.Context, aggregateID typeid.UUID, opts snapshotstore.ReadSnapshotOptions) (*snapshotstore.AggregateSnapshot, error) {
+func (m *mockSnapshotStore) ReadSnapshot(ctx context.Context, aggregateID typeid.ID, opts snapshotstore.ReadSnapshotOptions) (*snapshotstore.AggregateSnapshot, error) {
 	if m.ReadSnapshotFn != nil {
 		return m.ReadSnapshotFn(ctx, aggregateID, opts)
 	}
@@ -36,10 +36,10 @@ func (m *mockSnapshotStore) WriteSnapshot(ctx context.Context, snapshot *snapsho
 }
 
 type mockSnapshotPolicy struct {
-	ShouldSnapshotFn func(typeid.UUID, int64, time.Time) bool
+	ShouldSnapshotFn func(typeid.ID, int64, time.Time) bool
 }
 
-func (m *mockSnapshotPolicy) ShouldSnapshot(aggregateID typeid.UUID, version int64, timestamp time.Time) bool {
+func (m *mockSnapshotPolicy) ShouldSnapshot(aggregateID typeid.ID, version int64, timestamp time.Time) bool {
 	if m.ShouldSnapshotFn != nil {
 		return m.ShouldSnapshotFn(aggregateID, version, timestamp)
 	}
@@ -195,7 +195,7 @@ func TestSnapshottingStore_Load(t *testing.T) {
 				},
 			},
 			haveSnapshotStore: &mockSnapshotStore{
-				ReadSnapshotFn: func(_ context.Context, id typeid.UUID, _ snapshotstore.ReadSnapshotOptions) (*snapshotstore.AggregateSnapshot, error) {
+				ReadSnapshotFn: func(_ context.Context, id typeid.ID, _ snapshotstore.ReadSnapshotOptions) (*snapshotstore.AggregateSnapshot, error) {
 					return &snapshotstore.AggregateSnapshot{
 						AggregateID:      id,
 						AggregateVersion: 12,
@@ -223,7 +223,7 @@ func TestSnapshottingStore_Load(t *testing.T) {
 				},
 			},
 			haveSnapshotStore: &mockSnapshotStore{
-				ReadSnapshotFn: func(_ context.Context, id typeid.UUID, _ snapshotstore.ReadSnapshotOptions) (*snapshotstore.AggregateSnapshot, error) {
+				ReadSnapshotFn: func(_ context.Context, id typeid.ID, _ snapshotstore.ReadSnapshotOptions) (*snapshotstore.AggregateSnapshot, error) {
 					return &snapshotstore.AggregateSnapshot{
 						AggregateID:      id,
 						AggregateVersion: 42,
@@ -268,7 +268,7 @@ func TestSnapshottingStore_Load(t *testing.T) {
 				},
 			},
 			haveSnapshotStore: &mockSnapshotStore{
-				ReadSnapshotFn: func(_ context.Context, _ typeid.UUID, _ snapshotstore.ReadSnapshotOptions) (*snapshotstore.AggregateSnapshot, error) {
+				ReadSnapshotFn: func(_ context.Context, _ typeid.ID, _ snapshotstore.ReadSnapshotOptions) (*snapshotstore.AggregateSnapshot, error) {
 					return nil, errors.New("mock error")
 				},
 			},
@@ -312,8 +312,8 @@ func TestSnapshottingStore_Load(t *testing.T) {
 			}
 
 			// aggregate has the correct ID
-			if gotAggregate.ID().String() != typeid.FromUUID("mockentity", aggregateID).String() {
-				t.Errorf("want aggregate ID %s, got %s", typeid.FromUUID("mockentity", aggregateID), gotAggregate.ID())
+			if gotAggregate.ID().String() != typeid.New("mockentity", aggregateID).String() {
+				t.Errorf("want aggregate ID %s, got %s", typeid.New("mockentity", aggregateID), gotAggregate.ID())
 			}
 			// aggregate has the correct version
 			if gotAggregate.Version() != tt.wantAggregate.Version() {
@@ -326,7 +326,7 @@ func TestSnapshottingStore_Load(t *testing.T) {
 func TestSnapshottingStore_Hydrate(t *testing.T) {
 	t.Parallel()
 
-	aggregateID := typeid.Must(typeid.NewUUID("mockentity")).(typeid.UUID)
+	aggregateID := typeid.NewV4("mockentity")
 
 	for _, tt := range []struct {
 		name                      string
@@ -350,7 +350,7 @@ func TestSnapshottingStore_Hydrate(t *testing.T) {
 				},
 			},
 			haveSnapshotStore: &mockSnapshotStore{
-				ReadSnapshotFn: func(_ context.Context, id typeid.UUID, _ snapshotstore.ReadSnapshotOptions) (*snapshotstore.AggregateSnapshot, error) {
+				ReadSnapshotFn: func(_ context.Context, id typeid.ID, _ snapshotstore.ReadSnapshotOptions) (*snapshotstore.AggregateSnapshot, error) {
 					return &snapshotstore.AggregateSnapshot{
 						AggregateID:      id,
 						AggregateVersion: 42,
@@ -367,7 +367,7 @@ func TestSnapshottingStore_Hydrate(t *testing.T) {
 				ToVersion: 42,
 			},
 			wantAggregate: func() *aggregatestore.Aggregate[mockEntity] {
-				return aggregatestore.NewAggregate(newMockEntity(aggregateID.UUID()), 42)
+				return aggregatestore.NewAggregate(newMockEntity(aggregateID.ID), 42)
 			}(),
 		},
 		{
@@ -382,7 +382,7 @@ func TestSnapshottingStore_Hydrate(t *testing.T) {
 				},
 			},
 			haveSnapshotStore: &mockSnapshotStore{
-				ReadSnapshotFn: func(_ context.Context, id typeid.UUID, _ snapshotstore.ReadSnapshotOptions) (*snapshotstore.AggregateSnapshot, error) {
+				ReadSnapshotFn: func(_ context.Context, id typeid.ID, _ snapshotstore.ReadSnapshotOptions) (*snapshotstore.AggregateSnapshot, error) {
 					return &snapshotstore.AggregateSnapshot{
 						AggregateID:      id,
 						AggregateVersion: 42,
@@ -396,7 +396,7 @@ func TestSnapshottingStore_Hydrate(t *testing.T) {
 				return agg
 			}(),
 			wantAggregate: func() *aggregatestore.Aggregate[mockEntity] {
-				return aggregatestore.NewAggregate(newMockEntity(aggregateID.UUID()), 45)
+				return aggregatestore.NewAggregate(newMockEntity(aggregateID.ID), 45)
 			}(),
 		},
 		// {
@@ -414,13 +414,13 @@ func TestSnapshottingStore_Hydrate(t *testing.T) {
 			},
 			haveSnapshotStore: &mockSnapshotStore{},
 			haveAggregate: func() *aggregatestore.Aggregate[mockEntity] {
-				return aggregatestore.NewAggregate(newMockEntity(aggregateID.UUID()), 42)
+				return aggregatestore.NewAggregate(newMockEntity(aggregateID.ID), 42)
 			}(),
 			haveOpts: &aggregatestore.HydrateOptions{
 				ToVersion: 42,
 			},
 			wantAggregate: func() *aggregatestore.Aggregate[mockEntity] {
-				return aggregatestore.NewAggregate(newMockEntity(aggregateID.UUID()), 42)
+				return aggregatestore.NewAggregate(newMockEntity(aggregateID.ID), 42)
 			}(),
 		},
 		{
@@ -435,13 +435,13 @@ func TestSnapshottingStore_Hydrate(t *testing.T) {
 			},
 			haveSnapshotStore: &mockSnapshotStore{},
 			haveAggregate: func() *aggregatestore.Aggregate[mockEntity] {
-				return aggregatestore.NewAggregate(newMockEntity(aggregateID.UUID()), 42)
+				return aggregatestore.NewAggregate(newMockEntity(aggregateID.ID), 42)
 			}(),
 			haveOpts: &aggregatestore.HydrateOptions{
 				ToVersion: 37,
 			},
 			wantAggregate: func() *aggregatestore.Aggregate[mockEntity] {
-				return aggregatestore.NewAggregate(newMockEntity(aggregateID.UUID()), 42)
+				return aggregatestore.NewAggregate(newMockEntity(aggregateID.ID), 42)
 			}(),
 		},
 		{
@@ -456,15 +456,15 @@ func TestSnapshottingStore_Hydrate(t *testing.T) {
 				},
 			},
 			haveSnapshotStore: &mockSnapshotStore{
-				ReadSnapshotFn: func(_ context.Context, _ typeid.UUID, _ snapshotstore.ReadSnapshotOptions) (*snapshotstore.AggregateSnapshot, error) {
+				ReadSnapshotFn: func(_ context.Context, _ typeid.ID, _ snapshotstore.ReadSnapshotOptions) (*snapshotstore.AggregateSnapshot, error) {
 					return nil, errors.New("mock error")
 				},
 			},
 			haveAggregate: func() *aggregatestore.Aggregate[mockEntity] {
-				return aggregatestore.NewAggregate(newMockEntity(aggregateID.UUID()), 42)
+				return aggregatestore.NewAggregate(newMockEntity(aggregateID.ID), 42)
 			}(),
 			wantAggregate: func() *aggregatestore.Aggregate[mockEntity] {
-				return aggregatestore.NewAggregate(newMockEntity(aggregateID.UUID()), 45)
+				return aggregatestore.NewAggregate(newMockEntity(aggregateID.ID), 45)
 			}(),
 		},
 		{
@@ -479,15 +479,15 @@ func TestSnapshottingStore_Hydrate(t *testing.T) {
 				},
 			},
 			haveSnapshotStore: &mockSnapshotStore{
-				ReadSnapshotFn: func(_ context.Context, _ typeid.UUID, _ snapshotstore.ReadSnapshotOptions) (*snapshotstore.AggregateSnapshot, error) {
+				ReadSnapshotFn: func(_ context.Context, _ typeid.ID, _ snapshotstore.ReadSnapshotOptions) (*snapshotstore.AggregateSnapshot, error) {
 					return nil, snapshotstore.ErrSnapshotNotFound
 				},
 			},
 			haveAggregate: func() *aggregatestore.Aggregate[mockEntity] {
-				return aggregatestore.NewAggregate(newMockEntity(aggregateID.UUID()), 42)
+				return aggregatestore.NewAggregate(newMockEntity(aggregateID.ID), 42)
 			}(),
 			wantAggregate: func() *aggregatestore.Aggregate[mockEntity] {
-				return aggregatestore.NewAggregate(newMockEntity(aggregateID.UUID()), 45)
+				return aggregatestore.NewAggregate(newMockEntity(aggregateID.ID), 45)
 			}(),
 		},
 		{
@@ -502,7 +502,7 @@ func TestSnapshottingStore_Hydrate(t *testing.T) {
 				},
 			},
 			haveSnapshotStore: &mockSnapshotStore{
-				ReadSnapshotFn: func(_ context.Context, _ typeid.UUID, _ snapshotstore.ReadSnapshotOptions) (*snapshotstore.AggregateSnapshot, error) {
+				ReadSnapshotFn: func(_ context.Context, _ typeid.ID, _ snapshotstore.ReadSnapshotOptions) (*snapshotstore.AggregateSnapshot, error) {
 					return &snapshotstore.AggregateSnapshot{
 						AggregateID:      aggregateID,
 						AggregateVersion: 42,
@@ -514,10 +514,10 @@ func TestSnapshottingStore_Hydrate(t *testing.T) {
 				aggregatestore.WithSnapshotMarshaler(estoria.JSONMarshaler[mockEntity]{}),
 			},
 			haveAggregate: func() *aggregatestore.Aggregate[mockEntity] {
-				return aggregatestore.NewAggregate(newMockEntity(aggregateID.UUID()), 42)
+				return aggregatestore.NewAggregate(newMockEntity(aggregateID.ID), 42)
 			}(),
 			wantAggregate: func() *aggregatestore.Aggregate[mockEntity] {
-				return aggregatestore.NewAggregate(newMockEntity(aggregateID.UUID()), 45)
+				return aggregatestore.NewAggregate(newMockEntity(aggregateID.ID), 45)
 			}(),
 		},
 		{
@@ -532,7 +532,7 @@ func TestSnapshottingStore_Hydrate(t *testing.T) {
 			haveInner:         &mockAggregateStore[mockEntity]{},
 			haveSnapshotStore: &mockSnapshotStore{},
 			haveAggregate: func() *aggregatestore.Aggregate[mockEntity] {
-				return aggregatestore.NewAggregate(newMockEntity(aggregateID.UUID()), 42)
+				return aggregatestore.NewAggregate(newMockEntity(aggregateID.ID), 42)
 			}(),
 			haveOpts: &aggregatestore.HydrateOptions{
 				ToVersion: -1,
@@ -547,7 +547,7 @@ func TestSnapshottingStore_Hydrate(t *testing.T) {
 				aggregatestore.WithSnapshotReader[mockEntity](nil),
 			},
 			haveAggregate: func() *aggregatestore.Aggregate[mockEntity] {
-				return aggregatestore.NewAggregate(newMockEntity(aggregateID.UUID()), 42)
+				return aggregatestore.NewAggregate(newMockEntity(aggregateID.ID), 42)
 			}(),
 			wantErr: aggregatestore.HydrateError{Err: errors.New("snapshot store has no snapshot reader")},
 		},
@@ -584,8 +584,8 @@ func TestSnapshottingStore_Hydrate(t *testing.T) {
 			}
 
 			// aggregate has the correct ID
-			if gotAggregate.ID().String() != typeid.FromUUID("mockentity", aggregateID.UUID()).String() {
-				t.Errorf("want aggregate ID %s, got %s", typeid.FromUUID("mockentity", aggregateID.UUID()), gotAggregate.ID())
+			if gotAggregate.ID().String() != typeid.New("mockentity", aggregateID.ID).String() {
+				t.Errorf("want aggregate ID %s, got %s", typeid.New("mockentity", aggregateID.ID), gotAggregate.ID())
 			}
 			// aggregate has the correct version
 			if gotAggregate.Version() != tt.wantAggregate.Version() {
@@ -598,7 +598,7 @@ func TestSnapshottingStore_Hydrate(t *testing.T) {
 func TestSnapshottingStore_Save(t *testing.T) {
 	t.Parallel()
 
-	aggregateID := typeid.Must(typeid.NewUUID("mockentity")).(typeid.UUID)
+	aggregateID := typeid.NewV4("mockentity")
 
 	for _, tt := range []struct {
 		name                      string
@@ -624,12 +624,12 @@ func TestSnapshottingStore_Save(t *testing.T) {
 			},
 			haveSnapshotStore: &mockSnapshotStore{},
 			haveSnapshotPolicy: &mockSnapshotPolicy{
-				ShouldSnapshotFn: func(_ typeid.UUID, _ int64, _ time.Time) bool {
+				ShouldSnapshotFn: func(_ typeid.ID, _ int64, _ time.Time) bool {
 					return false
 				},
 			},
 			haveAggregate: func() *aggregatestore.Aggregate[mockEntity] {
-				return aggregatestore.NewAggregate(newMockEntity(aggregateID.UUID()), 42)
+				return aggregatestore.NewAggregate(newMockEntity(aggregateID.ID), 42)
 			}(),
 			wantAggregate: func() *aggregatestore.Aggregate[mockEntity] {
 				agg := &aggregatestore.Aggregate[mockEntity]{}
@@ -650,7 +650,7 @@ func TestSnapshottingStore_Save(t *testing.T) {
 			},
 			haveSnapshotStore: &mockSnapshotStore{},
 			haveSnapshotPolicy: &mockSnapshotPolicy{
-				ShouldSnapshotFn: func(_ typeid.UUID, _ int64, _ time.Time) bool {
+				ShouldSnapshotFn: func(_ typeid.ID, _ int64, _ time.Time) bool {
 					return true
 				},
 			},
@@ -662,7 +662,7 @@ func TestSnapshottingStore_Save(t *testing.T) {
 				}),
 			},
 			haveAggregate: func() *aggregatestore.Aggregate[mockEntity] {
-				return aggregatestore.NewAggregate(newMockEntity(aggregateID.UUID()), 42)
+				return aggregatestore.NewAggregate(newMockEntity(aggregateID.ID), 42)
 			}(),
 			wantAggregate: func() *aggregatestore.Aggregate[mockEntity] {
 				agg := &aggregatestore.Aggregate[mockEntity]{}
@@ -687,12 +687,12 @@ func TestSnapshottingStore_Save(t *testing.T) {
 				},
 			},
 			haveSnapshotPolicy: &mockSnapshotPolicy{
-				ShouldSnapshotFn: func(_ typeid.UUID, _ int64, _ time.Time) bool {
+				ShouldSnapshotFn: func(_ typeid.ID, _ int64, _ time.Time) bool {
 					return true
 				},
 			},
 			haveAggregate: func() *aggregatestore.Aggregate[mockEntity] {
-				return aggregatestore.NewAggregate(newMockEntity(aggregateID.UUID()), 42)
+				return aggregatestore.NewAggregate(newMockEntity(aggregateID.ID), 42)
 			}(),
 			wantAggregate: func() *aggregatestore.Aggregate[mockEntity] {
 				agg := &aggregatestore.Aggregate[mockEntity]{}
@@ -717,12 +717,12 @@ func TestSnapshottingStore_Save(t *testing.T) {
 				},
 			},
 			haveSnapshotPolicy: &mockSnapshotPolicy{
-				ShouldSnapshotFn: func(_ typeid.UUID, _ int64, _ time.Time) bool {
+				ShouldSnapshotFn: func(_ typeid.ID, _ int64, _ time.Time) bool {
 					return true
 				},
 			},
 			haveAggregate: func() *aggregatestore.Aggregate[mockEntity] {
-				return aggregatestore.NewAggregate(newMockEntity(aggregateID.UUID()), 42)
+				return aggregatestore.NewAggregate(newMockEntity(aggregateID.ID), 42)
 			}(),
 			wantAggregate: func() *aggregatestore.Aggregate[mockEntity] {
 				agg := &aggregatestore.Aggregate[mockEntity]{}
@@ -748,7 +748,7 @@ func TestSnapshottingStore_Save(t *testing.T) {
 			haveSnapshotStore:  &mockSnapshotStore{},
 			haveSnapshotPolicy: &mockSnapshotPolicy{},
 			haveAggregate: func() *aggregatestore.Aggregate[mockEntity] {
-				return aggregatestore.NewAggregate(newMockEntity(aggregateID.UUID()), 42)
+				return aggregatestore.NewAggregate(newMockEntity(aggregateID.ID), 42)
 			}(),
 			wantErr: aggregatestore.SaveError{Err: errors.New("saving aggregate using inner store: mock error")},
 		},
@@ -775,12 +775,12 @@ func TestSnapshottingStore_Save(t *testing.T) {
 				},
 			},
 			haveSnapshotPolicy: &mockSnapshotPolicy{
-				ShouldSnapshotFn: func(_ typeid.UUID, _ int64, _ time.Time) bool {
+				ShouldSnapshotFn: func(_ typeid.ID, _ int64, _ time.Time) bool {
 					return true
 				},
 			},
 			haveAggregate: func() *aggregatestore.Aggregate[mockEntity] {
-				return aggregatestore.NewAggregate(newMockEntity(aggregateID.UUID()), 42)
+				return aggregatestore.NewAggregate(newMockEntity(aggregateID.ID), 42)
 			}(),
 			wantErr: aggregatestore.SaveError{Err: errors.New("applying next aggregate event: applying event: mock error")},
 		},
@@ -817,8 +817,8 @@ func TestSnapshottingStore_Save(t *testing.T) {
 			}
 
 			// aggregate has the correct ID
-			if gotAggregate.ID().String() != typeid.FromUUID("mockentity", aggregateID.UUID()).String() {
-				t.Errorf("want aggregate ID %s, got %s", typeid.FromUUID("mockentity", aggregateID.UUID()), gotAggregate.ID())
+			if gotAggregate.ID().String() != typeid.New("mockentity", aggregateID.ID).String() {
+				t.Errorf("want aggregate ID %s, got %s", typeid.New("mockentity", aggregateID.ID), gotAggregate.ID())
 			}
 			// aggregate has the correct version
 			if gotAggregate.Version() != tt.wantAggregate.Version() {

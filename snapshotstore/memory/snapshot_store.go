@@ -22,20 +22,20 @@ type SnapshotMarshaler interface {
 }
 
 type SnapshotStore struct {
-	snapshots map[typeid.UUID][]*snapshotstore.AggregateSnapshot
+	snapshots map[typeid.ID][]*snapshotstore.AggregateSnapshot
 	marshaler SnapshotMarshaler
 	retention RetentionPolicy
 }
 
 func NewSnapshotStore() *SnapshotStore {
 	return &SnapshotStore{
-		snapshots: map[typeid.UUID][]*snapshotstore.AggregateSnapshot{},
+		snapshots: map[typeid.ID][]*snapshotstore.AggregateSnapshot{},
 		marshaler: snapshotstore.JSONSnapshotMarshaler{},
 		retention: snapshotstore.MaxSnapshotsRetentionPolicy{N: 1},
 	}
 }
 
-func (s *SnapshotStore) ReadSnapshot(_ context.Context, aggregateID typeid.UUID, opts snapshotstore.ReadSnapshotOptions) (*snapshotstore.AggregateSnapshot, error) {
+func (s *SnapshotStore) ReadSnapshot(_ context.Context, aggregateID typeid.ID, opts snapshotstore.ReadSnapshotOptions) (*snapshotstore.AggregateSnapshot, error) {
 	estoria.GetLogger().Debug("finding snapshot", "aggregate_id", aggregateID)
 
 	snapshots, ok := s.snapshots[aggregateID]

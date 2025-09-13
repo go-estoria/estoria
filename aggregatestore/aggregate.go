@@ -29,14 +29,9 @@ func NewAggregate[E estoria.Entity](entity E, version int64) *Aggregate[E] {
 func (a *Aggregate[E]) Append(events ...estoria.EntityEvent[E]) error {
 	estoria.GetLogger().Debug("appending events to aggregate", "aggregate_id", a.ID(), "aggregate_version", a.Version(), "events", len(events))
 	for _, event := range events {
-		id, err := typeid.NewUUID(event.EventType())
-		if err != nil {
-			return fmt.Errorf("creating event ID: %w", err)
-		}
-
 		a.state.WillSave([]*AggregateEvent[E, estoria.EntityEvent[E]]{
 			{
-				ID:          id,
+				ID:          typeid.NewV4(event.EventType()),
 				EntityEvent: event,
 			},
 		})
@@ -55,7 +50,7 @@ func (a *Aggregate[E]) Entity() E {
 
 // ID returns the aggregate's ID.
 // The ID is the ID of the entity that the aggregate represents.
-func (a *Aggregate[E]) ID() typeid.UUID {
+func (a *Aggregate[E]) ID() typeid.ID {
 	return a.state.Entity().EntityID()
 }
 
@@ -159,7 +154,7 @@ func (a *AggregateState[E]) Version() int64 {
 // It consists of a unique ID, a timestamp, and an entity event, which holds data specific
 // to an event representinig an incremental change to the underlying entity.
 type AggregateEvent[E estoria.Entity, EE estoria.EntityEvent[E]] struct {
-	ID          typeid.UUID
+	ID          typeid.ID
 	Version     int64
 	Timestamp   time.Time
 	EntityEvent EE

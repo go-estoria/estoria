@@ -11,7 +11,7 @@ import (
 // An Entity is anything whose state can be constructed by applying a series of events.
 type Entity interface {
 	// EntityID returns the entity's typed identifier.
-	EntityID() typeid.UUID
+	EntityID() typeid.ID
 }
 
 // An EntityFactory is a function that creates a new instance of an entity of type E.

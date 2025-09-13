@@ -13,7 +13,7 @@ import (
 
 // A SnapshotPolicy determines when to take snapshots.
 type SnapshotPolicy interface {
-	ShouldSnapshot(aggregateID typeid.UUID, aggregateVersion int64, timestamp time.Time) bool
+	ShouldSnapshot(aggregateID typeid.ID, aggregateVersion int64, timestamp time.Time) bool
 }
 
 // A SnapshottingStore wraps an aggregate store and uses a snapshot store to save snapshots

@@ -57,7 +57,7 @@ func (o *Outbox) HandleEvents(_ context.Context, events []*eventstore.Event) {
 		}
 
 		// for each handler name for this event type, add a handler result to track processing
-		for _, handler := range o.handlers[event.ID.TypeName()] {
+		for _, handler := range o.handlers[event.ID.Type] {
 			item.handlers[handler] = &outbox.HandlerResult{}
 		}
 
@@ -124,8 +124,8 @@ func (i *OutboxIterator) Next(_ context.Context) (outbox.Item, error) {
 
 type outboxItem struct {
 	id        uuid.UUID
-	streamID  typeid.UUID
-	eventID   typeid.UUID
+	streamID  typeid.ID
+	eventID   typeid.ID
 	eventData []byte
 	handlers  outbox.HandlerResultMap
 }
@@ -134,11 +134,11 @@ func (e *outboxItem) ID() uuid.UUID {
 	return e.id
 }
 
-func (e *outboxItem) StreamID() typeid.UUID {
+func (e *outboxItem) StreamID() typeid.ID {
 	return e.streamID
 }
 
-func (e *outboxItem) EventID() typeid.UUID {
+func (e *outboxItem) EventID() typeid.ID {
 	return e.eventID
 }
 
@@ -156,7 +156,7 @@ func (e *outboxItem) String() string {
 		handlerNames = append(handlerNames, name)
 	}
 
-	return fmt.Sprintf("%s: %s", e.EventID().TypeName(), strings.Join(handlerNames, ", "))
+	return fmt.Sprintf("%s: %s", e.EventID().Type, strings.Join(handlerNames, ", "))
 }
 
 func (e *outboxItem) FullyProcessed() bool {
