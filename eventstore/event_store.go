@@ -160,6 +160,8 @@ var ErrStreamIteratorClosed = errors.New("stream iterator closed")
 // ErrEndOfEventStream is returned by a stream iterator when there are no more events in the stream.
 var ErrEndOfEventStream = errors.New("end of event stream")
 
+// ReadAll reads all events from the given stream iterator until it reaches the end of the stream
+// or encounters an error. It returns a slice of events and any error encountered.
 func ReadAll(ctx context.Context, iter StreamIterator) ([]*Event, error) {
 	events := []*Event{}
 	for {
@@ -167,7 +169,7 @@ func ReadAll(ctx context.Context, iter StreamIterator) ([]*Event, error) {
 		if errors.Is(err, ErrEndOfEventStream) {
 			break
 		} else if err != nil {
-			return nil, fmt.Errorf("reading event: %w", err)
+			return events, fmt.Errorf("reading event: %w", err)
 		}
 
 		events = append(events, event)

@@ -10,15 +10,21 @@ type ID struct {
 	UUID uuid.UUID
 }
 
+// String returns the string representation of the ID in the format "type_uuid".
+//
+// Example: "user_9791012c-cd5b-4795-9c54-6085975d599b"
 func (id ID) String() string {
 	return id.Type + "_" + id.UUID.String()
 }
 
+// ShortString returns a shortened string representation of the ID in the format "type_xxxxxxxx",
+// where "xxxxxxxx" is the first 8 characters of the UUID.
+//
+// Example: "user_9791012c"
+//
+// ShortString is provided for convenience in logging and debugging, but is not utilized by
+// any core Estoria components.
 func (id ID) ShortString() string {
-	if len(id.UUID.String()) < 8 {
-		return id.String()
-	}
-
 	return id.Type + "_" + id.UUID.String()[0:8]
 }
 
