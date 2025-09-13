@@ -81,7 +81,7 @@ func TestCachedStore_Load(t *testing.T) {
 		name          string
 		haveInner     func() aggregatestore.Store[mockEntity]
 		haveCache     func() aggregatestore.AggregateCache[mockEntity]
-		haveOpts      aggregatestore.LoadOptions
+		haveOpts      *aggregatestore.LoadOptions
 		wantAggregate *aggregatestore.Aggregate[mockEntity]
 		wantErr       error
 	}{
@@ -112,7 +112,7 @@ func TestCachedStore_Load(t *testing.T) {
 					NewFn: func(id uuid.UUID) *aggregatestore.Aggregate[mockEntity] {
 						return aggregatestore.NewAggregate(newMockEntity(id), 0)
 					},
-					LoadFn: func(_ context.Context, id uuid.UUID, _ aggregatestore.LoadOptions) (*aggregatestore.Aggregate[mockEntity], error) {
+					LoadFn: func(_ context.Context, id uuid.UUID, _ *aggregatestore.LoadOptions) (*aggregatestore.Aggregate[mockEntity], error) {
 						return aggregatestore.NewAggregate(newMockEntity(id), 42), nil
 					},
 				}
@@ -135,7 +135,7 @@ func TestCachedStore_Load(t *testing.T) {
 					NewFn: func(id uuid.UUID) *aggregatestore.Aggregate[mockEntity] {
 						return aggregatestore.NewAggregate(newMockEntity(id), 0)
 					},
-					LoadFn: func(_ context.Context, id uuid.UUID, _ aggregatestore.LoadOptions) (*aggregatestore.Aggregate[mockEntity], error) {
+					LoadFn: func(_ context.Context, id uuid.UUID, _ *aggregatestore.LoadOptions) (*aggregatestore.Aggregate[mockEntity], error) {
 						return aggregatestore.NewAggregate(newMockEntity(id), 42), nil
 					},
 				}
@@ -158,7 +158,7 @@ func TestCachedStore_Load(t *testing.T) {
 					NewFn: func(id uuid.UUID) *aggregatestore.Aggregate[mockEntity] {
 						return aggregatestore.NewAggregate(newMockEntity(id), 0)
 					},
-					LoadFn: func(context.Context, uuid.UUID, aggregatestore.LoadOptions) (*aggregatestore.Aggregate[mockEntity], error) {
+					LoadFn: func(context.Context, uuid.UUID, *aggregatestore.LoadOptions) (*aggregatestore.Aggregate[mockEntity], error) {
 						return nil, errors.New("mock error")
 					},
 				}
@@ -219,7 +219,7 @@ func TestCachedStore_Hydrate(t *testing.T) {
 		name          string
 		haveInner     func() aggregatestore.Store[mockEntity]
 		haveCache     func() aggregatestore.AggregateCache[mockEntity]
-		haveOpts      aggregatestore.HydrateOptions
+		haveOpts      *aggregatestore.HydrateOptions
 		haveAggregate func() *aggregatestore.Aggregate[mockEntity]
 		wantAggregate *aggregatestore.Aggregate[mockEntity]
 		wantErr       error
@@ -228,7 +228,7 @@ func TestCachedStore_Hydrate(t *testing.T) {
 			name: "hydrates an aggregate using the inner store",
 			haveInner: func() aggregatestore.Store[mockEntity] {
 				return &mockAggregateStore[mockEntity]{
-					HydrateFn: func(_ context.Context, aggregate *aggregatestore.Aggregate[mockEntity], _ aggregatestore.HydrateOptions) error {
+					HydrateFn: func(_ context.Context, aggregate *aggregatestore.Aggregate[mockEntity], _ *aggregatestore.HydrateOptions) error {
 						aggregate.State().SetEntityAtVersion(newMockEntity(aggregateID), 42)
 						return nil
 					},
@@ -248,7 +248,7 @@ func TestCachedStore_Hydrate(t *testing.T) {
 			name: "returns an error when the inner store returns an error",
 			haveInner: func() aggregatestore.Store[mockEntity] {
 				return &mockAggregateStore[mockEntity]{
-					HydrateFn: func(context.Context, *aggregatestore.Aggregate[mockEntity], aggregatestore.HydrateOptions) error {
+					HydrateFn: func(context.Context, *aggregatestore.Aggregate[mockEntity], *aggregatestore.HydrateOptions) error {
 						return errors.New("mock error")
 					},
 				}
@@ -309,7 +309,7 @@ func TestCachedStore_Save(t *testing.T) {
 		name                string
 		haveInner           func() aggregatestore.Store[mockEntity]
 		haveCache           func() aggregatestore.AggregateCache[mockEntity]
-		haveOpts            aggregatestore.SaveOptions
+		haveOpts            *aggregatestore.SaveOptions
 		haveAggregate       func() *aggregatestore.Aggregate[mockEntity]
 		wantAggregate       *aggregatestore.Aggregate[mockEntity]
 		wantCachedAggregate *aggregatestore.Aggregate[mockEntity]
@@ -319,7 +319,7 @@ func TestCachedStore_Save(t *testing.T) {
 			name: "saves an aggregate using the inner store and adds the aggregate to the cache",
 			haveInner: func() aggregatestore.Store[mockEntity] {
 				return &mockAggregateStore[mockEntity]{
-					SaveFn: func(_ context.Context, aggregate *aggregatestore.Aggregate[mockEntity], _ aggregatestore.SaveOptions) error {
+					SaveFn: func(_ context.Context, aggregate *aggregatestore.Aggregate[mockEntity], _ *aggregatestore.SaveOptions) error {
 						aggregate.State().SetEntityAtVersion(newMockEntity(aggregateID), 42)
 						return nil
 					},
@@ -346,7 +346,7 @@ func TestCachedStore_Save(t *testing.T) {
 			name: "returns an error when the inner store returns an error",
 			haveInner: func() aggregatestore.Store[mockEntity] {
 				return &mockAggregateStore[mockEntity]{
-					SaveFn: func(context.Context, *aggregatestore.Aggregate[mockEntity], aggregatestore.SaveOptions) error {
+					SaveFn: func(context.Context, *aggregatestore.Aggregate[mockEntity], *aggregatestore.SaveOptions) error {
 						return errors.New("mock error")
 					},
 				}
@@ -363,7 +363,7 @@ func TestCachedStore_Save(t *testing.T) {
 			name: "does not return an error when failing to add the aggregate to the cache",
 			haveInner: func() aggregatestore.Store[mockEntity] {
 				return &mockAggregateStore[mockEntity]{
-					SaveFn: func(_ context.Context, aggregate *aggregatestore.Aggregate[mockEntity], _ aggregatestore.SaveOptions) error {
+					SaveFn: func(_ context.Context, aggregate *aggregatestore.Aggregate[mockEntity], _ *aggregatestore.SaveOptions) error {
 						aggregate.State().SetEntityAtVersion(newMockEntity(aggregateID), 42)
 						return nil
 					},

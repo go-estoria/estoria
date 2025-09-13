@@ -44,7 +44,7 @@ func (s *CachedStore[E]) New(id uuid.UUID) *Aggregate[E] {
 }
 
 // Load loads an aggregate by ID.
-func (s *CachedStore[E]) Load(ctx context.Context, id uuid.UUID, opts LoadOptions) (*Aggregate[E], error) {
+func (s *CachedStore[E]) Load(ctx context.Context, id uuid.UUID, opts *LoadOptions) (*Aggregate[E], error) {
 	aggregate, err := s.cache.GetAggregate(ctx, id)
 	switch {
 	case err == nil && aggregate != nil:
@@ -68,12 +68,12 @@ func (s *CachedStore[E]) Load(ctx context.Context, id uuid.UUID, opts LoadOption
 }
 
 // Hydrate hydrates an aggregate.
-func (s *CachedStore[E]) Hydrate(ctx context.Context, aggregate *Aggregate[E], opts HydrateOptions) error {
+func (s *CachedStore[E]) Hydrate(ctx context.Context, aggregate *Aggregate[E], opts *HydrateOptions) error {
 	return s.inner.Hydrate(ctx, aggregate, opts)
 }
 
 // Save saves an aggregate.
-func (s *CachedStore[E]) Save(ctx context.Context, aggregate *Aggregate[E], opts SaveOptions) error {
+func (s *CachedStore[E]) Save(ctx context.Context, aggregate *Aggregate[E], opts *SaveOptions) error {
 	if err := s.inner.Save(ctx, aggregate, opts); err != nil {
 		return SaveError{AggregateID: aggregate.ID(), Operation: "saving to inner aggregate store", Err: err}
 	}

@@ -12,9 +12,9 @@ import (
 // A Store is a read/write store for aggregates.
 type Store[E estoria.Entity] interface {
 	New(id uuid.UUID) *Aggregate[E]
-	Load(ctx context.Context, id uuid.UUID, opts LoadOptions) (*Aggregate[E], error)
-	Hydrate(ctx context.Context, aggregate *Aggregate[E], opts HydrateOptions) error
-	Save(ctx context.Context, aggregate *Aggregate[E], opts SaveOptions) error
+	Load(ctx context.Context, id uuid.UUID, opts *LoadOptions) (*Aggregate[E], error)
+	Hydrate(ctx context.Context, aggregate *Aggregate[E], opts *HydrateOptions) error
+	Save(ctx context.Context, aggregate *Aggregate[E], opts *SaveOptions) error
 }
 
 // LoadOptions are options for loading an aggregate.
@@ -30,6 +30,14 @@ type LoadOptions struct {
 	// ToTime time.Time
 }
 
+func (o LoadOptions) Validate() error {
+	if o.ToVersion < 0 {
+		return errors.New("ToVersion cannot be negative")
+	}
+
+	return nil
+}
+
 // HydrateOptions are options for hydrating an aggregate.
 type HydrateOptions struct {
 	// ToVersion is the version to hydrate the aggregate to.
@@ -41,6 +49,14 @@ type HydrateOptions struct {
 	//
 	// Default: zero time (hydrate to the latest version)
 	// ToTime time.Time
+}
+
+func (o HydrateOptions) Validate() error {
+	if o.ToVersion < 0 {
+		return errors.New("ToVersion cannot be negative")
+	}
+
+	return nil
 }
 
 // SaveOptions are options for saving an aggregate.

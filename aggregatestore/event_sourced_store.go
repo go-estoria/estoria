@@ -60,7 +60,7 @@ func (s *EventSourcedStore[E]) New(id uuid.UUID) *Aggregate[E] {
 }
 
 // Load loads an aggregate by its ID.
-func (s *EventSourcedStore[E]) Load(ctx context.Context, id uuid.UUID, opts LoadOptions) (*Aggregate[E], error) {
+func (s *EventSourcedStore[E]) Load(ctx context.Context, id uuid.UUID, opts *LoadOptions) (*Aggregate[E], error) {
 	if id == uuid.Nil {
 		return nil, LoadError{Err: errors.New("aggregate ID is nil")}
 	}
@@ -69,11 +69,17 @@ func (s *EventSourcedStore[E]) Load(ctx context.Context, id uuid.UUID, opts Load
 
 	aggregate := s.New(id)
 
+	if opts == nil {
+		opts = &LoadOptions{}
+	} else if err := opts.Validate(); err != nil {
+		return nil, LoadError{AggregateID: aggregate.ID(), Err: fmt.Errorf("invalid load options: %w", err)}
+	}
+
 	hydrateOpts := HydrateOptions{
 		ToVersion: opts.ToVersion,
 	}
 
-	if err := s.Hydrate(ctx, aggregate, hydrateOpts); err != nil {
+	if err := s.Hydrate(ctx, aggregate, &hydrateOpts); err != nil {
 		return nil, LoadError{AggregateID: aggregate.ID(), Operation: "hydrating aggregate", Err: err}
 	}
 
@@ -81,7 +87,7 @@ func (s *EventSourcedStore[E]) Load(ctx context.Context, id uuid.UUID, opts Load
 }
 
 // Hydrate hydrates an aggregate.
-func (s *EventSourcedStore[E]) Hydrate(ctx context.Context, aggregate *Aggregate[E], opts HydrateOptions) error {
+func (s *EventSourcedStore[E]) Hydrate(ctx context.Context, aggregate *Aggregate[E], opts *HydrateOptions) error {
 	switch {
 	case aggregate == nil:
 		return HydrateError{Err: ErrNilAggregate}
@@ -92,6 +98,12 @@ func (s *EventSourcedStore[E]) Hydrate(ctx context.Context, aggregate *Aggregate
 	}
 
 	s.log.Debug("hydrating aggregate from event store", "from_version", aggregate.Version(), "to_version", opts.ToVersion)
+
+	if opts == nil {
+		opts = &HydrateOptions{}
+	} else if err := opts.Validate(); err != nil {
+		return HydrateError{AggregateID: aggregate.ID(), Err: fmt.Errorf("invalid hydrate options: %w", err)}
+	}
 
 	readOpts := eventstore.ReadStreamOptions{
 		Offset:    aggregate.Version(),
@@ -144,7 +156,7 @@ func (s *EventSourcedStore[E]) Hydrate(ctx context.Context, aggregate *Aggregate
 }
 
 // Save saves an aggregate.
-func (s *EventSourcedStore[E]) Save(ctx context.Context, aggregate *Aggregate[E], opts SaveOptions) error {
+func (s *EventSourcedStore[E]) Save(ctx context.Context, aggregate *Aggregate[E], opts *SaveOptions) error {
 	if aggregate == nil {
 		return SaveError{Err: ErrNilAggregate}
 	} else if s.eventWriter == nil {
@@ -191,6 +203,10 @@ func (s *EventSourcedStore[E]) Save(ctx context.Context, aggregate *Aggregate[E]
 	}
 
 	aggregate.state.ClearUnsavedEvents()
+
+	if opts == nil {
+		opts = &SaveOptions{}
+	}
 
 	if opts.SkipApply {
 		return nil

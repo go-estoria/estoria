@@ -69,13 +69,16 @@ func (s *SnapshottingStore[E]) New(id uuid.UUID) *Aggregate[E] {
 }
 
 // Load loads an aggregate by its ID.
-func (s *SnapshottingStore[E]) Load(ctx context.Context, id uuid.UUID, opts LoadOptions) (*Aggregate[E], error) {
+func (s *SnapshottingStore[E]) Load(ctx context.Context, id uuid.UUID, opts *LoadOptions) (*Aggregate[E], error) {
 	aggregate := s.New(id)
 	s.log.Debug("loading aggregate", "aggregate_id", aggregate.ID())
 
-	if err := s.Hydrate(ctx, aggregate, HydrateOptions{
-		ToVersion: opts.ToVersion,
-	}); err != nil {
+	var hydrateOpts *HydrateOptions
+	if opts != nil {
+		hydrateOpts = &HydrateOptions{ToVersion: opts.ToVersion}
+	}
+
+	if err := s.Hydrate(ctx, aggregate, hydrateOpts); err != nil {
 		return nil, LoadError{AggregateID: aggregate.ID(), Operation: "hydrating aggregate", Err: err}
 	}
 
@@ -83,7 +86,7 @@ func (s *SnapshottingStore[E]) Load(ctx context.Context, id uuid.UUID, opts Load
 }
 
 // Hydrate hydrates an aggregate.
-func (s *SnapshottingStore[E]) Hydrate(ctx context.Context, aggregate *Aggregate[E], opts HydrateOptions) error {
+func (s *SnapshottingStore[E]) Hydrate(ctx context.Context, aggregate *Aggregate[E], opts *HydrateOptions) error {
 	switch {
 	case aggregate == nil:
 		return HydrateError{Err: ErrNilAggregate}
@@ -138,7 +141,7 @@ func (s *SnapshottingStore[E]) Hydrate(ctx context.Context, aggregate *Aggregate
 }
 
 // Save saves an aggregate.
-func (s *SnapshottingStore[E]) Save(ctx context.Context, aggregate *Aggregate[E], opts SaveOptions) error {
+func (s *SnapshottingStore[E]) Save(ctx context.Context, aggregate *Aggregate[E], opts *SaveOptions) error {
 	if aggregate == nil {
 		return SaveError{Err: ErrNilAggregate}
 	}
