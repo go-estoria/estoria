@@ -14,6 +14,14 @@ func (id ID) String() string {
 	return id.Type + "_" + id.ID.String()
 }
 
+func (id ID) ShortString() string {
+	if len(id.ID.String()) < 8 {
+		return id.String()
+	}
+
+	return id.Type + "_" + id.ID.String()[0:8]
+}
+
 // NewV4 creates a new ID with the given type name and a new v4 UUID.
 //
 // UUID v4 is a randomly generated UUID.
