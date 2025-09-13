@@ -33,7 +33,7 @@ func NewEventStreamStore(eventStore eventstore.Store) *EventStreamStore {
 func (s *EventStreamStore) ReadSnapshot(ctx context.Context, aggregateID typeid.ID, _ snapshotstore.ReadSnapshotOptions) (*snapshotstore.AggregateSnapshot, error) {
 	estoria.GetLogger().Debug("finding snapshot", "aggregate_id", aggregateID)
 
-	snapshotStreamID := typeid.New(aggregateID.Type+"snapshot", aggregateID.ID)
+	snapshotStreamID := typeid.New(aggregateID.Type+"snapshot", aggregateID.UUID)
 
 	stream, err := s.eventReader.ReadStream(ctx, snapshotStreamID, eventstore.ReadStreamOptions{
 		Offset:    0,
@@ -75,7 +75,7 @@ func (s *EventStreamStore) WriteSnapshot(ctx context.Context, snap *snapshotstor
 
 	snapshotStreamPrefix := snap.AggregateID.Type + "snapshot"
 
-	snapshotStreamID := typeid.New(snapshotStreamPrefix, snap.AggregateID.ID)
+	snapshotStreamID := typeid.New(snapshotStreamPrefix, snap.AggregateID.UUID)
 
 	// event data includes the aggregate ID, aggregate version, and snapshot data
 	eventData, err := s.marshaler.MarshalSnapshot(snap)

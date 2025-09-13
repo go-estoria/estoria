@@ -367,7 +367,7 @@ func TestSnapshottingStore_Hydrate(t *testing.T) {
 				ToVersion: 42,
 			},
 			wantAggregate: func() *aggregatestore.Aggregate[mockEntity] {
-				return aggregatestore.NewAggregate(newMockEntity(aggregateID.ID), 42)
+				return aggregatestore.NewAggregate(newMockEntity(aggregateID.UUID), 42)
 			}(),
 		},
 		{
@@ -396,7 +396,7 @@ func TestSnapshottingStore_Hydrate(t *testing.T) {
 				return agg
 			}(),
 			wantAggregate: func() *aggregatestore.Aggregate[mockEntity] {
-				return aggregatestore.NewAggregate(newMockEntity(aggregateID.ID), 45)
+				return aggregatestore.NewAggregate(newMockEntity(aggregateID.UUID), 45)
 			}(),
 		},
 		// {
@@ -414,13 +414,13 @@ func TestSnapshottingStore_Hydrate(t *testing.T) {
 			},
 			haveSnapshotStore: &mockSnapshotStore{},
 			haveAggregate: func() *aggregatestore.Aggregate[mockEntity] {
-				return aggregatestore.NewAggregate(newMockEntity(aggregateID.ID), 42)
+				return aggregatestore.NewAggregate(newMockEntity(aggregateID.UUID), 42)
 			}(),
 			haveOpts: &aggregatestore.HydrateOptions{
 				ToVersion: 42,
 			},
 			wantAggregate: func() *aggregatestore.Aggregate[mockEntity] {
-				return aggregatestore.NewAggregate(newMockEntity(aggregateID.ID), 42)
+				return aggregatestore.NewAggregate(newMockEntity(aggregateID.UUID), 42)
 			}(),
 		},
 		{
@@ -435,13 +435,13 @@ func TestSnapshottingStore_Hydrate(t *testing.T) {
 			},
 			haveSnapshotStore: &mockSnapshotStore{},
 			haveAggregate: func() *aggregatestore.Aggregate[mockEntity] {
-				return aggregatestore.NewAggregate(newMockEntity(aggregateID.ID), 42)
+				return aggregatestore.NewAggregate(newMockEntity(aggregateID.UUID), 42)
 			}(),
 			haveOpts: &aggregatestore.HydrateOptions{
 				ToVersion: 37,
 			},
 			wantAggregate: func() *aggregatestore.Aggregate[mockEntity] {
-				return aggregatestore.NewAggregate(newMockEntity(aggregateID.ID), 42)
+				return aggregatestore.NewAggregate(newMockEntity(aggregateID.UUID), 42)
 			}(),
 		},
 		{
@@ -461,10 +461,10 @@ func TestSnapshottingStore_Hydrate(t *testing.T) {
 				},
 			},
 			haveAggregate: func() *aggregatestore.Aggregate[mockEntity] {
-				return aggregatestore.NewAggregate(newMockEntity(aggregateID.ID), 42)
+				return aggregatestore.NewAggregate(newMockEntity(aggregateID.UUID), 42)
 			}(),
 			wantAggregate: func() *aggregatestore.Aggregate[mockEntity] {
-				return aggregatestore.NewAggregate(newMockEntity(aggregateID.ID), 45)
+				return aggregatestore.NewAggregate(newMockEntity(aggregateID.UUID), 45)
 			}(),
 		},
 		{
@@ -484,10 +484,10 @@ func TestSnapshottingStore_Hydrate(t *testing.T) {
 				},
 			},
 			haveAggregate: func() *aggregatestore.Aggregate[mockEntity] {
-				return aggregatestore.NewAggregate(newMockEntity(aggregateID.ID), 42)
+				return aggregatestore.NewAggregate(newMockEntity(aggregateID.UUID), 42)
 			}(),
 			wantAggregate: func() *aggregatestore.Aggregate[mockEntity] {
-				return aggregatestore.NewAggregate(newMockEntity(aggregateID.ID), 45)
+				return aggregatestore.NewAggregate(newMockEntity(aggregateID.UUID), 45)
 			}(),
 		},
 		{
@@ -514,10 +514,10 @@ func TestSnapshottingStore_Hydrate(t *testing.T) {
 				aggregatestore.WithSnapshotMarshaler(estoria.JSONMarshaler[mockEntity]{}),
 			},
 			haveAggregate: func() *aggregatestore.Aggregate[mockEntity] {
-				return aggregatestore.NewAggregate(newMockEntity(aggregateID.ID), 42)
+				return aggregatestore.NewAggregate(newMockEntity(aggregateID.UUID), 42)
 			}(),
 			wantAggregate: func() *aggregatestore.Aggregate[mockEntity] {
-				return aggregatestore.NewAggregate(newMockEntity(aggregateID.ID), 45)
+				return aggregatestore.NewAggregate(newMockEntity(aggregateID.UUID), 45)
 			}(),
 		},
 		{
@@ -532,7 +532,7 @@ func TestSnapshottingStore_Hydrate(t *testing.T) {
 			haveInner:         &mockAggregateStore[mockEntity]{},
 			haveSnapshotStore: &mockSnapshotStore{},
 			haveAggregate: func() *aggregatestore.Aggregate[mockEntity] {
-				return aggregatestore.NewAggregate(newMockEntity(aggregateID.ID), 42)
+				return aggregatestore.NewAggregate(newMockEntity(aggregateID.UUID), 42)
 			}(),
 			haveOpts: &aggregatestore.HydrateOptions{
 				ToVersion: -1,
@@ -547,7 +547,7 @@ func TestSnapshottingStore_Hydrate(t *testing.T) {
 				aggregatestore.WithSnapshotReader[mockEntity](nil),
 			},
 			haveAggregate: func() *aggregatestore.Aggregate[mockEntity] {
-				return aggregatestore.NewAggregate(newMockEntity(aggregateID.ID), 42)
+				return aggregatestore.NewAggregate(newMockEntity(aggregateID.UUID), 42)
 			}(),
 			wantErr: aggregatestore.HydrateError{Err: errors.New("snapshot store has no snapshot reader")},
 		},
@@ -584,8 +584,8 @@ func TestSnapshottingStore_Hydrate(t *testing.T) {
 			}
 
 			// aggregate has the correct ID
-			if gotAggregate.ID().String() != typeid.New("mockentity", aggregateID.ID).String() {
-				t.Errorf("want aggregate ID %s, got %s", typeid.New("mockentity", aggregateID.ID), gotAggregate.ID())
+			if gotAggregate.ID().String() != typeid.New("mockentity", aggregateID.UUID).String() {
+				t.Errorf("want aggregate ID %s, got %s", typeid.New("mockentity", aggregateID.UUID), gotAggregate.ID())
 			}
 			// aggregate has the correct version
 			if gotAggregate.Version() != tt.wantAggregate.Version() {
@@ -629,7 +629,7 @@ func TestSnapshottingStore_Save(t *testing.T) {
 				},
 			},
 			haveAggregate: func() *aggregatestore.Aggregate[mockEntity] {
-				return aggregatestore.NewAggregate(newMockEntity(aggregateID.ID), 42)
+				return aggregatestore.NewAggregate(newMockEntity(aggregateID.UUID), 42)
 			}(),
 			wantAggregate: func() *aggregatestore.Aggregate[mockEntity] {
 				agg := &aggregatestore.Aggregate[mockEntity]{}
@@ -662,7 +662,7 @@ func TestSnapshottingStore_Save(t *testing.T) {
 				}),
 			},
 			haveAggregate: func() *aggregatestore.Aggregate[mockEntity] {
-				return aggregatestore.NewAggregate(newMockEntity(aggregateID.ID), 42)
+				return aggregatestore.NewAggregate(newMockEntity(aggregateID.UUID), 42)
 			}(),
 			wantAggregate: func() *aggregatestore.Aggregate[mockEntity] {
 				agg := &aggregatestore.Aggregate[mockEntity]{}
@@ -692,7 +692,7 @@ func TestSnapshottingStore_Save(t *testing.T) {
 				},
 			},
 			haveAggregate: func() *aggregatestore.Aggregate[mockEntity] {
-				return aggregatestore.NewAggregate(newMockEntity(aggregateID.ID), 42)
+				return aggregatestore.NewAggregate(newMockEntity(aggregateID.UUID), 42)
 			}(),
 			wantAggregate: func() *aggregatestore.Aggregate[mockEntity] {
 				agg := &aggregatestore.Aggregate[mockEntity]{}
@@ -722,7 +722,7 @@ func TestSnapshottingStore_Save(t *testing.T) {
 				},
 			},
 			haveAggregate: func() *aggregatestore.Aggregate[mockEntity] {
-				return aggregatestore.NewAggregate(newMockEntity(aggregateID.ID), 42)
+				return aggregatestore.NewAggregate(newMockEntity(aggregateID.UUID), 42)
 			}(),
 			wantAggregate: func() *aggregatestore.Aggregate[mockEntity] {
 				agg := &aggregatestore.Aggregate[mockEntity]{}
@@ -748,7 +748,7 @@ func TestSnapshottingStore_Save(t *testing.T) {
 			haveSnapshotStore:  &mockSnapshotStore{},
 			haveSnapshotPolicy: &mockSnapshotPolicy{},
 			haveAggregate: func() *aggregatestore.Aggregate[mockEntity] {
-				return aggregatestore.NewAggregate(newMockEntity(aggregateID.ID), 42)
+				return aggregatestore.NewAggregate(newMockEntity(aggregateID.UUID), 42)
 			}(),
 			wantErr: aggregatestore.SaveError{Err: errors.New("saving aggregate using inner store: mock error")},
 		},
@@ -780,7 +780,7 @@ func TestSnapshottingStore_Save(t *testing.T) {
 				},
 			},
 			haveAggregate: func() *aggregatestore.Aggregate[mockEntity] {
-				return aggregatestore.NewAggregate(newMockEntity(aggregateID.ID), 42)
+				return aggregatestore.NewAggregate(newMockEntity(aggregateID.UUID), 42)
 			}(),
 			wantErr: aggregatestore.SaveError{Err: errors.New("applying next aggregate event: applying event: mock error")},
 		},
@@ -817,8 +817,8 @@ func TestSnapshottingStore_Save(t *testing.T) {
 			}
 
 			// aggregate has the correct ID
-			if gotAggregate.ID().String() != typeid.New("mockentity", aggregateID.ID).String() {
-				t.Errorf("want aggregate ID %s, got %s", typeid.New("mockentity", aggregateID.ID), gotAggregate.ID())
+			if gotAggregate.ID().String() != typeid.New("mockentity", aggregateID.UUID).String() {
+				t.Errorf("want aggregate ID %s, got %s", typeid.New("mockentity", aggregateID.UUID), gotAggregate.ID())
 			}
 			// aggregate has the correct version
 			if gotAggregate.Version() != tt.wantAggregate.Version() {
