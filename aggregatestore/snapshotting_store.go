@@ -150,6 +150,10 @@ func (s *SnapshottingStore[E]) Save(ctx context.Context, aggregate *Aggregate[E]
 
 	log.Debug("saving aggregate")
 
+	if opts == nil {
+		opts = &SaveOptions{}
+	}
+
 	// defer applying events so a snapshot can be taken at an exact version
 	opts.SkipApply = true
 
