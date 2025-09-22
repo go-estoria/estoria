@@ -87,6 +87,10 @@ func (s *SnapshottingStore[E]) Load(ctx context.Context, id uuid.UUID, opts *Loa
 
 // Hydrate hydrates an aggregate.
 func (s *SnapshottingStore[E]) Hydrate(ctx context.Context, aggregate *Aggregate[E], opts *HydrateOptions) error {
+	if opts == nil {
+		opts = &HydrateOptions{}
+	}
+
 	switch {
 	case aggregate == nil:
 		return HydrateError{Err: ErrNilAggregate}

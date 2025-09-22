@@ -655,7 +655,7 @@ func TestSnapshottingStore_Save(t *testing.T) {
 				},
 			},
 			haveSnapshottingStoreOpts: []aggregatestore.SnapshottingStoreOption[mockEntity]{
-				aggregatestore.WithSnapshotMarshaler[mockEntity](&mockSnapshotMarshaler{
+				aggregatestore.WithSnapshotMarshaler(&mockSnapshotMarshaler{
 					MarshalFn: func(_ mockEntity) ([]byte, error) {
 						return nil, errors.New("mock error")
 					},

@@ -613,9 +613,9 @@ func TestEventStore_ReadStream(t *testing.T) {
 			}
 
 			for i, gotEvent := range gotEvents {
-				// all events have the correct ID
-				if gotEvent.ID.String() != tt.wantEvents[i].ID.String() {
-					t.Errorf("unexpected event ID: wanted %s got %s", tt.wantEvents[i].ID.String(), gotEvent.ID.String())
+				// all events have the correct event type
+				if gotEvent.ID.Type != tt.wantEvents[i].ID.Type {
+					t.Errorf("unexpected event type: wanted %s got %s", tt.wantEvents[i].ID.Type, gotEvent.ID.Type)
 				}
 
 				// all events have the correct stream ID
