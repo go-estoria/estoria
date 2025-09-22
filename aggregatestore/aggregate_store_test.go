@@ -14,9 +14,9 @@ import (
 
 type mockAggregateStore[E estoria.Entity] struct {
 	NewFn     func(uuid.UUID) *aggregatestore.Aggregate[E]
-	LoadFn    func(context.Context, uuid.UUID, aggregatestore.LoadOptions) (*aggregatestore.Aggregate[E], error)
-	HydrateFn func(context.Context, *aggregatestore.Aggregate[E], aggregatestore.HydrateOptions) error
-	SaveFn    func(context.Context, *aggregatestore.Aggregate[E], aggregatestore.SaveOptions) error
+	LoadFn    func(context.Context, uuid.UUID, *aggregatestore.LoadOptions) (*aggregatestore.Aggregate[E], error)
+	HydrateFn func(context.Context, *aggregatestore.Aggregate[E], *aggregatestore.HydrateOptions) error
+	SaveFn    func(context.Context, *aggregatestore.Aggregate[E], *aggregatestore.SaveOptions) error
 }
 
 func (s *mockAggregateStore[E]) New(id uuid.UUID) *aggregatestore.Aggregate[E] {
@@ -27,7 +27,7 @@ func (s *mockAggregateStore[E]) New(id uuid.UUID) *aggregatestore.Aggregate[E] {
 	return nil
 }
 
-func (s *mockAggregateStore[E]) Load(ctx context.Context, aggregateID uuid.UUID, opts aggregatestore.LoadOptions) (*aggregatestore.Aggregate[E], error) {
+func (s *mockAggregateStore[E]) Load(ctx context.Context, aggregateID uuid.UUID, opts *aggregatestore.LoadOptions) (*aggregatestore.Aggregate[E], error) {
 	if s.LoadFn != nil {
 		return s.LoadFn(ctx, aggregateID, opts)
 	}
@@ -35,7 +35,7 @@ func (s *mockAggregateStore[E]) Load(ctx context.Context, aggregateID uuid.UUID,
 	return nil, fmt.Errorf("unexpected call: Load(aggregateID=%s, opts=%v)", aggregateID, opts)
 }
 
-func (s *mockAggregateStore[E]) Hydrate(ctx context.Context, aggregate *aggregatestore.Aggregate[E], opts aggregatestore.HydrateOptions) error {
+func (s *mockAggregateStore[E]) Hydrate(ctx context.Context, aggregate *aggregatestore.Aggregate[E], opts *aggregatestore.HydrateOptions) error {
 	if s.HydrateFn != nil {
 		return s.HydrateFn(ctx, aggregate, opts)
 	}
@@ -43,7 +43,7 @@ func (s *mockAggregateStore[E]) Hydrate(ctx context.Context, aggregate *aggregat
 	return fmt.Errorf("unexpected call: Hydrate(aggregate=%v, opts=%v)", aggregate, opts)
 }
 
-func (s *mockAggregateStore[E]) Save(ctx context.Context, aggregate *aggregatestore.Aggregate[E], opts aggregatestore.SaveOptions) error {
+func (s *mockAggregateStore[E]) Save(ctx context.Context, aggregate *aggregatestore.Aggregate[E], opts *aggregatestore.SaveOptions) error {
 	if s.SaveFn != nil {
 		return s.SaveFn(ctx, aggregate, opts)
 	}
@@ -52,7 +52,7 @@ func (s *mockAggregateStore[E]) Save(ctx context.Context, aggregate *aggregatest
 }
 
 type mockEntity struct {
-	ID               typeid.UUID
+	ID               typeid.ID
 	numAppliedEvents int64
 }
 
@@ -60,10 +60,10 @@ var _ estoria.Entity = mockEntity{}
 
 func newMockEntity(id uuid.UUID) mockEntity {
 	return mockEntity{
-		ID: typeid.FromUUID("mockentity", id),
+		ID: typeid.New("mockentity", id),
 	}
 }
 
-func (e mockEntity) EntityID() typeid.UUID {
+func (e mockEntity) EntityID() typeid.ID {
 	return e.ID
 }

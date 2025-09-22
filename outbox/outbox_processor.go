@@ -21,8 +21,8 @@ type Iterator interface {
 
 type Item interface {
 	ID() uuid.UUID
-	StreamID() typeid.UUID
-	EventID() typeid.UUID
+	StreamID() typeid.ID
+	EventID() typeid.ID
 	EventData() []byte
 	Handlers() HandlerResultMap
 	FullyProcessed() bool

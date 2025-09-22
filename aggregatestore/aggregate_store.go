@@ -12,9 +12,9 @@ import (
 // A Store is a read/write store for aggregates.
 type Store[E estoria.Entity] interface {
 	New(id uuid.UUID) *Aggregate[E]
-	Load(ctx context.Context, id uuid.UUID, opts LoadOptions) (*Aggregate[E], error)
-	Hydrate(ctx context.Context, aggregate *Aggregate[E], opts HydrateOptions) error
-	Save(ctx context.Context, aggregate *Aggregate[E], opts SaveOptions) error
+	Load(ctx context.Context, id uuid.UUID, opts *LoadOptions) (*Aggregate[E], error)
+	Hydrate(ctx context.Context, aggregate *Aggregate[E], opts *HydrateOptions) error
+	Save(ctx context.Context, aggregate *Aggregate[E], opts *SaveOptions) error
 }
 
 // LoadOptions are options for loading an aggregate.
@@ -30,6 +30,14 @@ type LoadOptions struct {
 	// ToTime time.Time
 }
 
+func (o LoadOptions) Validate() error {
+	if o.ToVersion < 0 {
+		return errors.New("ToVersion cannot be negative")
+	}
+
+	return nil
+}
+
 // HydrateOptions are options for hydrating an aggregate.
 type HydrateOptions struct {
 	// ToVersion is the version to hydrate the aggregate to.
@@ -41,6 +49,14 @@ type HydrateOptions struct {
 	//
 	// Default: zero time (hydrate to the latest version)
 	// ToTime time.Time
+}
+
+func (o HydrateOptions) Validate() error {
+	if o.ToVersion < 0 {
+		return errors.New("ToVersion cannot be negative")
+	}
+
+	return nil
 }
 
 // SaveOptions are options for saving an aggregate.
@@ -68,9 +84,14 @@ func (e InitializeError) Error() string {
 	return e.Operation + ": " + e.Err.Error()
 }
 
+// Unwrap returns the underlying error.
+func (e InitializeError) Unwrap() error {
+	return e.Err
+}
+
 // A CreateError is an error that occurred while creating an aggregate.
 type CreateError struct {
-	AggregateID typeid.UUID
+	AggregateID typeid.ID
 	Operation   string
 	Err         error
 }
@@ -84,9 +105,14 @@ func (e CreateError) Error() string {
 	return e.Operation + ": " + e.Err.Error()
 }
 
+// Unwrap returns the underlying error.
+func (e CreateError) Unwrap() error {
+	return e.Err
+}
+
 // A LoadError is an error that occurred while loading an aggregate.
 type LoadError struct {
-	AggregateID typeid.UUID
+	AggregateID typeid.ID
 	Operation   string
 	Err         error
 }
@@ -99,11 +125,24 @@ func (e LoadError) Error() string {
 	return e.Operation + ": " + e.Err.Error()
 }
 
+// Unwrap returns the underlying error.
+func (e LoadError) Unwrap() error {
+	return e.Err
+}
+
 // A HydrateError is an error that occurred while hydrating an aggregate.
 type HydrateError struct {
-	AggregateID typeid.UUID
+	AggregateID typeid.ID
 	Operation   string
 	Err         error
+}
+
+func NewHydrateError(id typeid.ID, operation string, err error) HydrateError {
+	return HydrateError{
+		AggregateID: id,
+		Operation:   operation,
+		Err:         err,
+	}
 }
 
 // Error implements the error interface.
@@ -115,9 +154,14 @@ func (e HydrateError) Error() string {
 	return e.Operation + ": " + e.Err.Error()
 }
 
+// Unwrap returns the underlying error.
+func (e HydrateError) Unwrap() error {
+	return e.Err
+}
+
 // A SaveError is an error that occurred while saving an aggregate.
 type SaveError struct {
-	AggregateID typeid.UUID
+	AggregateID typeid.ID
 	Operation   string
 	Err         error
 }
@@ -129,6 +173,11 @@ func (e SaveError) Error() string {
 	}
 
 	return e.Operation + ": " + e.Err.Error()
+}
+
+// Unwrap returns the underlying error.
+func (e SaveError) Unwrap() error {
+	return e.Err
 }
 
 // ErrAggregateNotFound indicates that an aggregate was not found in the aggregate store.

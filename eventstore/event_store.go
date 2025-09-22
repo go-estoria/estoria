@@ -19,7 +19,7 @@ type Store interface {
 type StreamReader interface {
 	// ReadStream creates an event stream iterator for reading events from a stream.
 	// The starting point, direction, and number of events to read can be specified in the options.
-	ReadStream(ctx context.Context, id typeid.UUID, opts ReadStreamOptions) (StreamIterator, error)
+	ReadStream(ctx context.Context, id typeid.ID, opts ReadStreamOptions) (StreamIterator, error)
 }
 
 // An StreamIterator reads events from a stream.
@@ -65,7 +65,7 @@ const (
 type StreamWriter interface {
 	// AppendStream appends events to an event stream.
 	// The expected version of the stream can be specified in the options.
-	AppendStream(ctx context.Context, streamID typeid.UUID, events []*WritableEvent, opts AppendStreamOptions) error
+	AppendStream(ctx context.Context, streamID typeid.ID, events []*WritableEvent, opts AppendStreamOptions) error
 }
 
 // AppendStreamOptions are options for appending events to a stream.
@@ -79,8 +79,8 @@ type AppendStreamOptions struct {
 
 // An Event is an event that has been read from an event store.
 type Event struct {
-	ID            typeid.UUID
-	StreamID      typeid.UUID
+	ID            typeid.ID
+	StreamID      typeid.ID
 	StreamVersion int64
 	Timestamp     time.Time
 	Data          []byte
@@ -88,18 +88,15 @@ type Event struct {
 
 // A WritableEvent is an event that can be written to an event store.
 type WritableEvent struct {
-	ID typeid.UUID
-
-	// Timestamp is the time the event occurred. If zero (default), the current time is used.
-	Timestamp time.Time
+	Type string
 
 	// Data is the serialized event data.
 	Data []byte
 }
 
 type EventMarshalingError struct {
-	StreamID typeid.UUID
-	EventID  typeid.UUID
+	StreamID typeid.ID
+	EventID  typeid.ID
 	Err      error
 }
 
@@ -112,8 +109,8 @@ func (e EventMarshalingError) Unwrap() error {
 }
 
 type EventUnmarshalingError struct {
-	StreamID typeid.UUID
-	EventID  typeid.UUID
+	StreamID typeid.ID
+	EventID  typeid.ID
 	Err      error
 }
 
@@ -127,8 +124,7 @@ func (e EventUnmarshalingError) Unwrap() error {
 
 // StreamVersionMismatchError is returned when the expected stream version does not match the actual stream version.
 type StreamVersionMismatchError struct {
-	StreamID        typeid.UUID
-	EventID         typeid.UUID
+	StreamID        typeid.ID
 	ExpectedVersion int64
 	ActualVersion   int64
 }
@@ -161,5 +157,23 @@ var ErrStreamNotFound = errors.New("stream not found")
 // ErrStreamIteratorClosed is returned when an operation is attempted on a closed stream iterator.
 var ErrStreamIteratorClosed = errors.New("stream iterator closed")
 
-// ErrEndOfEventStream is returned when there are no more events in the stream.
+// ErrEndOfEventStream is returned by a stream iterator when there are no more events in the stream.
 var ErrEndOfEventStream = errors.New("end of event stream")
+
+// ReadAll reads all events from the given stream iterator until it reaches the end of the stream
+// or encounters an error. It returns a slice of events and any error encountered.
+func ReadAll(ctx context.Context, iter StreamIterator) ([]*Event, error) {
+	events := []*Event{}
+	for {
+		event, err := iter.Next(ctx)
+		if errors.Is(err, ErrEndOfEventStream) {
+			break
+		} else if err != nil {
+			return events, fmt.Errorf("reading event: %w", err)
+		}
+
+		events = append(events, event)
+	}
+
+	return events, nil
+}

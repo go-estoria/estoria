@@ -30,10 +30,10 @@ func NewEventStreamStore(eventStore eventstore.Store) *EventStreamStore {
 	}
 }
 
-func (s *EventStreamStore) ReadSnapshot(ctx context.Context, aggregateID typeid.UUID, _ snapshotstore.ReadSnapshotOptions) (*snapshotstore.AggregateSnapshot, error) {
+func (s *EventStreamStore) ReadSnapshot(ctx context.Context, aggregateID typeid.ID, _ snapshotstore.ReadSnapshotOptions) (*snapshotstore.AggregateSnapshot, error) {
 	estoria.GetLogger().Debug("finding snapshot", "aggregate_id", aggregateID)
 
-	snapshotStreamID := typeid.FromUUID(aggregateID.TypeName()+"snapshot", aggregateID.UUID())
+	snapshotStreamID := typeid.New(aggregateID.Type+"snapshot", aggregateID.UUID)
 
 	stream, err := s.eventReader.ReadStream(ctx, snapshotStreamID, eventstore.ReadStreamOptions{
 		Offset:    0,
@@ -73,14 +73,9 @@ func (s *EventStreamStore) WriteSnapshot(ctx context.Context, snap *snapshotstor
 		snap.AggregateVersion,
 		"data_length", len(snap.Data))
 
-	snapshotStreamPrefix := snap.AggregateID.TypeName() + "snapshot"
+	snapshotStreamPrefix := snap.AggregateID.Type + "snapshot"
 
-	snapshotStreamID := typeid.FromUUID(snapshotStreamPrefix, snap.AggregateID.UUID())
-
-	eventID, err := typeid.NewUUID(snapshotStreamPrefix)
-	if err != nil {
-		return fmt.Errorf("generating snapshot event ID: %w", err)
-	}
+	snapshotStreamID := typeid.New(snapshotStreamPrefix, snap.AggregateID.UUID)
 
 	// event data includes the aggregate ID, aggregate version, and snapshot data
 	eventData, err := s.marshaler.MarshalSnapshot(snap)
@@ -90,14 +85,14 @@ func (s *EventStreamStore) WriteSnapshot(ctx context.Context, snap *snapshotstor
 
 	if err := s.eventWriter.AppendStream(ctx, snapshotStreamID, []*eventstore.WritableEvent{
 		{
-			ID:   eventID,
+			Type: snapshotStreamPrefix,
 			Data: eventData,
 		},
 	}, eventstore.AppendStreamOptions{}); err != nil {
 		return fmt.Errorf("appending snapshot stream: %w", err)
 	}
 
-	estoria.GetLogger().Debug("wrote snapshot", "aggregate_id", snap.AggregateID, "snapshot_event_id", eventID)
+	estoria.GetLogger().Debug("wrote snapshot", "aggregate_id", snap.AggregateID, "prefix", snapshotStreamPrefix)
 
 	return nil
 }

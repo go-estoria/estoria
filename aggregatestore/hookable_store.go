@@ -80,7 +80,7 @@ func (s *HookableStore[E]) New(id uuid.UUID) *Aggregate[E] {
 }
 
 // Load loads an aggregate by ID.
-func (s *HookableStore[E]) Load(ctx context.Context, id uuid.UUID, opts LoadOptions) (*Aggregate[E], error) {
+func (s *HookableStore[E]) Load(ctx context.Context, id uuid.UUID, opts *LoadOptions) (*Aggregate[E], error) {
 	aggregateID := s.inner.New(id).ID()
 
 	s.log.Debug("loading aggregate", "aggregate_id", aggregateID)
@@ -105,7 +105,7 @@ func (s *HookableStore[E]) Load(ctx context.Context, id uuid.UUID, opts LoadOpti
 }
 
 // Hydrate hydrates an aggregate.
-func (s *HookableStore[E]) Hydrate(ctx context.Context, aggregate *Aggregate[E], opts HydrateOptions) error {
+func (s *HookableStore[E]) Hydrate(ctx context.Context, aggregate *Aggregate[E], opts *HydrateOptions) error {
 	s.log.Debug("hydrating aggregate", "aggregate_id", aggregate.ID())
 	for _, hook := range s.hooks[BeforeHydrate] {
 		if err := hook(ctx, aggregate); err != nil {
@@ -127,7 +127,7 @@ func (s *HookableStore[E]) Hydrate(ctx context.Context, aggregate *Aggregate[E],
 }
 
 // Save saves an aggregate.
-func (s *HookableStore[E]) Save(ctx context.Context, aggregate *Aggregate[E], opts SaveOptions) error {
+func (s *HookableStore[E]) Save(ctx context.Context, aggregate *Aggregate[E], opts *SaveOptions) error {
 	s.log.Debug("saving aggregate", "aggregate_id", aggregate.ID())
 	for _, hook := range s.hooks[BeforeSave] {
 		if err := hook(ctx, aggregate); err != nil {

@@ -70,25 +70,25 @@ func TestEventStore_NewEventStore(t *testing.T) {
 
 func TestEventStore_AppendStream(t *testing.T) {
 	t.Parallel()
-	streamIDs := []typeid.UUID{
-		typeid.Must(typeid.NewUUID("streamtype1")).(typeid.UUID),
-		typeid.Must(typeid.NewUUID("streamtype2")).(typeid.UUID),
-		typeid.Must(typeid.NewUUID("streamtype3")).(typeid.UUID),
+	streamIDs := []typeid.ID{
+		typeid.NewV4("streamtype1"),
+		typeid.NewV4("streamtype2"),
+		typeid.NewV4("streamtype3"),
 	}
 
-	eventIDs := []typeid.UUID{
-		typeid.Must(typeid.NewUUID("eventtype1")).(typeid.UUID),
-		typeid.Must(typeid.NewUUID("eventtype2")).(typeid.UUID),
-		typeid.Must(typeid.NewUUID("eventtype3")).(typeid.UUID),
-		typeid.Must(typeid.NewUUID("eventtype4")).(typeid.UUID),
-		typeid.Must(typeid.NewUUID("eventtype5")).(typeid.UUID),
+	eventIDs := []typeid.ID{
+		typeid.NewV4("eventtype1"),
+		typeid.NewV4("eventtype2"),
+		typeid.NewV4("eventtype3"),
+		typeid.NewV4("eventtype4"),
+		typeid.NewV4("eventtype5"),
 	}
 
 	for _, tt := range []struct {
 		name               string
 		haveEventStoreOpts []memory.EventStoreOption
 		haveEvents         []eventsForStream
-		haveStreamID       typeid.UUID
+		haveStreamID       typeid.ID
 		haveAppendEvents   []*eventstore.WritableEvent
 		haveAppendOpts     eventstore.AppendStreamOptions
 		wantEvents         []*eventstore.Event
@@ -98,7 +98,7 @@ func TestEventStore_AppendStream(t *testing.T) {
 			name:         "appends an individual event to a new stream",
 			haveStreamID: streamIDs[0],
 			haveAppendEvents: []*eventstore.WritableEvent{
-				{ID: eventIDs[0], Data: []byte("event 1 data")},
+				{Type: eventIDs[0].Type, Data: []byte("event 1 data")},
 			},
 			wantEvents: []*eventstore.Event{
 				{ID: eventIDs[0], StreamID: streamIDs[0], StreamVersion: 1, Data: []byte("event 1 data")},
@@ -108,9 +108,9 @@ func TestEventStore_AppendStream(t *testing.T) {
 			name:         "appends a batch of events to a new stream",
 			haveStreamID: streamIDs[0],
 			haveAppendEvents: []*eventstore.WritableEvent{
-				{ID: eventIDs[0], Data: []byte("event 1 data")},
-				{ID: eventIDs[1], Data: []byte("event 2 data")},
-				{ID: eventIDs[2], Data: []byte("event 3 data")},
+				{Type: eventIDs[0].Type, Data: []byte("event 1 data")},
+				{Type: eventIDs[1].Type, Data: []byte("event 2 data")},
+				{Type: eventIDs[2].Type, Data: []byte("event 3 data")},
 			},
 			wantEvents: []*eventstore.Event{
 				{ID: eventIDs[0], StreamID: streamIDs[0], StreamVersion: 1, Data: []byte("event 1 data")},
@@ -124,31 +124,31 @@ func TestEventStore_AppendStream(t *testing.T) {
 				{
 					streamID: streamIDs[0],
 					events: []*eventstore.WritableEvent{
-						{ID: eventIDs[0], Data: []byte("event 1 data")},
-						{ID: eventIDs[1], Data: []byte("event 2 data")},
-						{ID: eventIDs[2], Data: []byte("event 3 data")},
+						{Type: eventIDs[0].Type, Data: []byte("event 1 data")},
+						{Type: eventIDs[1].Type, Data: []byte("event 2 data")},
+						{Type: eventIDs[2].Type, Data: []byte("event 3 data")},
 					},
 				},
 				{
 					streamID: streamIDs[1],
 					events: []*eventstore.WritableEvent{
-						{ID: eventIDs[0], Data: []byte("event 1 data")},
-						{ID: eventIDs[1], Data: []byte("event 2 data")},
-						{ID: eventIDs[2], Data: []byte("event 3 data")},
+						{Type: eventIDs[0].Type, Data: []byte("event 1 data")},
+						{Type: eventIDs[1].Type, Data: []byte("event 2 data")},
+						{Type: eventIDs[2].Type, Data: []byte("event 3 data")},
 					},
 				},
 				{
 					streamID: streamIDs[2],
 					events: []*eventstore.WritableEvent{
-						{ID: eventIDs[0], Data: []byte("event 1 data")},
-						{ID: eventIDs[1], Data: []byte("event 2 data")},
-						{ID: eventIDs[2], Data: []byte("event 3 data")},
+						{Type: eventIDs[0].Type, Data: []byte("event 1 data")},
+						{Type: eventIDs[1].Type, Data: []byte("event 2 data")},
+						{Type: eventIDs[2].Type, Data: []byte("event 3 data")},
 					},
 				},
 			},
 			haveStreamID: streamIDs[1],
 			haveAppendEvents: []*eventstore.WritableEvent{
-				{ID: eventIDs[3], Data: []byte("event 4 data")},
+				{Type: eventIDs[3].Type, Data: []byte("event 4 data")},
 			},
 			wantEvents: []*eventstore.Event{
 				{ID: eventIDs[0], StreamID: streamIDs[1], StreamVersion: 1, Data: []byte("event 1 data")},
@@ -163,32 +163,32 @@ func TestEventStore_AppendStream(t *testing.T) {
 				{
 					streamID: streamIDs[0],
 					events: []*eventstore.WritableEvent{
-						{ID: eventIDs[0], Data: []byte("event 1 data")},
-						{ID: eventIDs[1], Data: []byte("event 2 data")},
-						{ID: eventIDs[2], Data: []byte("event 3 data")},
+						{Type: eventIDs[0].Type, Data: []byte("event 1 data")},
+						{Type: eventIDs[1].Type, Data: []byte("event 2 data")},
+						{Type: eventIDs[2].Type, Data: []byte("event 3 data")},
 					},
 				},
 				{
 					streamID: streamIDs[1],
 					events: []*eventstore.WritableEvent{
-						{ID: eventIDs[0], Data: []byte("event 1 data")},
-						{ID: eventIDs[1], Data: []byte("event 2 data")},
-						{ID: eventIDs[2], Data: []byte("event 3 data")},
+						{Type: eventIDs[0].Type, Data: []byte("event 1 data")},
+						{Type: eventIDs[1].Type, Data: []byte("event 2 data")},
+						{Type: eventIDs[2].Type, Data: []byte("event 3 data")},
 					},
 				},
 				{
 					streamID: streamIDs[2],
 					events: []*eventstore.WritableEvent{
-						{ID: eventIDs[0], Data: []byte("event 1 data")},
-						{ID: eventIDs[1], Data: []byte("event 2 data")},
-						{ID: eventIDs[2], Data: []byte("event 3 data")},
+						{Type: eventIDs[0].Type, Data: []byte("event 1 data")},
+						{Type: eventIDs[1].Type, Data: []byte("event 2 data")},
+						{Type: eventIDs[2].Type, Data: []byte("event 3 data")},
 					},
 				},
 			},
 			haveStreamID: streamIDs[1],
 			haveAppendEvents: []*eventstore.WritableEvent{
-				{ID: eventIDs[3], Data: []byte("event 4 data")},
-				{ID: eventIDs[4], Data: []byte("event 5 data")},
+				{Type: eventIDs[3].Type, Data: []byte("event 4 data")},
+				{Type: eventIDs[4].Type, Data: []byte("event 5 data")},
 			},
 			wantEvents: []*eventstore.Event{
 				{ID: eventIDs[0], StreamID: streamIDs[1], StreamVersion: 1, Data: []byte("event 1 data")},
@@ -205,23 +205,22 @@ func TestEventStore_AppendStream(t *testing.T) {
 				{
 					streamID: streamIDs[0],
 					events: []*eventstore.WritableEvent{
-						{ID: eventIDs[0], Data: []byte("event 1 data")},
-						{ID: eventIDs[1], Data: []byte("event 2 data")},
-						{ID: eventIDs[2], Data: []byte("event 3 data")},
+						{Type: eventIDs[0].Type, Data: []byte("event 1 data")},
+						{Type: eventIDs[1].Type, Data: []byte("event 2 data")},
+						{Type: eventIDs[2].Type, Data: []byte("event 3 data")},
 					},
 				},
 			},
 			haveAppendEvents: []*eventstore.WritableEvent{
-				{ID: eventIDs[1], Data: []byte("event 2 data")},
-				{ID: eventIDs[2], Data: []byte("event 3 data")},
-				{ID: eventIDs[3], Data: []byte("event 4 data")},
+				{Type: eventIDs[1].Type, Data: []byte("event 2 data")},
+				{Type: eventIDs[2].Type, Data: []byte("event 3 data")},
+				{Type: eventIDs[3].Type, Data: []byte("event 4 data")},
 			},
 			haveAppendOpts: eventstore.AppendStreamOptions{
 				ExpectVersion: 1,
 			},
 			wantErr: eventstore.StreamVersionMismatchError{
 				StreamID:        streamIDs[0],
-				EventID:         eventIDs[1],
 				ExpectedVersion: 1,
 				ActualVersion:   3,
 			},
@@ -232,23 +231,22 @@ func TestEventStore_AppendStream(t *testing.T) {
 				{
 					streamID: streamIDs[0],
 					events: []*eventstore.WritableEvent{
-						{ID: eventIDs[0], Data: []byte("event 1 data")},
-						{ID: eventIDs[1], Data: []byte("event 2 data")},
-						{ID: eventIDs[2], Data: []byte("event 3 data")},
+						{Type: eventIDs[0].Type, Data: []byte("event 1 data")},
+						{Type: eventIDs[1].Type, Data: []byte("event 2 data")},
+						{Type: eventIDs[2].Type, Data: []byte("event 3 data")},
 					},
 				},
 			},
 			haveStreamID: streamIDs[0],
 			haveAppendEvents: []*eventstore.WritableEvent{
-				{ID: eventIDs[3], Data: []byte("event 5 data")},
-				{ID: eventIDs[4], Data: []byte("event 6 data")},
+				{Type: eventIDs[3].Type, Data: []byte("event 5 data")},
+				{Type: eventIDs[4].Type, Data: []byte("event 6 data")},
 			},
 			haveAppendOpts: eventstore.AppendStreamOptions{
 				ExpectVersion: 4,
 			},
 			wantErr: eventstore.StreamVersionMismatchError{
 				StreamID:        streamIDs[0],
-				EventID:         eventIDs[3],
 				ExpectedVersion: 4,
 				ActualVersion:   3,
 			},
@@ -260,7 +258,7 @@ func TestEventStore_AppendStream(t *testing.T) {
 			},
 			haveStreamID: streamIDs[0],
 			haveAppendEvents: []*eventstore.WritableEvent{
-				{ID: eventIDs[0], Data: []byte("event 1 data")},
+				{Type: eventIDs[0].Type, Data: []byte("event 1 data")},
 			},
 			wantErr: eventstore.EventMarshalingError{
 				StreamID: streamIDs[0],
@@ -299,9 +297,6 @@ func TestEventStore_AppendStream(t *testing.T) {
 					t.Logf("StreamVersionMismatchError: %v", err)
 					if err.StreamID.String() != tt.haveStreamID.String() {
 						t.Errorf("unexpected stream ID: wanted %s got %s", tt.haveStreamID.String(), err.StreamID.String())
-					}
-					if err.EventID.String() != tt.haveAppendEvents[0].ID.String() {
-						t.Errorf("unexpected event ID: wanted %s got %s", tt.haveAppendEvents[0].ID.String(), err.EventID.String())
 					}
 					if err.ExpectedVersion != tt.haveAppendOpts.ExpectVersion {
 						t.Errorf("unexpected expected version: wanted %d got %d", tt.haveAppendOpts.ExpectVersion, err.ExpectedVersion)
@@ -369,25 +364,25 @@ func TestEventStore_ReadStream(t *testing.T) {
 	t.Parallel()
 
 	// predefined stream IDs used for matching in tests
-	streamIDs := []typeid.UUID{
-		typeid.Must(typeid.NewUUID("streamtype1")).(typeid.UUID),
-		typeid.Must(typeid.NewUUID("streamtype2")).(typeid.UUID),
-		typeid.Must(typeid.NewUUID("streamtype3")).(typeid.UUID),
+	streamIDs := []typeid.ID{
+		typeid.NewV4("streamtype1"),
+		typeid.NewV4("streamtype2"),
+		typeid.NewV4("streamtype3"),
 	}
 
 	// predefined event IDs used for matching in tests
-	eventIDs := []typeid.UUID{
-		typeid.Must(typeid.NewUUID("eventtype1")).(typeid.UUID),
-		typeid.Must(typeid.NewUUID("eventtype2")).(typeid.UUID),
-		typeid.Must(typeid.NewUUID("eventtype3")).(typeid.UUID),
-		typeid.Must(typeid.NewUUID("eventtype4")).(typeid.UUID),
-		typeid.Must(typeid.NewUUID("eventtype5")).(typeid.UUID),
+	eventIDs := []typeid.ID{
+		typeid.NewV4("eventtype1"),
+		typeid.NewV4("eventtype2"),
+		typeid.NewV4("eventtype3"),
+		typeid.NewV4("eventtype4"),
+		typeid.NewV4("eventtype5"),
 	}
 
 	for _, tt := range []struct {
 		name               string
 		haveEvents         []eventsForStream
-		haveStreamID       typeid.UUID
+		haveStreamID       typeid.ID
 		haveReadStreamOpts eventstore.ReadStreamOptions
 		wantEvents         []*eventstore.Event
 		wantErr            error
@@ -398,9 +393,9 @@ func TestEventStore_ReadStream(t *testing.T) {
 				{
 					streamID: streamIDs[0],
 					events: []*eventstore.WritableEvent{
-						{ID: eventIDs[0], Data: []byte("event 1 data")},
-						{ID: eventIDs[1], Data: []byte("event 2 data")},
-						{ID: eventIDs[2], Data: []byte("event 3 data")},
+						{Type: eventIDs[0].Type, Data: []byte("event 1 data")},
+						{Type: eventIDs[1].Type, Data: []byte("event 2 data")},
+						{Type: eventIDs[2].Type, Data: []byte("event 3 data")},
 					},
 				},
 			},
@@ -417,9 +412,9 @@ func TestEventStore_ReadStream(t *testing.T) {
 				{
 					streamID: streamIDs[0],
 					events: []*eventstore.WritableEvent{
-						{ID: eventIDs[0], Data: []byte("event 1 data")},
-						{ID: eventIDs[1], Data: []byte("event 2 data")},
-						{ID: eventIDs[2], Data: []byte("event 3 data")},
+						{Type: eventIDs[0].Type, Data: []byte("event 1 data")},
+						{Type: eventIDs[1].Type, Data: []byte("event 2 data")},
+						{Type: eventIDs[2].Type, Data: []byte("event 3 data")},
 					},
 				},
 			},
@@ -438,9 +433,9 @@ func TestEventStore_ReadStream(t *testing.T) {
 				{
 					streamID: streamIDs[0],
 					events: []*eventstore.WritableEvent{
-						{ID: eventIDs[0], Data: []byte("event 1 data")},
-						{ID: eventIDs[1], Data: []byte("event 2 data")},
-						{ID: eventIDs[2], Data: []byte("event 3 data")},
+						{Type: eventIDs[0].Type, Data: []byte("event 1 data")},
+						{Type: eventIDs[1].Type, Data: []byte("event 2 data")},
+						{Type: eventIDs[2].Type, Data: []byte("event 3 data")},
 					},
 				},
 			},
@@ -459,11 +454,11 @@ func TestEventStore_ReadStream(t *testing.T) {
 				{
 					streamID: streamIDs[0],
 					events: []*eventstore.WritableEvent{
-						{ID: eventIDs[0], Data: []byte("event 1 data")},
-						{ID: eventIDs[1], Data: []byte("event 2 data")},
-						{ID: eventIDs[2], Data: []byte("event 3 data")},
-						{ID: eventIDs[3], Data: []byte("event 4 data")},
-						{ID: eventIDs[4], Data: []byte("event 5 data")},
+						{Type: eventIDs[0].Type, Data: []byte("event 1 data")},
+						{Type: eventIDs[1].Type, Data: []byte("event 2 data")},
+						{Type: eventIDs[2].Type, Data: []byte("event 3 data")},
+						{Type: eventIDs[3].Type, Data: []byte("event 4 data")},
+						{Type: eventIDs[4].Type, Data: []byte("event 5 data")},
 					},
 				},
 			},
@@ -483,9 +478,9 @@ func TestEventStore_ReadStream(t *testing.T) {
 				{
 					streamID: streamIDs[0],
 					events: []*eventstore.WritableEvent{
-						{ID: eventIDs[0], Data: []byte("event 1 data")},
-						{ID: eventIDs[1], Data: []byte("event 2 data")},
-						{ID: eventIDs[2], Data: []byte("event 3 data")},
+						{Type: eventIDs[0].Type, Data: []byte("event 1 data")},
+						{Type: eventIDs[1].Type, Data: []byte("event 2 data")},
+						{Type: eventIDs[2].Type, Data: []byte("event 3 data")},
 					},
 				},
 			},
@@ -505,9 +500,9 @@ func TestEventStore_ReadStream(t *testing.T) {
 				{
 					streamID: streamIDs[0],
 					events: []*eventstore.WritableEvent{
-						{ID: eventIDs[0], Data: []byte("event 1 data")},
-						{ID: eventIDs[1], Data: []byte("event 2 data")},
-						{ID: eventIDs[2], Data: []byte("event 3 data")},
+						{Type: eventIDs[0].Type, Data: []byte("event 1 data")},
+						{Type: eventIDs[1].Type, Data: []byte("event 2 data")},
+						{Type: eventIDs[2].Type, Data: []byte("event 3 data")},
 					},
 				},
 			},
@@ -527,9 +522,9 @@ func TestEventStore_ReadStream(t *testing.T) {
 				{
 					streamID: streamIDs[0],
 					events: []*eventstore.WritableEvent{
-						{ID: eventIDs[0], Data: []byte("event 1 data")},
-						{ID: eventIDs[1], Data: []byte("event 2 data")},
-						{ID: eventIDs[2], Data: []byte("event 3 data")},
+						{Type: eventIDs[0].Type, Data: []byte("event 1 data")},
+						{Type: eventIDs[1].Type, Data: []byte("event 2 data")},
+						{Type: eventIDs[2].Type, Data: []byte("event 3 data")},
 					},
 				},
 			},
@@ -549,11 +544,11 @@ func TestEventStore_ReadStream(t *testing.T) {
 				{
 					streamID: streamIDs[0],
 					events: []*eventstore.WritableEvent{
-						{ID: eventIDs[0], Data: []byte("event 1 data")},
-						{ID: eventIDs[1], Data: []byte("event 2 data")},
-						{ID: eventIDs[2], Data: []byte("event 3 data")},
-						{ID: eventIDs[3], Data: []byte("event 4 data")},
-						{ID: eventIDs[4], Data: []byte("event 5 data")},
+						{Type: eventIDs[0].Type, Data: []byte("event 1 data")},
+						{Type: eventIDs[1].Type, Data: []byte("event 2 data")},
+						{Type: eventIDs[2].Type, Data: []byte("event 3 data")},
+						{Type: eventIDs[3].Type, Data: []byte("event 4 data")},
+						{Type: eventIDs[4].Type, Data: []byte("event 5 data")},
 					},
 				},
 			},
@@ -618,9 +613,9 @@ func TestEventStore_ReadStream(t *testing.T) {
 			}
 
 			for i, gotEvent := range gotEvents {
-				// all events have the correct ID
-				if gotEvent.ID.String() != tt.wantEvents[i].ID.String() {
-					t.Errorf("unexpected event ID: wanted %s got %s", tt.wantEvents[i].ID.String(), gotEvent.ID.String())
+				// all events have the correct event type
+				if gotEvent.ID.Type != tt.wantEvents[i].ID.Type {
+					t.Errorf("unexpected event type: wanted %s got %s", tt.wantEvents[i].ID.Type, gotEvent.ID.Type)
 				}
 
 				// all events have the correct stream ID
@@ -663,6 +658,6 @@ func (failMarshaler) Unmarshal(_ []byte, _ *eventstore.Event) error {
 }
 
 type eventsForStream struct {
-	streamID typeid.UUID
+	streamID typeid.ID
 	events   []*eventstore.WritableEvent
 }

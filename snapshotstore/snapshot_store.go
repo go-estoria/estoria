@@ -11,7 +11,7 @@ import (
 
 // An AggregateSnapshot is a snapshot of an aggregate at a specific version.
 type AggregateSnapshot struct {
-	AggregateID      typeid.UUID
+	AggregateID      typeid.ID
 	AggregateVersion int64
 	Timestamp        time.Time
 	Data             []byte
@@ -19,7 +19,7 @@ type AggregateSnapshot struct {
 
 // A SnapshotReader reads snapshots.
 type SnapshotReader interface {
-	ReadSnapshot(ctx context.Context, aggregateID typeid.UUID, opts ReadSnapshotOptions) (*AggregateSnapshot, error)
+	ReadSnapshot(ctx context.Context, aggregateID typeid.ID, opts ReadSnapshotOptions) (*AggregateSnapshot, error)
 }
 
 // A SnapshotWriter writes snapshots.
@@ -39,7 +39,7 @@ type EventCountSnapshotPolicy struct {
 	N int64
 }
 
-func (p EventCountSnapshotPolicy) ShouldSnapshot(_ typeid.UUID, aggregateVersion int64, _ time.Time) bool {
+func (p EventCountSnapshotPolicy) ShouldSnapshot(_ typeid.ID, aggregateVersion int64, _ time.Time) bool {
 	return p.N > 0 && aggregateVersion%p.N == 0
 }
 
