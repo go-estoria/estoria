@@ -12,7 +12,6 @@ Estoria provides composable components for implementing event sourcing in a Go a
 
 - Event-based aggregate state management
 - Flexible event store implementations
-- Transactional outbox processing
 - Aggregate snapshotting
 - Aggregate caching
 - Lifecycle hooks

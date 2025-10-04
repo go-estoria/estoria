@@ -21,28 +21,10 @@ func TestEventStore_NewEventStore(t *testing.T) {
 			name: "creates a new event store",
 		},
 		{
-			name: "with a non-nil outbox, creates a new event store",
-			opts: []memory.EventStoreOption{
-				memory.WithOutbox(memory.NewOutbox()),
-			},
-		},
-		{
 			name: "with a non-nil custom marshaler, creates a new event store",
 			opts: []memory.EventStoreOption{
 				memory.WithEventMarshaler(failMarshaler{}),
 			},
-		},
-		{
-			name: "with a non-nil outbox and custom marshaler, creates a new event store",
-			opts: []memory.EventStoreOption{
-				memory.WithOutbox(memory.NewOutbox()),
-				memory.WithEventMarshaler(failMarshaler{}),
-			},
-		},
-		{
-			name:    "returns an error if a nil outbox is provided",
-			opts:    []memory.EventStoreOption{memory.WithOutbox(nil)},
-			wantErr: eventstore.InitializationError{Err: errors.New("applying option: outbox cannot be nil")},
 		},
 		{
 			name:    "returns an error if a nil marshaler is provided",
