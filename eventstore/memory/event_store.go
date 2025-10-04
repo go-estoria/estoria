@@ -8,7 +8,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/go-estoria/estoria"
 	"github.com/go-estoria/estoria/eventstore"
 	"github.com/go-estoria/estoria/typeid"
 )
@@ -23,7 +22,6 @@ type EventStore struct {
 	events    map[string][]*eventStoreDocument
 	mu        sync.RWMutex
 	marshaler EventMarshaler
-	outbox    *Outbox
 }
 
 // NewEventStore creates a new in-memory event store.
@@ -85,11 +83,6 @@ func (s *EventStore) AppendStream(ctx context.Context, streamID typeid.ID, event
 		})
 	}
 
-	if s.outbox != nil {
-		estoria.GetLogger().Debug("handling events with outbox", "tx", "inherited", "events", len(tx))
-		s.outbox.HandleEvents(ctx, preparedEvents)
-	}
-
 	s.events[streamID.String()] = append(stream, tx...)
 	return nil
 }
@@ -143,18 +136,6 @@ func WithEventMarshaler(marshaler EventMarshaler) EventStoreOption {
 		}
 
 		s.marshaler = marshaler
-		return nil
-	}
-}
-
-// WithOutbox configures the event store to use an outbox.
-func WithOutbox(outbox *Outbox) EventStoreOption {
-	return func(s *EventStore) error {
-		if outbox == nil {
-			return errors.New("outbox cannot be nil")
-		}
-
-		s.outbox = outbox
 		return nil
 	}
 }
