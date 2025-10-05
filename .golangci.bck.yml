@@ -1,6 +1,9 @@
-version: "2"
 linters:
-  default: none
+  # Disable all linters.
+  # Default: false
+  disable-all: true
+  # Enable specific linter
+  # https://golangci-lint.run/usage/linters/#enabled-by-default
   enable:
     - asasalint
     - asciicheck
@@ -10,32 +13,45 @@ linters:
     - containedctx
     - contextcheck
     - copyloopvar
+    # - cyclop
     - decorder
+    # - depguard
     - dogsled
+    # - dupl
     - dupword
     - durationcheck
+    # - err113
     - errcheck
     - errchkjson
     - errname
     - errorlint
     - exhaustive
+    # - exhaustruct
     - fatcontext
     - forbidigo
     - forcetypeassert
+    # - funlen
+    - gci
     - ginkgolinter
     - gocheckcompilerdirectives
     - gochecknoglobals
     - gochecknoinits
     - gochecksumtype
+    # - gocognit
     - goconst
     - gocritic
+    # - gocyclo
     - godot
     - godox
+    - gofmt
+    - gofumpt
     - goheader
+    - goimports
     - gomoddirectives
     - gomodguard
     - goprintffuncname
     - gosec
+    # - gosimple
     - gosmopolitan
     - govet
     - grouper
@@ -45,7 +61,9 @@ linters:
     - interfacebloat
     - intrange
     - ireturn
+    # - lll
     - loggercheck
+    # - maintidx
     - makezero
     - mirror
     - misspell
@@ -55,6 +73,7 @@ linters:
     - nestif
     - nilerr
     - nilnil
+    # - nlreturn
     - noctx
     - nolintlint
     - nonamedreturns
@@ -72,52 +91,39 @@ linters:
     - spancheck
     - sqlclosecheck
     - staticcheck
+    - stylecheck
     - tagalign
     - tagliatelle
+    - tenv
     - testableexamples
     - testifylint
     - testpackage
     - thelper
     - tparallel
+    - typecheck
     - unconvert
     - unparam
     - unused
     - usestdlibvars
+    # - varnamelen
     - wastedassign
     - whitespace
     - wrapcheck
+    # - wsl
     - zerologlint
-  exclusions:
-    generated: lax
-    presets:
-      - comments
-      - common-false-positives
-      - legacy
-      - std-error-handling
-    rules:
-      - linters:
-          - wrapcheck
-        source: return .+\.inner\.
-      - linters:
-          - errcheck
-          - forcetypeassert
-          - ireturn
-          - lll
-          - nestif
-        path: _test\.go
-    paths:
-      - third_party$
-      - builtin$
-      - examples$
-formatters:
-  enable:
-    - gci
-    - gofmt
-    - gofumpt
-    - goimports
-  exclusions:
-    generated: lax
-    paths:
-      - third_party$
-      - builtin$
-      - examples$
+
+issues:
+
+  exclude-rules:
+  
+    - source: "return .+\\.inner\\."
+      linters:
+        - wrapcheck # no need to wrap errors when deferring to inner aggregate stores
+
+    - path: _test\.go
+      linters:
+        - errcheck
+        - forcetypeassert
+        - ireturn
+        - lll
+        - nestif
