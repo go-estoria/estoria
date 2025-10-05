@@ -4,6 +4,7 @@
 ![GitHub Actions Workflow Status](https://img.shields.io/github/actions/workflow/status/go-estoria/estoria/go-tests.yaml)
 [![Go Report Card](https://goreportcard.com/badge/github.com/go-estoria/estoria)](https://goreportcard.com/report/github.com/go-estoria/estoria)
 [![godoc](https://camo.githubusercontent.com/eaf508ed0d0cafd481fcfae3c2c8177f42df213191153a1963a221d13f80aa21/68747470733a2f2f706b672e676f2e6465762f62616467652f6769746875622e636f6d2f5468726565446f74734c6162732f77617465726d696c6c2e737667)](https://pkg.go.dev/github.com/go-estoria/estoria)
+![Documentation](https://img.shields.io/badge/-Documentation-navy)
 
 Estoria is an event sourcing toolkit for Go.
 
