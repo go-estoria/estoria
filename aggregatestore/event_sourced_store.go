@@ -95,19 +95,15 @@ func (s *EventSourcedStore[E]) Hydrate(ctx context.Context, aggregate *Aggregate
 	switch {
 	case aggregate == nil:
 		return HydrateError{Err: ErrNilAggregate}
-	case opts.ToVersion < 0:
-		return HydrateError{AggregateID: aggregate.ID(), Err: errors.New("invalid target version")}
 	case s.eventReader == nil:
 		return HydrateError{AggregateID: aggregate.ID(), Err: errors.New("event store has no event stream reader")}
 	}
 
-	s.log.Debug("hydrating aggregate from event store", "from_version", aggregate.Version(), "to_version", opts.ToVersion)
-
-	if opts == nil {
-		opts = &HydrateOptions{}
-	} else if err := opts.Validate(); err != nil {
+	if err := opts.Validate(); err != nil {
 		return HydrateError{AggregateID: aggregate.ID(), Err: fmt.Errorf("invalid hydrate options: %w", err)}
 	}
+
+	s.log.Debug("hydrating aggregate from event store", "from_version", aggregate.Version(), "to_version", opts.ToVersion)
 
 	readOpts := eventstore.ReadStreamOptions{
 		Offset:    aggregate.Version(),
