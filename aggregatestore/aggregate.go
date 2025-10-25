@@ -16,6 +16,7 @@ type Aggregate[E estoria.Entity] struct {
 	state AggregateState[E]
 }
 
+// New creates a new aggregate with the given entity and version.
 func NewAggregate[E estoria.Entity](entity E, version int64) *Aggregate[E] {
 	return &Aggregate[E]{
 		state: AggregateState[E]{

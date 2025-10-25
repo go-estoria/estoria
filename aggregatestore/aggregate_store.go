@@ -30,6 +30,7 @@ type LoadOptions struct {
 	// ToTime time.Time
 }
 
+// Validate validates the LoadOptions.
 func (o LoadOptions) Validate() error {
 	if o.ToVersion < 0 {
 		return errors.New("ToVersion cannot be negative")
@@ -51,6 +52,7 @@ type HydrateOptions struct {
 	// ToTime time.Time
 }
 
+// Validate validates the HydrateOptions.
 func (o HydrateOptions) Validate() error {
 	if o.ToVersion < 0 {
 		return errors.New("ToVersion cannot be negative")
@@ -137,6 +139,7 @@ type HydrateError struct {
 	Err         error
 }
 
+// NewHydrateError creates a new HydrateError.
 func NewHydrateError(id typeid.ID, operation string, err error) HydrateError {
 	return HydrateError{
 		AggregateID: id,

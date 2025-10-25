@@ -55,6 +55,7 @@ func New[E estoria.Entity](
 	return store, nil
 }
 
+// New creates a new aggregate with the given ID.
 func (s *EventSourcedStore[E]) New(id uuid.UUID) *Aggregate[E] {
 	return NewAggregate(s.newEntity(id), 0)
 }
@@ -63,15 +64,15 @@ func (s *EventSourcedStore[E]) New(id uuid.UUID) *Aggregate[E] {
 func (s *EventSourcedStore[E]) Load(ctx context.Context, id uuid.UUID, opts *LoadOptions) (*Aggregate[E], error) {
 	if id == uuid.Nil {
 		return nil, LoadError{Err: errors.New("aggregate ID is nil")}
+	} else if opts == nil {
+		opts = &LoadOptions{}
 	}
 
 	s.log.Debug("loading aggregate from event store", "aggregate_id", id)
 
 	aggregate := s.New(id)
 
-	if opts == nil {
-		opts = &LoadOptions{}
-	} else if err := opts.Validate(); err != nil {
+	if err := opts.Validate(); err != nil {
 		return nil, LoadError{AggregateID: aggregate.ID(), Err: fmt.Errorf("invalid load options: %w", err)}
 	}
 
@@ -86,7 +87,7 @@ func (s *EventSourcedStore[E]) Load(ctx context.Context, id uuid.UUID, opts *Loa
 	return aggregate, nil
 }
 
-// Hydrate hydrates an aggregate.
+// Hydrate hydrates an aggregate by reading and applying events from the event store.
 func (s *EventSourcedStore[E]) Hydrate(ctx context.Context, aggregate *Aggregate[E], opts *HydrateOptions) error {
 	if opts == nil {
 		opts = &HydrateOptions{}
@@ -155,7 +156,7 @@ func (s *EventSourcedStore[E]) Hydrate(ctx context.Context, aggregate *Aggregate
 	return nil
 }
 
-// Save saves an aggregate.
+// Save saves an aggregate by appending its unsaved events to the event store.
 func (s *EventSourcedStore[E]) Save(ctx context.Context, aggregate *Aggregate[E], opts *SaveOptions) error {
 	if aggregate == nil {
 		return SaveError{Err: ErrNilAggregate}
@@ -222,6 +223,7 @@ func (s *EventSourcedStore[E]) Save(ctx context.Context, aggregate *Aggregate[E]
 	}
 }
 
+// Use registers entity event prototypes with the store.
 func (s *EventSourcedStore[E]) Use(eventPrototypes ...estoria.EntityEvent[E]) error {
 	for _, prototype := range eventPrototypes {
 		if _, registered := s.entityEventPrototypes[prototype.EventType()]; !registered {
@@ -282,14 +284,17 @@ func (s *EventSourcedStore[E]) eventHandlerForAggregate(aggregate *Aggregate[E])
 	})
 }
 
+// An EventSourcedStoreOption is a functional option for configuring an EventSourcedStore.
 type EventSourcedStoreOption[E estoria.Entity] func(*EventSourcedStore[E]) error
 
+// WithEventTypes registers entity event prototypes with the store.
 func WithEventTypes[E estoria.Entity](eventPrototypes ...estoria.EntityEvent[E]) EventSourcedStoreOption[E] {
 	return func(s *EventSourcedStore[E]) error {
 		return s.Use(eventPrototypes...)
 	}
 }
 
+// WithEventStreamReader sets the event stream reader for the store.
 func WithEventStreamReader[E estoria.Entity](reader eventstore.StreamReader) EventSourcedStoreOption[E] {
 	return func(s *EventSourcedStore[E]) error {
 		s.eventReader = reader
@@ -297,6 +302,7 @@ func WithEventStreamReader[E estoria.Entity](reader eventstore.StreamReader) Eve
 	}
 }
 
+// WithEventStreamWriter sets the event stream writer for the store.
 func WithEventStreamWriter[E estoria.Entity](writer eventstore.StreamWriter) EventSourcedStoreOption[E] {
 	return func(s *EventSourcedStore[E]) error {
 		s.eventWriter = writer
@@ -304,6 +310,7 @@ func WithEventStreamWriter[E estoria.Entity](writer eventstore.StreamWriter) Eve
 	}
 }
 
+// WithEntityEventMarshaler sets the entity event marshaler for the store.
 func WithEntityEventMarshaler[E estoria.Entity](marshaler estoria.EntityEventMarshaler[E]) EventSourcedStoreOption[E] {
 	return func(s *EventSourcedStore[E]) error {
 		s.entityEventMarshaler = marshaler

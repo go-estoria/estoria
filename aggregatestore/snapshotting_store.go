@@ -85,7 +85,7 @@ func (s *SnapshottingStore[E]) Load(ctx context.Context, id uuid.UUID, opts *Loa
 	return aggregate, nil
 }
 
-// Hydrate hydrates an aggregate.
+// Hydrate hydrates an aggregate, first attempting to load from a snapshot.
 func (s *SnapshottingStore[E]) Hydrate(ctx context.Context, aggregate *Aggregate[E], opts *HydrateOptions) error {
 	if opts == nil {
 		opts = &HydrateOptions{}
@@ -144,7 +144,7 @@ func (s *SnapshottingStore[E]) Hydrate(ctx context.Context, aggregate *Aggregate
 	return s.inner.Hydrate(ctx, aggregate, opts)
 }
 
-// Save saves an aggregate.
+// Save saves an aggregate, taking snapshots as needed.
 func (s *SnapshottingStore[E]) Save(ctx context.Context, aggregate *Aggregate[E], opts *SaveOptions) error {
 	if aggregate == nil {
 		return SaveError{Err: ErrNilAggregate}
@@ -200,7 +200,7 @@ func (s *SnapshottingStore[E]) Save(ctx context.Context, aggregate *Aggregate[E]
 	return nil
 }
 
-// A SnapshottingStoreOption configures a SnapshottingStore.
+// A SnapshottingStoreOption is a functional option for configuring a SnapshottingStore.
 type SnapshottingStoreOption[E estoria.Entity] func(*SnapshottingStore[E]) error
 
 // WithSnapshotMarshaler sets the snapshot marshaler.
