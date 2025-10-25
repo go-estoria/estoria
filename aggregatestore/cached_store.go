@@ -39,11 +39,13 @@ func NewCachedStore[E estoria.Entity](
 
 var _ Store[estoria.Entity] = (*CachedStore[estoria.Entity])(nil)
 
+// New creates a new aggregate with the given ID.
 func (s *CachedStore[E]) New(id uuid.UUID) *Aggregate[E] {
 	return s.inner.New(id)
 }
 
-// Load loads an aggregate by ID.
+// Load loads an aggregate, first checking the cache before deferring to the inner store.
+// If the aggregate is loaded from the inner store, it is added to the cache.
 func (s *CachedStore[E]) Load(ctx context.Context, id uuid.UUID, opts *LoadOptions) (*Aggregate[E], error) {
 	aggregate, err := s.cache.GetAggregate(ctx, id)
 	switch {
@@ -67,12 +69,12 @@ func (s *CachedStore[E]) Load(ctx context.Context, id uuid.UUID, opts *LoadOptio
 	return aggregate, nil
 }
 
-// Hydrate hydrates an aggregate.
+// Hydrate hydrates an aggregate by deferring to the inner store.
 func (s *CachedStore[E]) Hydrate(ctx context.Context, aggregate *Aggregate[E], opts *HydrateOptions) error {
 	return s.inner.Hydrate(ctx, aggregate, opts)
 }
 
-// Save saves an aggregate.
+// Save saves an aggregate using the inner store, then updates the cache.
 func (s *CachedStore[E]) Save(ctx context.Context, aggregate *Aggregate[E], opts *SaveOptions) error {
 	if err := s.inner.Save(ctx, aggregate, opts); err != nil {
 		return SaveError{AggregateID: aggregate.ID(), Operation: "saving to inner aggregate store", Err: err}

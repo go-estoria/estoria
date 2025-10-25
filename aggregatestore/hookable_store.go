@@ -8,6 +8,7 @@ import (
 	"github.com/gofrs/uuid/v5"
 )
 
+// HookStage represents a stage in the aggregate store lifecycle where hooks can be executed.
 type HookStage int
 
 const (
@@ -18,8 +19,10 @@ const (
 	AfterSave
 )
 
+// A PreloadHook is a hook that runs before an aggregate is loaded.
 type PreloadHook func(ctx context.Context, id uuid.UUID) error
 
+// A Hook is a hook that runs at a specific stage in the aggregate store lifecycle.
 type Hook[E estoria.Entity] func(ctx context.Context, aggregate *Aggregate[E]) error
 
 // A HookableStore wraps an aggregate store and provides lifecycle hooks for aggregate store operations.
@@ -75,11 +78,12 @@ func (s *HookableStore[E]) AfterSave(hooks ...Hook[E]) {
 	s.hooks[AfterSave] = append(s.hooks[AfterSave], hooks...)
 }
 
+// New creates a new aggregate with the given ID.
 func (s *HookableStore[E]) New(id uuid.UUID) *Aggregate[E] {
 	return s.inner.New(id)
 }
 
-// Load loads an aggregate by ID.
+// Load loads an aggregate by ID, executing any pre- and post-load hooks.
 func (s *HookableStore[E]) Load(ctx context.Context, id uuid.UUID, opts *LoadOptions) (*Aggregate[E], error) {
 	aggregateID := s.inner.New(id).ID()
 
@@ -104,7 +108,7 @@ func (s *HookableStore[E]) Load(ctx context.Context, id uuid.UUID, opts *LoadOpt
 	return aggregate, nil
 }
 
-// Hydrate hydrates an aggregate.
+// Hydrate hydrates an aggregate, executing any pre- and post-hydrate hooks.
 func (s *HookableStore[E]) Hydrate(ctx context.Context, aggregate *Aggregate[E], opts *HydrateOptions) error {
 	s.log.Debug("hydrating aggregate", "aggregate_id", aggregate.ID())
 	for _, hook := range s.hooks[BeforeHydrate] {
@@ -126,7 +130,7 @@ func (s *HookableStore[E]) Hydrate(ctx context.Context, aggregate *Aggregate[E],
 	return nil
 }
 
-// Save saves an aggregate.
+// Save saves an aggregate, executing any pre- and post-save hooks.
 func (s *HookableStore[E]) Save(ctx context.Context, aggregate *Aggregate[E], opts *SaveOptions) error {
 	s.log.Debug("saving aggregate", "aggregate_id", aggregate.ID())
 	for _, hook := range s.hooks[BeforeSave] {

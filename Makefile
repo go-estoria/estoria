@@ -1,8 +1,10 @@
 .PHONY: info utest lint
+.DEFAULT_GOAL := info
 
 # Show available targets.
 info:
 	@echo "Targets:"
+	@echo "  lint     Run linters"
 	@echo "  utest    Run unit tests"
 
 # Run unit tests.
