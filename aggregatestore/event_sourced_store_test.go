@@ -1048,7 +1048,7 @@ func TestEventSourcedStore_HydrateAggregate(t *testing.T) {
 				return aggregatestore.NewAggregate(newMockEntity(aggregateID.UUID), 5)
 			},
 			haveHydrateOpts: &aggregatestore.HydrateOptions{ToVersion: -1},
-			wantErr:         errors.New("invalid target version"),
+			wantErr:         errors.New("invalid hydrate options: ToVersion cannot be negative"),
 		},
 		{
 			name: "returns an error when the aggregate is at a more recent version than the target version",
