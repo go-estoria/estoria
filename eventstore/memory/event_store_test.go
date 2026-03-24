@@ -2,6 +2,7 @@ package memory_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"testing"
 
@@ -199,7 +200,7 @@ func TestEventStore_AppendStream(t *testing.T) {
 				{Type: eventIDs[3].Type, Data: []byte("event 4 data")},
 			},
 			haveAppendOpts: eventstore.AppendStreamOptions{
-				ExpectVersion: 1,
+				ExpectVersion: eventstore.VersionPtr(1),
 			},
 			wantErr: eventstore.StreamVersionMismatchError{
 				StreamID:        streamIDs[0],
@@ -225,12 +226,108 @@ func TestEventStore_AppendStream(t *testing.T) {
 				{Type: eventIDs[4].Type, Data: []byte("event 6 data")},
 			},
 			haveAppendOpts: eventstore.AppendStreamOptions{
-				ExpectVersion: 4,
+				ExpectVersion: eventstore.VersionPtr(4),
 			},
 			wantErr: eventstore.StreamVersionMismatchError{
 				StreamID:        streamIDs[0],
 				ExpectedVersion: 4,
 				ActualVersion:   3,
+			},
+		},
+		{
+			name:         "ExpectVersion nil means no check, succeeds regardless of stream state",
+			haveStreamID: streamIDs[0],
+			haveEvents: []eventsForStream{
+				{
+					streamID: streamIDs[0],
+					events: []*eventstore.WritableEvent{
+						{Type: eventIDs[0].Type, Data: []byte("event 1 data")},
+						{Type: eventIDs[1].Type, Data: []byte("event 2 data")},
+					},
+				},
+			},
+			haveAppendEvents: []*eventstore.WritableEvent{
+				{Type: eventIDs[2].Type, Data: []byte("event 3 data")},
+			},
+			haveAppendOpts: eventstore.AppendStreamOptions{
+				ExpectVersion: nil,
+			},
+			wantEvents: []*eventstore.Event{
+				{ID: eventIDs[0], StreamID: streamIDs[0], StreamVersion: 1, Data: []byte("event 1 data")},
+				{ID: eventIDs[1], StreamID: streamIDs[0], StreamVersion: 2, Data: []byte("event 2 data")},
+				{ID: eventIDs[2], StreamID: streamIDs[0], StreamVersion: 3, Data: []byte("event 3 data")},
+			},
+		},
+		{
+			name:         "ExpectVersion pointer to 0 means stream must be empty, succeeds for new stream",
+			haveStreamID: streamIDs[0],
+			haveAppendEvents: []*eventstore.WritableEvent{
+				{Type: eventIDs[0].Type, Data: []byte("event 1 data")},
+			},
+			haveAppendOpts: eventstore.AppendStreamOptions{
+				ExpectVersion: eventstore.VersionPtr(0),
+			},
+			wantEvents: []*eventstore.Event{
+				{ID: eventIDs[0], StreamID: streamIDs[0], StreamVersion: 1, Data: []byte("event 1 data")},
+			},
+		},
+		{
+			name:         "ExpectVersion pointer to 0 means stream must be empty, fails for existing stream",
+			haveStreamID: streamIDs[0],
+			haveEvents: []eventsForStream{
+				{
+					streamID: streamIDs[0],
+					events: []*eventstore.WritableEvent{
+						{Type: eventIDs[0].Type, Data: []byte("event 1 data")},
+					},
+				},
+			},
+			haveAppendEvents: []*eventstore.WritableEvent{
+				{Type: eventIDs[1].Type, Data: []byte("event 2 data")},
+			},
+			haveAppendOpts: eventstore.AppendStreamOptions{
+				ExpectVersion: eventstore.VersionPtr(0),
+			},
+			wantErr: eventstore.StreamVersionMismatchError{
+				StreamID:        streamIDs[0],
+				ExpectedVersion: 0,
+				ActualVersion:   1,
+			},
+		},
+		{
+			name:         "StreamMustNotExist succeeds for new stream",
+			haveStreamID: streamIDs[0],
+			haveAppendEvents: []*eventstore.WritableEvent{
+				{Type: eventIDs[0].Type, Data: []byte("event 1 data")},
+			},
+			haveAppendOpts: eventstore.AppendStreamOptions{
+				StreamMustNotExist: true,
+			},
+			wantEvents: []*eventstore.Event{
+				{ID: eventIDs[0], StreamID: streamIDs[0], StreamVersion: 1, Data: []byte("event 1 data")},
+			},
+		},
+		{
+			name:         "StreamMustNotExist fails for existing stream",
+			haveStreamID: streamIDs[0],
+			haveEvents: []eventsForStream{
+				{
+					streamID: streamIDs[0],
+					events: []*eventstore.WritableEvent{
+						{Type: eventIDs[0].Type, Data: []byte("event 1 data")},
+					},
+				},
+			},
+			haveAppendEvents: []*eventstore.WritableEvent{
+				{Type: eventIDs[1].Type, Data: []byte("event 2 data")},
+			},
+			haveAppendOpts: eventstore.AppendStreamOptions{
+				StreamMustNotExist: true,
+			},
+			wantErr: eventstore.StreamVersionMismatchError{
+				StreamID:        streamIDs[0],
+				ExpectedVersion: 0,
+				ActualVersion:   1,
 			},
 		},
 		{
@@ -280,8 +377,12 @@ func TestEventStore_AppendStream(t *testing.T) {
 					if err.StreamID.String() != tt.haveStreamID.String() {
 						t.Errorf("unexpected stream ID: wanted %s got %s", tt.haveStreamID.String(), err.StreamID.String())
 					}
-					if err.ExpectedVersion != tt.haveAppendOpts.ExpectVersion {
-						t.Errorf("unexpected expected version: wanted %d got %d", tt.haveAppendOpts.ExpectVersion, err.ExpectedVersion)
+					var expectVersion int64
+					if tt.haveAppendOpts.ExpectVersion != nil {
+						expectVersion = *tt.haveAppendOpts.ExpectVersion
+					}
+					if err.ExpectedVersion != expectVersion {
+						t.Errorf("unexpected expected version: wanted %d got %d", expectVersion, err.ExpectedVersion)
 					}
 					if err.ActualVersion != int64(totalEvents) {
 						t.Errorf("unexpected actual version: wanted %d got %d", totalEvents, err.ActualVersion)
@@ -389,7 +490,7 @@ func TestEventStore_ReadStream(t *testing.T) {
 			},
 		},
 		{
-			name: "returns a stream iterator for an existing stream with an initial offset",
+			name: "returns a stream iterator for an existing stream with an initial AfterVersion",
 			haveEvents: []eventsForStream{
 				{
 					streamID: streamIDs[0],
@@ -402,7 +503,7 @@ func TestEventStore_ReadStream(t *testing.T) {
 			},
 			haveStreamID: streamIDs[0],
 			haveReadStreamOpts: eventstore.ReadStreamOptions{
-				Offset: 1,
+				AfterVersion: 1,
 			},
 			wantEvents: []*eventstore.Event{
 				{ID: eventIDs[1], StreamID: streamIDs[0], StreamVersion: 2, Data: []byte("event 2 data")},
@@ -431,7 +532,7 @@ func TestEventStore_ReadStream(t *testing.T) {
 			},
 		},
 		{
-			name: "returns a stream iterator for an existing stream with an initial offset and maximum count",
+			name: "returns a stream iterator for an existing stream with an initial AfterVersion and maximum count",
 			haveEvents: []eventsForStream{
 				{
 					streamID: streamIDs[0],
@@ -446,8 +547,8 @@ func TestEventStore_ReadStream(t *testing.T) {
 			},
 			haveStreamID: streamIDs[0],
 			haveReadStreamOpts: eventstore.ReadStreamOptions{
-				Offset: 2,
-				Count:  2,
+				AfterVersion: 2,
+				Count:        2,
 			},
 			wantEvents: []*eventstore.Event{
 				{ID: eventIDs[2], StreamID: streamIDs[0], StreamVersion: 3, Data: []byte("event 3 data")},
@@ -477,7 +578,7 @@ func TestEventStore_ReadStream(t *testing.T) {
 			},
 		},
 		{
-			name: "returns a stream iterator for an existing stream in reverse order with an initial offset",
+			name: "returns a stream iterator for an existing stream in reverse order with an initial AfterVersion",
 			haveEvents: []eventsForStream{
 				{
 					streamID: streamIDs[0],
@@ -485,15 +586,19 @@ func TestEventStore_ReadStream(t *testing.T) {
 						{Type: eventIDs[0].Type, Data: []byte("event 1 data")},
 						{Type: eventIDs[1].Type, Data: []byte("event 2 data")},
 						{Type: eventIDs[2].Type, Data: []byte("event 3 data")},
+						{Type: eventIDs[3].Type, Data: []byte("event 4 data")},
+						{Type: eventIDs[4].Type, Data: []byte("event 5 data")},
 					},
 				},
 			},
 			haveStreamID: streamIDs[0],
 			haveReadStreamOpts: eventstore.ReadStreamOptions{
-				Direction: eventstore.Reverse,
-				Offset:    1,
+				Direction:    eventstore.Reverse,
+				AfterVersion: 3,
 			},
+			// Reads backwards starting at version 3 (inclusive): returns [3, 2, 1]
 			wantEvents: []*eventstore.Event{
+				{ID: eventIDs[2], StreamID: streamIDs[0], StreamVersion: 3, Data: []byte("event 3 data")},
 				{ID: eventIDs[1], StreamID: streamIDs[0], StreamVersion: 2, Data: []byte("event 2 data")},
 				{ID: eventIDs[0], StreamID: streamIDs[0], StreamVersion: 1, Data: []byte("event 1 data")},
 			},
@@ -521,7 +626,7 @@ func TestEventStore_ReadStream(t *testing.T) {
 			},
 		},
 		{
-			name: "returns a stream iterator for an existing stream in reverse order with an initial offset and maximum count",
+			name: "returns a stream iterator for an existing stream in reverse order with an initial AfterVersion and maximum count",
 			haveEvents: []eventsForStream{
 				{
 					streamID: streamIDs[0],
@@ -536,10 +641,11 @@ func TestEventStore_ReadStream(t *testing.T) {
 			},
 			haveStreamID: streamIDs[0],
 			haveReadStreamOpts: eventstore.ReadStreamOptions{
-				Direction: eventstore.Reverse,
-				Offset:    2,
-				Count:     2,
+				Direction:    eventstore.Reverse,
+				AfterVersion: 3,
+				Count:        2,
 			},
+			// Read backwards from version 3 with limit 2: returns [3, 2]
 			wantEvents: []*eventstore.Event{
 				{ID: eventIDs[2], StreamID: streamIDs[0], StreamVersion: 3, Data: []byte("event 3 data")},
 				{ID: eventIDs[1], StreamID: streamIDs[0], StreamVersion: 2, Data: []byte("event 2 data")},
@@ -629,6 +735,192 @@ func TestEventStore_ReadStream(t *testing.T) {
 	}
 }
 
+func TestEventStore_Metadata(t *testing.T) {
+	t.Parallel()
+
+	streamID := typeid.NewV4("streamtype1")
+	store, err := memory.NewEventStore()
+	if err != nil {
+		t.Fatalf("NewEventStore() error: %v", err)
+	}
+
+	meta := map[string]string{
+		"correlation_id": "abc123",
+		"user_id":        "user-42",
+	}
+
+	if err := store.AppendStream(context.Background(), streamID, []*eventstore.WritableEvent{
+		{Type: "eventtype1", Data: []byte("data"), Metadata: meta},
+	}, eventstore.AppendStreamOptions{}); err != nil {
+		t.Fatalf("AppendStream() error: %v", err)
+	}
+
+	iter, err := store.ReadStream(context.Background(), streamID, eventstore.ReadStreamOptions{})
+	if err != nil {
+		t.Fatalf("ReadStream() error: %v", err)
+	}
+
+	event, err := iter.Next(context.Background())
+	if err != nil {
+		t.Fatalf("Next() error: %v", err)
+	}
+
+	if len(event.Metadata) != len(meta) {
+		t.Fatalf("unexpected metadata length: wanted %d got %d", len(meta), len(event.Metadata))
+	}
+	for k, v := range meta {
+		if got := event.Metadata[k]; got != v {
+			t.Errorf("unexpected metadata value for key %q: wanted %q got %q", k, v, got)
+		}
+	}
+}
+
+func TestEventStore_GlobalPosition(t *testing.T) {
+	t.Parallel()
+
+	streamID1 := typeid.NewV4("streamtype1")
+	streamID2 := typeid.NewV4("streamtype2")
+	store, err := memory.NewEventStore()
+	if err != nil {
+		t.Fatalf("NewEventStore() error: %v", err)
+	}
+
+	// Append events across two streams
+	if err := store.AppendStream(context.Background(), streamID1, []*eventstore.WritableEvent{
+		{Type: "eventtype1", Data: []byte("s1e1")},
+		{Type: "eventtype1", Data: []byte("s1e2")},
+	}, eventstore.AppendStreamOptions{}); err != nil {
+		t.Fatalf("AppendStream() error: %v", err)
+	}
+	if err := store.AppendStream(context.Background(), streamID2, []*eventstore.WritableEvent{
+		{Type: "eventtype2", Data: []byte("s2e1")},
+	}, eventstore.AppendStreamOptions{}); err != nil {
+		t.Fatalf("AppendStream() error: %v", err)
+	}
+
+	// Read stream1 and verify global positions are non-nil and increasing
+	iter1, err := store.ReadStream(context.Background(), streamID1, eventstore.ReadStreamOptions{})
+	if err != nil {
+		t.Fatalf("ReadStream() error: %v", err)
+	}
+	var prevPos int64
+	for {
+		event, err := iter1.Next(context.Background())
+		if errors.Is(err, eventstore.ErrEndOfEventStream) {
+			break
+		}
+		if err != nil {
+			t.Fatalf("Next() error: %v", err)
+		}
+		if event.GlobalPosition == nil {
+			t.Fatalf("expected non-nil GlobalPosition")
+		}
+		if *event.GlobalPosition <= prevPos {
+			t.Errorf("GlobalPosition not monotonically increasing: prev=%d current=%d", prevPos, *event.GlobalPosition)
+		}
+		prevPos = *event.GlobalPosition
+	}
+
+	// Read stream2 and verify its global position is greater than stream1's last position
+	iter2, err := store.ReadStream(context.Background(), streamID2, eventstore.ReadStreamOptions{})
+	if err != nil {
+		t.Fatalf("ReadStream() error: %v", err)
+	}
+	event, err := iter2.Next(context.Background())
+	if err != nil {
+		t.Fatalf("Next() error: %v", err)
+	}
+	if event.GlobalPosition == nil {
+		t.Fatalf("expected non-nil GlobalPosition")
+	}
+	if *event.GlobalPosition <= prevPos {
+		t.Errorf("stream2 GlobalPosition (%d) should be greater than stream1's last (%d)", *event.GlobalPosition, prevPos)
+	}
+}
+
+func TestEventStore_ErrorTypes(t *testing.T) {
+	t.Parallel()
+
+	streamID := typeid.NewV4("streamtype1")
+
+	t.Run("StreamVersionMismatchError satisfies errors.Is", func(t *testing.T) {
+		t.Parallel()
+		store, err := memory.NewEventStore()
+		if err != nil {
+			t.Fatalf("NewEventStore() error: %v", err)
+		}
+		// Append initial event so stream exists at version 1
+		if err := store.AppendStream(context.Background(), streamID, []*eventstore.WritableEvent{
+			{Type: "et", Data: []byte("d")},
+		}, eventstore.AppendStreamOptions{}); err != nil {
+			t.Fatalf("AppendStream() error: %v", err)
+		}
+		// Now append with wrong expected version
+		gotErr := store.AppendStream(context.Background(), streamID, []*eventstore.WritableEvent{
+			{Type: "et", Data: []byte("d2")},
+		}, eventstore.AppendStreamOptions{ExpectVersion: eventstore.VersionPtr(99)})
+		if gotErr == nil {
+			t.Fatal("expected error, got nil")
+		}
+		if !errors.Is(gotErr, eventstore.StreamVersionMismatchError{}) {
+			t.Errorf("expected errors.Is to match StreamVersionMismatchError, got: %v", gotErr)
+		}
+	})
+
+	t.Run("EventMarshalingError satisfies errors.Is", func(t *testing.T) {
+		t.Parallel()
+		store, err := memory.NewEventStore(memory.WithEventMarshaler(failMarshaler{}))
+		if err != nil {
+			t.Fatalf("NewEventStore() error: %v", err)
+		}
+		gotErr := store.AppendStream(context.Background(), streamID, []*eventstore.WritableEvent{
+			{Type: "et", Data: []byte("d")},
+		}, eventstore.AppendStreamOptions{})
+		if gotErr == nil {
+			t.Fatal("expected error, got nil")
+		}
+		if !errors.Is(gotErr, eventstore.EventMarshalingError{}) {
+			t.Errorf("expected errors.Is to match EventMarshalingError, got: %v", gotErr)
+		}
+	})
+
+	t.Run("EventUnmarshalingError satisfies errors.Is", func(t *testing.T) {
+		t.Parallel()
+		store, err := memory.NewEventStore(memory.WithEventMarshaler(failUnmarshalMarshaler{}))
+		if err != nil {
+			t.Fatalf("NewEventStore() error: %v", err)
+		}
+		if err := store.AppendStream(context.Background(), streamID, []*eventstore.WritableEvent{
+			{Type: "et", Data: []byte("d")},
+		}, eventstore.AppendStreamOptions{}); err != nil {
+			t.Fatalf("AppendStream() error: %v", err)
+		}
+		iter, err := store.ReadStream(context.Background(), streamID, eventstore.ReadStreamOptions{})
+		if err != nil {
+			t.Fatalf("ReadStream() error: %v", err)
+		}
+		_, gotErr := iter.Next(context.Background())
+		if gotErr == nil {
+			t.Fatal("expected error, got nil")
+		}
+		if !errors.Is(gotErr, eventstore.EventUnmarshalingError{}) {
+			t.Errorf("expected errors.Is to match EventUnmarshalingError, got: %v", gotErr)
+		}
+	})
+
+	t.Run("InitializationError satisfies errors.Is", func(t *testing.T) {
+		t.Parallel()
+		_, gotErr := memory.NewEventStore(memory.WithEventMarshaler(nil))
+		if gotErr == nil {
+			t.Fatal("expected error, got nil")
+		}
+		if !errors.Is(gotErr, eventstore.InitializationError{}) {
+			t.Errorf("expected errors.Is to match InitializationError, got: %v", gotErr)
+		}
+	})
+}
+
+// failMarshaler always returns errors for both Marshal and Unmarshal.
 type failMarshaler struct{}
 
 func (failMarshaler) Marshal(_ *eventstore.Event) ([]byte, error) {
@@ -636,6 +928,17 @@ func (failMarshaler) Marshal(_ *eventstore.Event) ([]byte, error) {
 }
 
 func (failMarshaler) Unmarshal(_ []byte, _ *eventstore.Event) error {
+	return errors.New("fake unmarshal error")
+}
+
+// failUnmarshalMarshaler marshals successfully (using JSON) but always fails to unmarshal.
+type failUnmarshalMarshaler struct{}
+
+func (failUnmarshalMarshaler) Marshal(event *eventstore.Event) ([]byte, error) {
+	return json.Marshal(event)
+}
+
+func (failUnmarshalMarshaler) Unmarshal(_ []byte, _ *eventstore.Event) error {
 	return errors.New("fake unmarshal error")
 }
 

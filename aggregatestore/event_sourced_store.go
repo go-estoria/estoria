@@ -107,8 +107,8 @@ func (s *EventSourcedStore[E]) Hydrate(ctx context.Context, aggregate *Aggregate
 	s.log.Debug("hydrating aggregate from event store", "from_version", aggregate.Version(), "to_version", opts.ToVersion)
 
 	readOpts := eventstore.ReadStreamOptions{
-		Offset:    aggregate.Version(),
-		Direction: eventstore.Forward,
+		AfterVersion: aggregate.Version(),
+		Direction:    eventstore.Forward,
 	}
 
 	if opts.ToVersion > 0 {
@@ -192,7 +192,7 @@ func (s *EventSourcedStore[E]) Save(ctx context.Context, aggregate *Aggregate[E]
 
 	// write to event stream
 	if err := s.eventWriter.AppendStream(ctx, aggregate.ID(), events, eventstore.AppendStreamOptions{
-		ExpectVersion: aggregate.Version(),
+		ExpectVersion: eventstore.VersionPtr(aggregate.Version()),
 	}); err != nil {
 		return SaveError{AggregateID: aggregate.ID(), Operation: "saving events to stream", Err: err}
 	}

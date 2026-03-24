@@ -36,9 +36,9 @@ func (s *EventStreamStore) ReadSnapshot(ctx context.Context, aggregateID typeid.
 	snapshotStreamID := typeid.New(aggregateID.Type+"snapshot", aggregateID.UUID)
 
 	stream, err := s.eventReader.ReadStream(ctx, snapshotStreamID, eventstore.ReadStreamOptions{
-		Offset:    0,
-		Count:     1,
-		Direction: eventstore.Reverse,
+		AfterVersion: 0,
+		Count:        1,
+		Direction:    eventstore.Reverse,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("finding snapshot stream: %w", err)
