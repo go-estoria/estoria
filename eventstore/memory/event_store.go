@@ -19,9 +19,10 @@ type EventMarshaler interface {
 
 // EventStore is an in-memory event store. It should not be used in production applications.
 type EventStore struct {
-	events    map[string][]*eventStoreDocument
-	mu        sync.RWMutex
-	marshaler EventMarshaler
+	events        map[string][]*eventStoreDocument
+	mu            sync.RWMutex
+	marshaler     EventMarshaler
+	globalCounter int64
 }
 
 // NewEventStore creates a new in-memory event store.
@@ -45,38 +46,58 @@ func (s *EventStore) AppendStream(ctx context.Context, streamID typeid.ID, event
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	// Validate mutually exclusive options
+	if opts.ExpectVersion != nil && opts.StreamMustNotExist {
+		return fmt.Errorf("ExpectVersion and StreamMustNotExist are mutually exclusive")
+	}
+
 	stream, ok := s.events[streamID.String()]
 	if !ok {
+		// Note: the empty stream entry is intentionally left in the map on validation failure.
+		// ReadStream handles this correctly by checking len(stream) == 0.
 		s.events[streamID.String()] = []*eventStoreDocument{}
 		stream = s.events[streamID.String()]
 	}
 
-	if opts.ExpectVersion > 0 && opts.ExpectVersion != int64(len(stream)) {
+	currentVersion := int64(len(stream))
+
+	// Check StreamMustNotExist
+	if opts.StreamMustNotExist && currentVersion > 0 {
 		return eventstore.StreamVersionMismatchError{
 			StreamID:        streamID,
-			ExpectedVersion: opts.ExpectVersion,
-			ActualVersion:   int64(len(stream)),
+			ExpectedVersion: 0,
+			ActualVersion:   currentVersion,
 		}
 	}
 
-	preparedEvents := []*eventstore.Event{}
+	// Check ExpectVersion (nil means no check)
+	if opts.ExpectVersion != nil && *opts.ExpectVersion != currentVersion {
+		return eventstore.StreamVersionMismatchError{
+			StreamID:        streamID,
+			ExpectedVersion: *opts.ExpectVersion,
+			ActualVersion:   currentVersion,
+		}
+	}
 
 	tx := []*eventStoreDocument{}
 	for i, writableEvent := range events {
+		s.globalCounter++
+		globalPos := s.globalCounter
+
 		event := &eventstore.Event{
-			ID:            typeid.NewV4(writableEvent.Type),
-			StreamID:      streamID,
-			StreamVersion: int64(len(stream) + i + 1),
-			Timestamp:     time.Now(),
-			Data:          writableEvent.Data,
+			ID:             typeid.NewV4(writableEvent.Type),
+			StreamID:       streamID,
+			StreamVersion:  int64(len(stream) + i + 1),
+			GlobalPosition: &globalPos,
+			Timestamp:      time.Now(),
+			Data:           writableEvent.Data,
+			Metadata:       writableEvent.Metadata,
 		}
 
 		data, err := s.marshaler.Marshal(event)
 		if err != nil {
 			return eventstore.EventMarshalingError{StreamID: streamID, EventID: event.ID, Err: err}
 		}
-
-		preparedEvents = append(preparedEvents, event)
 
 		tx = append(tx, &eventStoreDocument{
 			Data: data,
@@ -97,17 +118,25 @@ func (s *EventStore) ReadStream(_ context.Context, streamID typeid.ID, opts even
 		return nil, eventstore.ErrStreamNotFound
 	}
 
-	cursor := int64(0)
+	var cursor int64
 	if opts.Direction == eventstore.Reverse {
-		cursor = int64(len(stream) - 1)
-	}
-
-	if opts.Offset > 0 {
-		if opts.Direction == eventstore.Reverse {
-			cursor -= opts.Offset
+		if opts.AfterVersion > 0 {
+			// Read backwards starting at the event with this version (inclusive).
+			// AfterVersion is 1-based; convert to 0-based index.
+			cursor = opts.AfterVersion - 1
+			if cursor >= int64(len(stream)) {
+				cursor = int64(len(stream) - 1)
+			}
 		} else {
-			cursor += opts.Offset
+			cursor = int64(len(stream) - 1)
 		}
+	} else {
+		if opts.AfterVersion > 0 {
+			// Start at the event immediately after AfterVersion.
+			// AfterVersion is 1-based version N, so the next event is at 0-based index N.
+			cursor = opts.AfterVersion
+		}
+		// else cursor = 0 (start from beginning)
 	}
 
 	limit := int64(0)
