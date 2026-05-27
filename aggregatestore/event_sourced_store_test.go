@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/go-estoria/estoria"
@@ -191,6 +192,24 @@ func (e mockEntityValueEvent) New() estoria.EntityEvent[mockEntity] {
 func (e mockEntityValueEvent) ApplyTo(_ context.Context, m mockEntity) (mockEntity, error) {
 	m.numAppliedEvents++
 	m.lastValueEventValue = e.Value
+	return m, nil
+}
+
+// mockEntityNilNewEvent is a malformed prototype whose New() returns nil. It's
+// used to verify that registering such a prototype does not panic and that
+// hydration still produces the existing "prototype.New() returned nil" error
+// instead of a reflect panic.
+type mockEntityNilNewEvent struct{}
+
+func (e mockEntityNilNewEvent) EventType() string {
+	return "mockEntityNilNewEvent"
+}
+
+func (e mockEntityNilNewEvent) New() estoria.EntityEvent[mockEntity] {
+	return nil
+}
+
+func (e mockEntityNilNewEvent) ApplyTo(_ context.Context, m mockEntity) (mockEntity, error) {
 	return m, nil
 }
 
@@ -1725,6 +1744,42 @@ func TestEventSourcedStore_PreservesValueTypedEventDefaults(t *testing.T) {
 
 	if got, want := aggregate.Entity().lastValueEventValue, "seeded"; got != want {
 		t.Errorf("default from New() not preserved: want %q, got %q", want, got)
+	}
+}
+
+// TestEventSourcedStore_NilReturningPrototypeIsHandledCleanly verifies that a
+// prototype whose New() returns nil neither panics at registration nor produces
+// a reflect panic on hydration; the existing nil check in the event handler
+// surfaces a clean error.
+func TestEventSourcedStore_NilReturningPrototypeIsHandledCleanly(t *testing.T) {
+	t.Parallel()
+
+	aggregateID := newMockEntity(uuid.Must(uuid.NewV4())).EntityID()
+
+	es, err := memory.NewEventStore()
+	if err != nil {
+		t.Fatalf("unexpected error creating event store: %v", err)
+	}
+	if err := es.AppendStream(context.Background(), aggregateID, []*eventstore.WritableEvent{{
+		Type: mockEntityNilNewEvent{}.EventType(),
+		Data: []byte(`{}`),
+	}}, eventstore.AppendStreamOptions{}); err != nil {
+		t.Fatalf("unexpected error appending event: %v", err)
+	}
+
+	store, err := aggregatestore.New(es, newMockEntity,
+		aggregatestore.WithEventTypes(mockEntityNilNewEvent{}),
+	)
+	if err != nil {
+		t.Fatalf("unexpected error creating store: %v", err)
+	}
+
+	_, err = store.Load(context.Background(), aggregateID.UUID, nil)
+	if err == nil {
+		t.Fatal("expected hydration error for nil-returning prototype, got nil")
+	}
+	if !strings.Contains(err.Error(), "prototype.New() returned nil") {
+		t.Errorf("want error containing 'prototype.New() returned nil', got: %v", err)
 	}
 }
 

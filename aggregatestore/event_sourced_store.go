@@ -254,6 +254,14 @@ func (s *EventSourcedStore[E]) Use(eventPrototypes ...estoria.EntityEvent[E]) er
 // addressable instance, returning the pointer.
 func pointerConstructor[E estoria.Entity](newFn func() estoria.EntityEvent[E]) func() estoria.EntityEvent[E] {
 	sample := newFn()
+	// A nil-returning New() violates the EntityEvent contract, but the
+	// hydration path already surfaces this with a clean error. Returning
+	// newFn directly preserves that behavior instead of letting reflect.New(nil)
+	// panic in the value-wrapping closure below.
+	if sample == nil {
+		return newFn
+	}
+
 	if reflect.ValueOf(sample).Kind() == reflect.Pointer {
 		return newFn
 	}
@@ -262,7 +270,14 @@ func pointerConstructor[E estoria.Entity](newFn func() estoria.EntityEvent[E]) f
 	return func() estoria.EntityEvent[E] {
 		ptr := reflect.New(t)
 		ptr.Elem().Set(reflect.ValueOf(newFn()))
-		return ptr.Interface().(estoria.EntityEvent[E])
+		ev, ok := ptr.Interface().(estoria.EntityEvent[E])
+		if !ok {
+			// Unreachable: *T satisfies EntityEvent[E] whenever T does (Go's method-set
+			// rules guarantee *T's method set is a superset of T's), and T satisfies it
+			// by virtue of newFn's return type.
+			panic(fmt.Sprintf("pointerConstructor: *%s does not satisfy EntityEvent[E]", t.Name()))
+		}
+		return ev
 	}
 }
 
