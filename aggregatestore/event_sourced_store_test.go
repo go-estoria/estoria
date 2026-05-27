@@ -173,6 +173,49 @@ func (e mockEntityEventF) ApplyTo(_ context.Context, m mockEntity) (mockEntity, 
 	return m, errors.New("mock error")
 }
 
+// mockEntityValueEvent exercises the value-typed prototype path: New() returns
+// a value (not a pointer), so the store's registration must wrap it so the
+// JSON marshaler can unmarshal into an addressable instance.
+type mockEntityValueEvent struct {
+	Value string `json:"value"`
+}
+
+func (e mockEntityValueEvent) EventType() string {
+	return "mockEntityValueEvent"
+}
+
+func (e mockEntityValueEvent) New() estoria.EntityEvent[mockEntity] {
+	return mockEntityValueEvent{}
+}
+
+func (e mockEntityValueEvent) ApplyTo(_ context.Context, m mockEntity) (mockEntity, error) {
+	m.numAppliedEvents++
+	m.lastValueEventValue = e.Value
+	return m, nil
+}
+
+// mockEntityValueEventWithDefault is a value-typed event whose New() seeds a
+// default field value. It's used to verify that the value-prototype constructor
+// path doesn't bypass user-supplied defaults.
+type mockEntityValueEventWithDefault struct {
+	Value   string `json:"value"`
+	Default string `json:"default,omitempty"`
+}
+
+func (e mockEntityValueEventWithDefault) EventType() string {
+	return "mockEntityValueEventWithDefault"
+}
+
+func (e mockEntityValueEventWithDefault) New() estoria.EntityEvent[mockEntity] {
+	return mockEntityValueEventWithDefault{Default: "seeded"}
+}
+
+func (e mockEntityValueEventWithDefault) ApplyTo(_ context.Context, m mockEntity) (mockEntity, error) {
+	m.numAppliedEvents++
+	m.lastValueEventValue = e.Default
+	return m, nil
+}
+
 type mockStreamReader struct {
 	readStreamIterator eventstore.StreamIterator
 	readStreamErr      error
@@ -1599,6 +1642,89 @@ func TestEventSourcedStore_SaveAggregate(t *testing.T) {
 				t.Errorf("want applied events %v, got %v", tt.wantEntity.numAppliedEvents, gotEntity.numAppliedEvents)
 			}
 		})
+	}
+}
+
+// TestEventSourcedStore_HydratesValueTypedEvent verifies that an event type
+// whose New() returns a value (not a pointer) can be registered and hydrated.
+// Prior to the pointerConstructor wrapping in Use(), json.Unmarshal would
+// reject the non-pointer destination and hydration would fail.
+func TestEventSourcedStore_HydratesValueTypedEvent(t *testing.T) {
+	t.Parallel()
+
+	aggregateID := newMockEntity(uuid.Must(uuid.NewV4())).EntityID()
+
+	es, err := memory.NewEventStore()
+	if err != nil {
+		t.Fatalf("unexpected error creating event store: %v", err)
+	}
+	if err := es.AppendStream(context.Background(), aggregateID, []*eventstore.WritableEvent{{
+		Type: mockEntityValueEvent{}.EventType(),
+		Data: mustJSONMarshal(mockEntityValueEvent{Value: "hello"}),
+	}}, eventstore.AppendStreamOptions{}); err != nil {
+		t.Fatalf("unexpected error appending event: %v", err)
+	}
+
+	store, err := aggregatestore.New(es, newMockEntity,
+		aggregatestore.WithEventTypes(mockEntityValueEvent{}),
+	)
+	if err != nil {
+		t.Fatalf("unexpected error creating store: %v", err)
+	}
+
+	aggregate, err := store.Load(context.Background(), aggregateID.UUID, nil)
+	if err != nil {
+		t.Fatalf("unexpected error loading aggregate: %v", err)
+	}
+
+	if got, want := aggregate.Version(), int64(1); got != want {
+		t.Errorf("want version %d, got %d", want, got)
+	}
+	if got, want := aggregate.Entity().numAppliedEvents, int64(1); got != want {
+		t.Errorf("want numAppliedEvents %d, got %d", want, got)
+	}
+	if got, want := aggregate.Entity().lastValueEventValue, "hello"; got != want {
+		t.Errorf("want lastValueEventValue %q, got %q", want, got)
+	}
+}
+
+// TestEventSourcedStore_PreservesValueTypedEventDefaults verifies that when a
+// value-typed prototype's New() seeds default field values, those defaults
+// survive into the unmarshaled event. The persisted payload below intentionally
+// omits the "default" field; if pointerConstructor were calling reflect.New(t)
+// without going through newFn(), the default would be lost.
+func TestEventSourcedStore_PreservesValueTypedEventDefaults(t *testing.T) {
+	t.Parallel()
+
+	aggregateID := newMockEntity(uuid.Must(uuid.NewV4())).EntityID()
+
+	es, err := memory.NewEventStore()
+	if err != nil {
+		t.Fatalf("unexpected error creating event store: %v", err)
+	}
+	// Persist a payload that omits the "default" field, so we know any value
+	// that ends up on the entity came from the prototype's New(), not the JSON.
+	if err := es.AppendStream(context.Background(), aggregateID, []*eventstore.WritableEvent{{
+		Type: mockEntityValueEventWithDefault{}.EventType(),
+		Data: []byte(`{"value":"hi"}`),
+	}}, eventstore.AppendStreamOptions{}); err != nil {
+		t.Fatalf("unexpected error appending event: %v", err)
+	}
+
+	store, err := aggregatestore.New(es, newMockEntity,
+		aggregatestore.WithEventTypes(mockEntityValueEventWithDefault{}),
+	)
+	if err != nil {
+		t.Fatalf("unexpected error creating store: %v", err)
+	}
+
+	aggregate, err := store.Load(context.Background(), aggregateID.UUID, nil)
+	if err != nil {
+		t.Fatalf("unexpected error loading aggregate: %v", err)
+	}
+
+	if got, want := aggregate.Entity().lastValueEventValue, "seeded"; got != want {
+		t.Errorf("default from New() not preserved: want %q, got %q", want, got)
 	}
 }
 

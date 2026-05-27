@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 
 	"github.com/go-estoria/estoria"
 	"github.com/go-estoria/estoria/eventstore"
@@ -224,19 +225,45 @@ func (s *EventSourcedStore[E]) Save(ctx context.Context, aggregate *Aggregate[E]
 }
 
 // Use registers entity event prototypes with the store.
+//
+// A prototype's New() method may return either a pointer to the event type or a
+// value of the event type. For value-returning prototypes, Use inspects the
+// returned type once at registration time and wraps New so that subsequent
+// calls allocate an addressable pointer instance; this lets the marshaler
+// unmarshal into the event without per-hydrate reflection.
 func (s *EventSourcedStore[E]) Use(eventPrototypes ...estoria.EntityEvent[E]) error {
 	for _, prototype := range eventPrototypes {
-		if _, registered := s.entityEventPrototypes[prototype.EventType()]; !registered {
-			s.entityEventPrototypes[prototype.EventType()] = prototype.New
-		} else {
+		if _, registered := s.entityEventPrototypes[prototype.EventType()]; registered {
 			return InitializeError{
 				Operation: "registering entity event prototype",
 				Err:       errors.New("duplicate event type " + prototype.EventType()),
 			}
 		}
+
+		s.entityEventPrototypes[prototype.EventType()] = pointerConstructor(prototype.New)
 	}
 
 	return nil
+}
+
+// pointerConstructor returns a constructor that always yields an EntityEvent[E]
+// whose dynamic type is a pointer, so json.Unmarshal can write into it. If
+// newFn already returns a pointer, it is used directly with no overhead.
+// Otherwise the underlying type is captured once and each call invokes newFn
+// (preserving any defaults the user set) and copies the result into a fresh
+// addressable instance, returning the pointer.
+func pointerConstructor[E estoria.Entity](newFn func() estoria.EntityEvent[E]) func() estoria.EntityEvent[E] {
+	sample := newFn()
+	if reflect.ValueOf(sample).Kind() == reflect.Pointer {
+		return newFn
+	}
+
+	t := reflect.TypeOf(sample)
+	return func() estoria.EntityEvent[E] {
+		ptr := reflect.New(t)
+		ptr.Elem().Set(reflect.ValueOf(newFn()))
+		return ptr.Interface().(estoria.EntityEvent[E])
+	}
 }
 
 // Returns a projection.EventHandlerFunc that decodes and applies an entity event to an aggregate.
