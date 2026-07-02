@@ -41,7 +41,7 @@ jobs:
 
       - name: Create GitHub Release
         if: steps.bump.outputs.skipped == 'false'
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ steps.bump.outputs.version }}
           body: ${{ steps.bump.outputs.release-notes }}
