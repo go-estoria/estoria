@@ -1,0 +1,48 @@
+name: Release
+
+# On merge to main: read the merged PR's release label, compute the next
+# semantic version, create+push the vX.Y.Z tag, and publish a GitHub Release.
+#
+# Tag and release are done in ONE job on purpose: a tag pushed with the default
+# GITHUB_TOKEN does not trigger a separate `on: push: tags` workflow, so a
+# tag-triggered release would silently never run.
+on:
+  push:
+    branches: [main]
+
+# Needs write access to create the tag and the GitHub Release.
+permissions:
+  contents: write
+
+# Never cancel a release mid-flight.
+concurrency:
+  group: release-main
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Tag and Release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          # Full history so pr-semver-bump can see existing version tags.
+          fetch-depth: 0
+
+      - name: Tag New Version
+        id: bump
+        uses: jefflinse/pr-semver-bump@v1.7.1
+        with:
+          mode: bump
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+          with-v: true
+          noop-labels: no release
+          require-release-notes: true
+
+      - name: Create GitHub Release
+        if: steps.bump.outputs.skipped == 'false'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.bump.outputs.version }}
+          body: ${{ steps.bump.outputs.release-notes }}
+          make_latest: true

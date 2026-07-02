@@ -1,0 +1,37 @@
+name: Release Info
+
+# Validates that every PR declares its version impact via a release label
+# (and carries release notes) before it can be merged. This is the gate that
+# makes the automated version bump on merge deterministic.
+#
+# Re-runs whenever a label is added/removed or the PR body is edited so the
+# check reflects the current state, not just the state at open time.
+on:
+  pull_request:
+    types:
+      - opened
+      - edited
+      - reopened
+      - synchronize
+      - labeled
+      - unlabeled
+      - ready_for_review
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  validate:
+    name: Validate Release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Validate Release Label and Notes
+        uses: jefflinse/pr-semver-bump@v1.7.1
+        with:
+          mode: validate
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+          with-v: true
+          noop-labels: no release
+          require-release-notes: true
