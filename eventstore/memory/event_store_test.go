@@ -652,6 +652,26 @@ func TestEventStore_ReadStream(t *testing.T) {
 			},
 		},
 		{
+			// an existing stream with no events matching the options is not a missing
+			// stream; reporting it as one makes an aggregate at the stream tip unloadable
+			name: "returns an empty stream iterator for an existing stream read past its latest version",
+			haveEvents: []eventsForStream{
+				{
+					streamID: streamIDs[0],
+					events: []*eventstore.WritableEvent{
+						{Type: eventIDs[0].Type, Data: []byte("event 1 data")},
+						{Type: eventIDs[1].Type, Data: []byte("event 2 data")},
+						{Type: eventIDs[2].Type, Data: []byte("event 3 data")},
+					},
+				},
+			},
+			haveStreamID: streamIDs[0],
+			haveReadStreamOpts: eventstore.ReadStreamOptions{
+				AfterVersion: 3,
+			},
+			wantEvents: []*eventstore.Event{},
+		},
+		{
 			name:         "returns StreamNotFoundError for a non-existent stream",
 			haveStreamID: streamIDs[0],
 			wantErr:      eventstore.ErrStreamNotFound,

@@ -4,11 +4,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
 	"testing"
 	"time"
 
 	"github.com/go-estoria/estoria"
 	"github.com/go-estoria/estoria/aggregatestore"
+	"github.com/go-estoria/estoria/eventstore"
+	"github.com/go-estoria/estoria/eventstore/memory"
 	"github.com/go-estoria/estoria/snapshotstore"
 	"github.com/go-estoria/estoria/typeid"
 	"github.com/gofrs/uuid/v5"
@@ -33,6 +36,52 @@ func (m *mockSnapshotStore) WriteSnapshot(ctx context.Context, snapshot *snapsho
 	}
 
 	return errors.New("unexpected call to WriteSnapshot")
+}
+
+// emptyFilteredReadIsNotFoundStore wraps an event store with the read semantics of backing
+// stores that cannot distinguish an absent stream from a filtered read that matched nothing:
+// a forward read with an AfterVersion at or beyond the stream tip is reported as
+// ErrStreamNotFound. It counts those reads so a test can assert the case was exercised.
+type emptyFilteredReadIsNotFoundStore struct {
+	eventstore.Store
+	emptyFilteredReads int
+}
+
+func (s *emptyFilteredReadIsNotFoundStore) ReadStream(ctx context.Context, id typeid.ID, opts eventstore.ReadStreamOptions) (eventstore.StreamIterator, error) {
+	iter, err := s.Store.ReadStream(ctx, id, opts)
+	if err != nil {
+		return nil, err
+	}
+	defer iter.Close(ctx)
+
+	events, err := eventstore.ReadAll(ctx, iter)
+	if err != nil {
+		return nil, err
+	} else if len(events) == 0 {
+		s.emptyFilteredReads++
+		return nil, eventstore.ErrStreamNotFound
+	}
+
+	return &sliceStreamIterator{events: events}, nil
+}
+
+type sliceStreamIterator struct {
+	events []*eventstore.Event
+	cursor int
+}
+
+func (i *sliceStreamIterator) Next(_ context.Context) (*eventstore.Event, error) {
+	if i.cursor >= len(i.events) {
+		return nil, eventstore.ErrEndOfEventStream
+	}
+
+	event := i.events[i.cursor]
+	i.cursor++
+	return event, nil
+}
+
+func (i *sliceStreamIterator) Close(_ context.Context) error {
+	return nil
 }
 
 type mockSnapshotPolicy struct {
@@ -825,5 +874,108 @@ func TestSnapshottingStore_Save(t *testing.T) {
 				t.Errorf("want aggregate version %d, got %d", tt.wantAggregate.Version(), gotAggregate.Version())
 			}
 		})
+	}
+}
+
+// TestSnapshottingStore_LoadsAggregateSnapshottedAtStreamTip is a regression test for
+// https://github.com/go-estoria/estoria/issues/24: when a snapshot lands on exactly the
+// stream tip, hydrating from it leaves the inner store reading past the end of the stream.
+// Event stores that report such a read as ErrStreamNotFound made the aggregate look like it
+// did not exist, once every N events, until the next write moved the tip past the snapshot.
+func TestSnapshottingStore_LoadsAggregateSnapshottedAtStreamTip(t *testing.T) {
+	t.Parallel()
+
+	const snapshotEvery = 3
+
+	ctx := context.Background()
+	aggregateID := uuid.Must(uuid.NewV4())
+
+	eventStore, err := memory.NewEventStore()
+	if err != nil {
+		t.Fatalf("unexpected error creating event store: %v", err)
+	}
+
+	wrappedEventStore := &emptyFilteredReadIsNotFoundStore{Store: eventStore}
+
+	inner, err := aggregatestore.New(wrappedEventStore, newMockEntity,
+		aggregatestore.WithEventTypes(mockEntityEventA{}),
+	)
+	if err != nil {
+		t.Fatalf("unexpected error creating inner store: %v", err)
+	}
+
+	var snapshot *snapshotstore.AggregateSnapshot
+
+	store, err := aggregatestore.NewSnapshottingStore[mockEntity](
+		inner,
+		&mockSnapshotStore{
+			ReadSnapshotFn: func(_ context.Context, _ typeid.ID, _ snapshotstore.ReadSnapshotOptions) (*snapshotstore.AggregateSnapshot, error) {
+				if snapshot == nil {
+					return nil, snapshotstore.ErrSnapshotNotFound
+				}
+
+				return snapshot, nil
+			},
+			WriteSnapshotFn: func(_ context.Context, snap *snapshotstore.AggregateSnapshot) error {
+				snapshot = snap
+				return nil
+			},
+		},
+		&mockSnapshotPolicy{
+			ShouldSnapshotFn: func(_ typeid.ID, version int64, _ time.Time) bool {
+				return version%snapshotEvery == 0
+			},
+		},
+		// round-trips the entity state that JSON cannot see, so that a load from a snapshot
+		// is distinguishable from a full replay of the stream
+		aggregatestore.WithSnapshotMarshaler[mockEntity](&mockSnapshotMarshaler{
+			MarshalFn: func(entity mockEntity) ([]byte, error) {
+				return []byte(strconv.FormatInt(entity.numAppliedEvents, 10)), nil
+			},
+			UnmarshalFn: func(data []byte, entity *mockEntity) error {
+				numAppliedEvents, err := strconv.ParseInt(string(data), 10, 64)
+				if err != nil {
+					return err
+				}
+
+				entity.numAppliedEvents = numAppliedEvents
+				return nil
+			},
+		}),
+	)
+	if err != nil {
+		t.Fatalf("unexpected error creating store: %v", err)
+	}
+
+	aggregate := store.New(aggregateID)
+
+	// save one event at a time, loading after each save, so the aggregate is read back at
+	// every version -- including the versions where a snapshot lands on the stream tip
+	for version := int64(1); version <= 2*snapshotEvery; version++ {
+		if err := aggregate.Append(mockEntityEventA{A: "a"}); err != nil {
+			t.Fatalf("unexpected error appending event at version %d: %v", version, err)
+		} else if err := store.Save(ctx, aggregate, nil); err != nil {
+			t.Fatalf("unexpected error saving aggregate at version %d: %v", version, err)
+		}
+
+		loaded, err := store.Load(ctx, aggregateID, nil)
+		if err != nil {
+			t.Fatalf("unexpected error loading aggregate at version %d: %v", version, err)
+		}
+
+		if loaded.Version() != version {
+			t.Errorf("want aggregate version %d, got %d", version, loaded.Version())
+		}
+
+		if got := loaded.Entity().numAppliedEvents; got != version {
+			t.Errorf("want %d applied events at version %d, got %d", version, version, got)
+		}
+	}
+
+	// the loads at versions 3 and 6 hydrate from a snapshot taken at the stream tip, leaving
+	// the inner store to read past the end of the stream; without those reads happening, the
+	// loads above would succeed whether or not the bug is fixed
+	if want := 2; wrappedEventStore.emptyFilteredReads != want {
+		t.Errorf("want %d empty filtered reads, got %d", want, wrappedEventStore.emptyFilteredReads)
 	}
 }

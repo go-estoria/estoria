@@ -130,6 +130,25 @@ func (s *EventSourcedStore[E]) Hydrate(ctx context.Context, aggregate *Aggregate
 
 	iter, err := s.eventReader.ReadStream(ctx, aggregate.ID(), readOpts)
 	if errors.Is(err, eventstore.ErrStreamNotFound) {
+		// A read filtered by AfterVersion is not a reliable signal of whether the aggregate
+		// exists: it asks only for events newer than a version the aggregate has already
+		// reached. Existence is decided by the aggregate's own state — one that already
+		// carries state (from a snapshot, or an earlier partial hydrate) exists, so an empty
+		// read past its version means there is nothing newer to apply, not that it is gone.
+		// Only an unfiltered read can report absence, which is why an aggregate at version 0
+		// still maps to ErrAggregateNotFound.
+		//
+		// This deliberately gives up one distinction. A store that follows the convention in
+		// StreamReader.ReadStream returns an empty iterator for an empty filtered read, so
+		// its ErrStreamNotFound here would mean the stream was genuinely deleted; that case
+		// now hydrates to the stale snapshot rather than reporting not-found.
+		if readOpts.AfterVersion > 0 {
+			s.log.Debug("no events found after aggregate version, nothing to hydrate",
+				"aggregate_id", aggregate.ID(),
+				"version", aggregate.Version())
+			return nil
+		}
+
 		return HydrateError{AggregateID: aggregate.ID(), Err: ErrAggregateNotFound}
 	} else if err != nil {
 		return HydrateError{AggregateID: aggregate.ID(), Operation: "reading event stream", Err: err}
