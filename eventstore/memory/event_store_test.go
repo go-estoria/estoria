@@ -369,40 +369,45 @@ func TestEventStore_AppendStream(t *testing.T) {
 					t.Errorf("unexpected AppendStream() error: wanted %v got %v", tt.wantErr, gotErr)
 				}
 
-				switch err := tt.wantErr.(type) {
-				case eventstore.InitializationError:
-					t.Logf("InitializationError: %v", err)
-				case eventstore.StreamVersionMismatchError:
-					t.Logf("StreamVersionMismatchError: %v", err)
-					if err.StreamID.String() != tt.haveStreamID.String() {
-						t.Errorf("unexpected stream ID: wanted %s got %s", tt.haveStreamID.String(), err.StreamID.String())
+				var (
+					initErr      eventstore.InitializationError
+					mismatchErr  eventstore.StreamVersionMismatchError
+					marshalErr   eventstore.EventMarshalingError
+					unmarshalErr eventstore.EventUnmarshalingError
+				)
+
+				switch {
+				case errors.As(tt.wantErr, &initErr):
+					t.Logf("InitializationError: %v", initErr)
+				case errors.As(tt.wantErr, &mismatchErr):
+					t.Logf("StreamVersionMismatchError: %v", mismatchErr)
+					if mismatchErr.StreamID.String() != tt.haveStreamID.String() {
+						t.Errorf("unexpected stream ID: wanted %s got %s", tt.haveStreamID.String(), mismatchErr.StreamID.String())
 					}
 					var expectVersion int64
 					if tt.haveAppendOpts.ExpectVersion != nil {
 						expectVersion = *tt.haveAppendOpts.ExpectVersion
 					}
-					if err.ExpectedVersion != expectVersion {
-						t.Errorf("unexpected expected version: wanted %d got %d", expectVersion, err.ExpectedVersion)
+					if mismatchErr.ExpectedVersion != expectVersion {
+						t.Errorf("unexpected expected version: wanted %d got %d", expectVersion, mismatchErr.ExpectedVersion)
 					}
-					if err.ActualVersion != int64(totalEvents) {
-						t.Errorf("unexpected actual version: wanted %d got %d", totalEvents, err.ActualVersion)
+					if mismatchErr.ActualVersion != int64(totalEvents) {
+						t.Errorf("unexpected actual version: wanted %d got %d", totalEvents, mismatchErr.ActualVersion)
 					}
-				case eventstore.EventMarshalingError:
-					t.Logf("EventMarshalingError: %v", err)
-					if err.StreamID.String() != tt.haveStreamID.String() {
-						t.Errorf("unexpected stream ID: wanted %s got %s", tt.haveStreamID.String(), err.StreamID.String())
+				case errors.As(tt.wantErr, &marshalErr):
+					t.Logf("EventMarshalingError: %v", marshalErr)
+					if marshalErr.StreamID.String() != tt.haveStreamID.String() {
+						t.Errorf("unexpected stream ID: wanted %s got %s", tt.haveStreamID.String(), marshalErr.StreamID.String())
 					}
-				case eventstore.EventUnmarshalingError:
-					t.Logf("EventUnmarshalingError: %v", err)
-					if err.StreamID.String() != tt.haveStreamID.String() {
-						t.Errorf("unexpected stream ID: wanted %s got %s", tt.haveStreamID.String(), err.StreamID.String())
+				case errors.As(tt.wantErr, &unmarshalErr):
+					t.Logf("EventUnmarshalingError: %v", unmarshalErr)
+					if unmarshalErr.StreamID.String() != tt.haveStreamID.String() {
+						t.Errorf("unexpected stream ID: wanted %s got %s", tt.haveStreamID.String(), unmarshalErr.StreamID.String())
 					}
 				}
 
 				return
 			}
-
-			totalEvents += len(tt.haveAppendEvents)
 
 			iter, err := store.ReadStream(context.Background(), tt.haveStreamID, eventstore.ReadStreamOptions{})
 			if err != nil {

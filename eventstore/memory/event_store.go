@@ -42,13 +42,14 @@ func NewEventStore(opts ...EventStoreOption) (*EventStore, error) {
 }
 
 // AppendStream appends events to a stream.
-func (s *EventStore) AppendStream(ctx context.Context, streamID typeid.ID, events []*eventstore.WritableEvent, opts eventstore.AppendStreamOptions) error {
+// ctx is accepted for interface compatibility but is not used by this implementation.
+func (s *EventStore) AppendStream(_ context.Context, streamID typeid.ID, events []*eventstore.WritableEvent, opts eventstore.AppendStreamOptions) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	// Validate mutually exclusive options
 	if opts.ExpectVersion != nil && opts.StreamMustNotExist {
-		return fmt.Errorf("ExpectVersion and StreamMustNotExist are mutually exclusive")
+		return errors.New("ExpectVersion and StreamMustNotExist are mutually exclusive")
 	}
 
 	stream, ok := s.events[streamID.String()]
@@ -108,6 +109,28 @@ func (s *EventStore) AppendStream(ctx context.Context, streamID typeid.ID, event
 	return nil
 }
 
+// startCursor returns the 0-based index into a stream of streamLen events at which a read
+// begins, given the read's direction and version boundary.
+func startCursor(streamLen int, opts eventstore.ReadStreamOptions) int64 {
+	if opts.Direction != eventstore.Reverse {
+		// Start at the event immediately after AfterVersion. AfterVersion is 1-based
+		// version N, so the next event is at 0-based index N; 0 starts from the beginning.
+		return opts.AfterVersion
+	}
+
+	// Read backwards starting at the event with AfterVersion (inclusive), converting the
+	// 1-based version to a 0-based index; 0 starts from the end of the stream.
+	if opts.AfterVersion <= 0 {
+		return int64(streamLen - 1)
+	}
+
+	if cursor := opts.AfterVersion - 1; cursor < int64(streamLen) {
+		return cursor
+	}
+
+	return int64(streamLen - 1)
+}
+
 // ReadStream reads events from a stream.
 func (s *EventStore) ReadStream(_ context.Context, streamID typeid.ID, opts eventstore.ReadStreamOptions) (eventstore.StreamIterator, error) {
 	s.mu.RLock()
@@ -118,26 +141,7 @@ func (s *EventStore) ReadStream(_ context.Context, streamID typeid.ID, opts even
 		return nil, eventstore.ErrStreamNotFound
 	}
 
-	var cursor int64
-	if opts.Direction == eventstore.Reverse {
-		if opts.AfterVersion > 0 {
-			// Read backwards starting at the event with this version (inclusive).
-			// AfterVersion is 1-based; convert to 0-based index.
-			cursor = opts.AfterVersion - 1
-			if cursor >= int64(len(stream)) {
-				cursor = int64(len(stream) - 1)
-			}
-		} else {
-			cursor = int64(len(stream) - 1)
-		}
-	} else {
-		if opts.AfterVersion > 0 {
-			// Start at the event immediately after AfterVersion.
-			// AfterVersion is 1-based version N, so the next event is at 0-based index N.
-			cursor = opts.AfterVersion
-		}
-		// else cursor = 0 (start from beginning)
-	}
+	cursor := startCursor(len(stream), opts)
 
 	limit := int64(0)
 	if opts.Count > 0 {

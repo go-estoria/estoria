@@ -12,7 +12,7 @@ type ID struct {
 
 // String returns the string representation of the ID in the format "type_uuid".
 //
-// Example: "user_9791012c-cd5b-4795-9c54-6085975d599b"
+// Example: "user_9791012c-cd5b-4795-9c54-6085975d599b".
 func (id ID) String() string {
 	return id.Type + "_" + id.UUID.String()
 }
