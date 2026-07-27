@@ -1136,6 +1136,49 @@ func TestEventSourcedStore_HydrateAggregate(t *testing.T) {
 			wantErr: errors.New("aggregate not found"),
 		},
 		{
+			// An aggregate that already has state exists, so a store reporting an empty
+			// filtered read as a missing stream means "nothing newer", not "not found".
+			name: "hydrates nothing when the event stream is not found for an aggregate that already has state",
+			haveEventStore: func() eventstore.Store {
+				store, _ := memory.NewEventStore()
+				return store
+			},
+			haveStoreOpts: []aggregatestore.EventSourcedStoreOption[mockEntity]{
+				aggregatestore.WithEventStreamReader[mockEntity](mockStreamReader{
+					readStreamErr: eventstore.ErrStreamNotFound,
+				}),
+			},
+			haveAggregate: func() *aggregatestore.Aggregate[mockEntity] {
+				return aggregatestore.NewAggregate(newMockEntity(aggregateID.UUID), 10)
+			},
+			wantVersion: 10,
+			wantEntity: mockEntity{
+				ID: aggregateID,
+			},
+		},
+		{
+			// Consistent with a store that returns an empty iterator instead: the target
+			// version is simply not reached, which is not an error.
+			name: "hydrates nothing when the event stream is not found for an aggregate that already has state and a target version is set",
+			haveEventStore: func() eventstore.Store {
+				store, _ := memory.NewEventStore()
+				return store
+			},
+			haveStoreOpts: []aggregatestore.EventSourcedStoreOption[mockEntity]{
+				aggregatestore.WithEventStreamReader[mockEntity](mockStreamReader{
+					readStreamErr: eventstore.ErrStreamNotFound,
+				}),
+			},
+			haveAggregate: func() *aggregatestore.Aggregate[mockEntity] {
+				return aggregatestore.NewAggregate(newMockEntity(aggregateID.UUID), 10)
+			},
+			haveHydrateOpts: &aggregatestore.HydrateOptions{ToVersion: 15},
+			wantVersion:     10,
+			wantEntity: mockEntity{
+				ID: aggregateID,
+			},
+		},
+		{
 			name: "returns an error when unable to obtain an event stream iterator",
 			haveEventStore: func() eventstore.Store {
 				events := []*eventstore.WritableEvent{}
@@ -1310,8 +1353,8 @@ func TestEventSourcedStore_HydrateAggregate(t *testing.T) {
 				return
 			}
 
-			if err != nil {
-				t.Errorf("unexpected error: %v", err)
+			if gotErr != nil {
+				t.Fatalf("unexpected error: %v", gotErr)
 			}
 
 			// aggregate has the correct ID
@@ -1638,8 +1681,8 @@ func TestEventSourcedStore_SaveAggregate(t *testing.T) {
 				return
 			}
 
-			if err != nil {
-				t.Errorf("unexpected error: %v", err)
+			if gotErr != nil {
+				t.Fatalf("unexpected error: %v", gotErr)
 			}
 
 			// aggregate has the correct ID

@@ -19,6 +19,15 @@ type Store interface {
 type StreamReader interface {
 	// ReadStream creates an event stream iterator for reading events from a stream.
 	// The starting point, direction, and number of events to read can be specified in the options.
+	//
+	// Implementations should return ErrStreamNotFound only when the stream itself does not
+	// exist. A stream that exists but has no events matching the options (for example a
+	// forward read with an AfterVersion at or beyond the stream's latest version) should
+	// yield an iterator that immediately reports ErrEndOfEventStream.
+	//
+	// Consumers should tolerate both. Distinguishing the two cases can cost an
+	// implementation an additional existence check, and some do not make it, so a
+	// filtered read reporting ErrStreamNotFound may mean either.
 	ReadStream(ctx context.Context, id typeid.ID, opts ReadStreamOptions) (StreamIterator, error)
 }
 
@@ -235,7 +244,8 @@ func (e EventExistsError) Is(target error) bool {
 	return ok
 }
 
-// ErrStreamNotFound is returned when an event stream is not found.
+// ErrStreamNotFound is returned when an event stream is not found. It signifies an absent
+// stream, not a read whose options matched no events; see StreamReader.ReadStream.
 var ErrStreamNotFound = errors.New("stream not found")
 
 // ErrStreamIteratorClosed is returned when an operation is attempted on a closed stream iterator.
