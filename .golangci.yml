@@ -1,6 +1,14 @@
 version: "2"
 linters:
   default: none
+  # Deliberately NOT enabled (CI lint triage): ireturn, wrapcheck, tagliatelle,
+  # nonamedreturns, mnd, inamedparam, nilnil — opinionated checks that fight this
+  # library's interface-returning, snake_case-storage design.
+  #
+  # Also not enabled: musttag. It fires wherever a store marshals one of the
+  # library's own wire structs (eventstore.Event, snapshotstore.AggregateSnapshot),
+  # which are serialized whole and deliberately carry no json tags. Requiring tags
+  # on every field of them is noise, not a finding.
   enable:
     - asasalint
     - asciicheck
@@ -40,24 +48,18 @@ linters:
     - govet
     - grouper
     - importas
-    - inamedparam
     - ineffassign
     - interfacebloat
     - intrange
-    - ireturn
     - loggercheck
     - makezero
     - mirror
     - misspell
-    - mnd
-    - musttag
     - nakedret
     - nestif
     - nilerr
-    - nilnil
     - noctx
     - nolintlint
-    - nonamedreturns
     - nosprintfhostport
     - paralleltest
     - perfsprint
@@ -73,7 +75,6 @@ linters:
     - sqlclosecheck
     - staticcheck
     - tagalign
-    - tagliatelle
     - testableexamples
     - testifylint
     - testpackage
@@ -85,7 +86,6 @@ linters:
     - usestdlibvars
     - wastedassign
     - whitespace
-    - wrapcheck
     - zerologlint
   exclusions:
     generated: lax
@@ -95,15 +95,23 @@ linters:
       - legacy
       - std-error-handling
     rules:
+      # Test files: skip low-value/noisy checks that don't apply to test code.
+      # (staticcheck stays on in tests on purpose — it catches real bugs.)
       - linters:
-          - wrapcheck
-        source: return .+\.inner\.
-      - linters:
+          - copyloopvar
           - errcheck
           - forcetypeassert
-          - ireturn
+          - gochecknoglobals
+          - goconst
+          - godot
+          - godox
+          - ineffassign
+          - intrange
           - lll
           - nestif
+          - paralleltest
+          - prealloc
+          - testpackage
         path: _test\.go
     paths:
       - third_party$
