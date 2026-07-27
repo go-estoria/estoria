@@ -50,13 +50,13 @@ type emptyFilteredReadIsNotFoundStore struct {
 func (s *emptyFilteredReadIsNotFoundStore) ReadStream(ctx context.Context, id typeid.ID, opts eventstore.ReadStreamOptions) (eventstore.StreamIterator, error) {
 	iter, err := s.Store.ReadStream(ctx, id, opts)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("reading stream: %w", err)
 	}
 	defer iter.Close(ctx)
 
 	events, err := eventstore.ReadAll(ctx, iter)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("reading events: %w", err)
 	} else if len(events) == 0 {
 		s.emptyFilteredReads++
 		return nil, eventstore.ErrStreamNotFound
@@ -935,7 +935,7 @@ func TestSnapshottingStore_LoadsAggregateSnapshottedAtStreamTip(t *testing.T) {
 			UnmarshalFn: func(data []byte, entity *mockEntity) error {
 				numAppliedEvents, err := strconv.ParseInt(string(data), 10, 64)
 				if err != nil {
-					return err
+					return fmt.Errorf("parsing applied event count: %w", err)
 				}
 
 				entity.numAppliedEvents = numAppliedEvents
