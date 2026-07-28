@@ -28,7 +28,7 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - name: Validate Release Label and Notes
-        uses: jefflinse/pr-semver-bump@v1.7.1
+        uses: jefflinse/pr-semver-bump@v1.7.4
         with:
           mode: validate
           repo-token: ${{ secrets.GITHUB_TOKEN }}
