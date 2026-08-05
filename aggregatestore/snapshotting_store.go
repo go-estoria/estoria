@@ -128,9 +128,15 @@ func (s *SnapshottingStore[E]) Hydrate(ctx context.Context, aggregate *Aggregate
 		return s.inner.Hydrate(ctx, aggregate, opts)
 	}
 
-	entity := aggregate.Entity()
+	// Decode into a fresh entity rather than the aggregate's live one. When E is a
+	// pointer type the marshaler writes through to the entity in place, so a snapshot
+	// that is valid JSON but disagrees on a field's type — ordinary schema drift —
+	// applies the fields it can before failing. Decoding into the live entity would
+	// leave that partial state behind and then replay events on top of it, silently
+	// returning a corrupt aggregate with a nil error.
+	entity := s.inner.New(aggregate.ID().UUID).Entity()
 	if err := s.marshaler.UnmarshalEntity(snap.Data, &entity); err != nil {
-		log.Warn("failed to unmarshal snapshot", "error", err)
+		log.Warn("failed to unmarshal snapshot, falling back to full hydration", "error", err)
 		return s.inner.Hydrate(ctx, aggregate, opts)
 	}
 
@@ -154,14 +160,17 @@ func (s *SnapshottingStore[E]) Save(ctx context.Context, aggregate *Aggregate[E]
 
 	log.Debug("saving aggregate")
 
-	if opts == nil {
-		opts = &SaveOptions{}
+	// Defer applying events so a snapshot can be taken at an exact version.
+	// This is set on a copy: opts belongs to the caller, and mutating it would
+	// leak SkipApply into every later save that reuses the same struct.
+	innerOpts := SaveOptions{}
+	if opts != nil {
+		innerOpts = *opts
 	}
 
-	// defer applying events so a snapshot can be taken at an exact version
-	opts.SkipApply = true
+	innerOpts.SkipApply = true
 
-	if err := s.inner.Save(ctx, aggregate, opts); err != nil {
+	if err := s.inner.Save(ctx, aggregate, &innerOpts); err != nil {
 		return SaveError{AggregateID: aggregate.ID(), Operation: "saving aggregate using inner store", Err: err}
 	}
 

@@ -2,8 +2,8 @@ package memory
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
+	"sync"
 
 	"github.com/go-estoria/estoria"
 	"github.com/go-estoria/estoria/snapshotstore"
@@ -23,20 +23,22 @@ type SnapshotMarshaler interface {
 
 type SnapshotStore struct {
 	snapshots map[typeid.ID][]*snapshotstore.AggregateSnapshot
-	marshaler SnapshotMarshaler
+	mu        sync.RWMutex
 	retention RetentionPolicy
 }
 
 func NewSnapshotStore() *SnapshotStore {
 	return &SnapshotStore{
 		snapshots: map[typeid.ID][]*snapshotstore.AggregateSnapshot{},
-		marshaler: snapshotstore.JSONSnapshotMarshaler{},
 		retention: snapshotstore.MaxSnapshotsRetentionPolicy{N: 1},
 	}
 }
 
 func (s *SnapshotStore) ReadSnapshot(_ context.Context, aggregateID typeid.ID, opts snapshotstore.ReadSnapshotOptions) (*snapshotstore.AggregateSnapshot, error) {
 	estoria.GetLogger().Debug("finding snapshot", "aggregate_id", aggregateID)
+
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 
 	snapshots, ok := s.snapshots[aggregateID]
 	if !ok || len(snapshots) == 0 {
@@ -66,11 +68,10 @@ func (s *SnapshotStore) WriteSnapshot(_ context.Context, snap *snapshotstore.Agg
 		snap.AggregateVersion,
 		"data_length", len(snap.Data))
 
-	snapshots, ok := s.snapshots[snap.AggregateID]
-	if !ok {
-		s.snapshots[snap.AggregateID] = []*snapshotstore.AggregateSnapshot{}
-		snapshots = s.snapshots[snap.AggregateID]
-	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	snapshots := s.snapshots[snap.AggregateID]
 
 	if len(snapshots) > 0 {
 		if snap.AggregateVersion <= snapshots[len(snapshots)-1].AggregateVersion {
@@ -78,16 +79,18 @@ func (s *SnapshotStore) WriteSnapshot(_ context.Context, snap *snapshotstore.Agg
 		}
 	}
 
-	s.snapshots[snap.AggregateID] = append(s.snapshots[snap.AggregateID], snap)
+	snapshots = append(snapshots, snap)
 
-	retained := []*snapshotstore.AggregateSnapshot{}
-	for i, snap := range s.snapshots[snap.AggregateID] {
-		if !s.retention.ShouldRetain(snap, int64(i), int64(len(s.snapshots[snap.AggregateID]))) {
-			estoria.GetLogger().Debug("deleting snapshot per retention policy", "aggregate_id", snap.AggregateID, "aggregate_version", snap.AggregateVersion)
+	retained := make([]*snapshotstore.AggregateSnapshot, 0, len(snapshots))
+	for i, candidate := range snapshots {
+		if !s.retention.ShouldRetain(candidate, int64(i), int64(len(snapshots))) {
+			estoria.GetLogger().Debug("deleting snapshot per retention policy",
+				"aggregate_id", candidate.AggregateID,
+				"aggregate_version", candidate.AggregateVersion)
 			continue
 		}
 
-		retained = append(retained, snap)
+		retained = append(retained, candidate)
 	}
 
 	s.snapshots[snap.AggregateID] = retained
@@ -95,14 +98,4 @@ func (s *SnapshotStore) WriteSnapshot(_ context.Context, snap *snapshotstore.Agg
 	estoria.GetLogger().Debug("wrote snapshot", "aggregate_id", snap.AggregateID, "aggregate_version", snap.AggregateVersion)
 
 	return nil
-}
-
-type JSONSnapshotMarshaler struct{}
-
-func (m JSONSnapshotMarshaler) MarshalSnapshot(snap *snapshotstore.AggregateSnapshot) ([]byte, error) {
-	return json.Marshal(snap)
-}
-
-func (m JSONSnapshotMarshaler) UnmarshalSnapshot(data []byte, dest *snapshotstore.AggregateSnapshot) error {
-	return json.Unmarshal(data, dest)
 }

@@ -17,17 +17,6 @@ func (id ID) String() string {
 	return id.Type + "_" + id.UUID.String()
 }
 
-// ShortString returns a shortened string representation of the ID in the format "type_xxxxxxxx",
-// where "xxxxxxxx" is the first 8 characters of the UUID.
-//
-// Example: "user_9791012c"
-//
-// ShortString is provided for convenience in logging and debugging, but is not utilized by
-// any core Estoria components.
-func (id ID) ShortString() string {
-	return id.Type + "_" + id.UUID.String()[0:8]
-}
-
 // NewV4 creates a new ID with the given type name and a new v4 UUID.
 //
 // UUID v4 is a randomly generated UUID.

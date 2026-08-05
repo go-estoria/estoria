@@ -110,6 +110,10 @@ func (s *HookableStore[E]) Load(ctx context.Context, id uuid.UUID, opts *LoadOpt
 
 // Hydrate hydrates an aggregate, executing any pre- and post-hydrate hooks.
 func (s *HookableStore[E]) Hydrate(ctx context.Context, aggregate *Aggregate[E], opts *HydrateOptions) error {
+	if aggregate == nil {
+		return HydrateError{Err: ErrNilAggregate}
+	}
+
 	s.log.Debug("hydrating aggregate", "aggregate_id", aggregate.ID())
 	for _, hook := range s.hooks[BeforeHydrate] {
 		if err := hook(ctx, aggregate); err != nil {
@@ -132,6 +136,10 @@ func (s *HookableStore[E]) Hydrate(ctx context.Context, aggregate *Aggregate[E],
 
 // Save saves an aggregate, executing any pre- and post-save hooks.
 func (s *HookableStore[E]) Save(ctx context.Context, aggregate *Aggregate[E], opts *SaveOptions) error {
+	if aggregate == nil {
+		return SaveError{Err: ErrNilAggregate}
+	}
+
 	s.log.Debug("saving aggregate", "aggregate_id", aggregate.ID())
 	for _, hook := range s.hooks[BeforeSave] {
 		if err := hook(ctx, aggregate); err != nil {
