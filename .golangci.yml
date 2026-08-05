@@ -113,6 +113,15 @@ linters:
           - prealloc
           - testpackage
         path: _test\.go
+      # The storetest packages are test code that has to live in non-test files so
+      # third-party backends can import the suites. thelper reads their clause
+      # functions as helpers because each takes a *testing.T, but they are subtest
+      # bodies: marking them t.Helper() would report every failure at the suite
+      # runner's line instead of the assertion that failed, which is the one thing
+      # a backend needs to see.
+      - linters:
+          - thelper
+        path: storetest/
     paths:
       - third_party$
       - builtin$

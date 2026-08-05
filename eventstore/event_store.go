@@ -25,9 +25,10 @@ type StreamReader interface {
 	// forward read with an AfterVersion at or beyond the stream's latest version) should
 	// yield an iterator that immediately reports ErrEndOfEventStream.
 	//
-	// Consumers should tolerate both. Distinguishing the two cases can cost an
-	// implementation an additional existence check, and some do not make it, so a
-	// filtered read reporting ErrStreamNotFound may mean either.
+	// The distinction is required rather than advisory, and eventstore/storetest enforces
+	// it. Making it can cost an implementation an extra existence check; not making it
+	// leaves any aggregate snapshotted at its own stream tip unloadable, because the read
+	// for events after the snapshot reports the whole stream missing.
 	ReadStream(ctx context.Context, id typeid.ID, opts ReadStreamOptions) (StreamIterator, error)
 }
 
@@ -216,31 +217,6 @@ func (e InitializationError) Unwrap() error {
 // Is returns true if the target is an InitializationError.
 func (e InitializationError) Is(target error) bool {
 	_, ok := target.(InitializationError)
-	return ok
-}
-
-// EventExistsError is returned when an event with the same ID already exists.
-type EventExistsError struct {
-	EventID typeid.ID
-
-	// Err is the underlying error from the storage backend (e.g., a database constraint
-	// violation). It may be nil if the duplicate was detected at the application level.
-	Err error
-}
-
-// Error returns the error message.
-func (e EventExistsError) Error() string {
-	return fmt.Sprintf("event already exists: %s", e.EventID)
-}
-
-// Unwrap returns the underlying error.
-func (e EventExistsError) Unwrap() error {
-	return e.Err
-}
-
-// Is returns true if the target is an EventExistsError.
-func (e EventExistsError) Is(target error) bool {
-	_, ok := target.(EventExistsError)
 	return ok
 }
 
