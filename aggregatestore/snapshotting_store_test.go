@@ -979,3 +979,171 @@ func TestSnapshottingStore_LoadsAggregateSnapshottedAtStreamTip(t *testing.T) {
 		t.Errorf("want %d empty filtered reads, got %d", want, wrappedEventStore.emptyFilteredReads)
 	}
 }
+
+// mockPointerEntity is a pointer-typed entity. The rest of this suite uses the value-typed
+// mockEntity, which is why the in-place snapshot corruption below went unnoticed: a marshaler
+// writing through *E only touches the aggregate's live entity when E is a pointer.
+type mockPointerEntity struct {
+	ID typeid.ID `json:"id"`
+	// Balance is advanced by events.
+	Balance int `json:"balance"`
+	// Owner is only ever set by a snapshot, never by an event, so any value here after a
+	// failed snapshot load is state that leaked out of a partial unmarshal.
+	Owner string `json:"owner"`
+}
+
+var _ estoria.Entity = (*mockPointerEntity)(nil)
+
+func newMockPointerEntity(id uuid.UUID) *mockPointerEntity {
+	return &mockPointerEntity{ID: typeid.New("mockpointerentity", id)}
+}
+
+func (e *mockPointerEntity) EntityID() typeid.ID { return e.ID }
+
+type mockPointerEntityEvent struct {
+	Amount int `json:"amount"`
+}
+
+func (e *mockPointerEntityEvent) EventType() string { return "credited" }
+
+func (e *mockPointerEntityEvent) New() estoria.EntityEvent[*mockPointerEntity] {
+	return &mockPointerEntityEvent{}
+}
+
+func (e *mockPointerEntityEvent) ApplyTo(_ context.Context, entity *mockPointerEntity) (*mockPointerEntity, error) {
+	entity.Balance += e.Amount
+	return entity, nil
+}
+
+// TestSnapshottingStore_Save_DoesNotMutateCallerOptions guards against Save setting
+// SkipApply on the caller's own SaveOptions. Leaking it meant the next save that reused the
+// struct silently skipped applying events, leaving the aggregate's in-memory version stale,
+// which surfaced one save later as a spurious StreamVersionMismatchError.
+func TestSnapshottingStore_Save_DoesNotMutateCallerOptions(t *testing.T) {
+	t.Parallel()
+
+	eventStore, err := memory.NewEventStore()
+	if err != nil {
+		t.Fatalf("creating event store: %v", err)
+	}
+
+	inner, err := aggregatestore.New[mockEntity](eventStore, newMockEntity,
+		aggregatestore.WithEventTypes[mockEntity](&mockEntityEventA{}))
+	if err != nil {
+		t.Fatalf("creating inner store: %v", err)
+	}
+
+	snapshotting, err := aggregatestore.NewSnapshottingStore[mockEntity](
+		inner,
+		&mockSnapshotStore{
+			WriteSnapshotFn: func(context.Context, *snapshotstore.AggregateSnapshot) error { return nil },
+		},
+		&mockSnapshotPolicy{ShouldSnapshotFn: func(typeid.ID, int64, time.Time) bool { return false }},
+	)
+	if err != nil {
+		t.Fatalf("creating snapshotting store: %v", err)
+	}
+
+	opts := &aggregatestore.SaveOptions{}
+
+	first := snapshotting.New(uuid.Must(uuid.NewV4()))
+	if err := first.Append(&mockEntityEventA{}); err != nil {
+		t.Fatalf("appending event: %v", err)
+	}
+	if err := snapshotting.Save(t.Context(), first, opts); err != nil {
+		t.Fatalf("saving through snapshotting store: %v", err)
+	}
+
+	if opts.SkipApply {
+		t.Error("Save mutated the caller's SaveOptions: want SkipApply false, got true")
+	}
+
+	// Reusing the same options on another store must still apply events.
+	second := inner.New(uuid.Must(uuid.NewV4()))
+	if err := second.Append(&mockEntityEventA{}); err != nil {
+		t.Fatalf("appending event: %v", err)
+	}
+	if err := inner.Save(t.Context(), second, opts); err != nil {
+		t.Fatalf("saving through inner store: %v", err)
+	}
+
+	if want := int64(1); second.Version() != want {
+		t.Errorf("want version %d after reusing options, got %d", want, second.Version())
+	}
+
+	// The stale version is what produced the spurious conflict, so save once more.
+	if err := second.Append(&mockEntityEventA{}); err != nil {
+		t.Fatalf("appending event: %v", err)
+	}
+	if err := inner.Save(t.Context(), second, &aggregatestore.SaveOptions{}); err != nil {
+		t.Errorf("unexpected error on subsequent save: %v", err)
+	}
+}
+
+// TestSnapshottingStore_Hydrate_PartialSnapshotDoesNotCorruptEntity guards against a
+// snapshot that is syntactically valid JSON but disagrees on a field's type — ordinary
+// schema drift — writing the fields it can into the aggregate's live entity before failing.
+// The store falls back to full hydration on unmarshal failure, so any leaked state would be
+// replayed on top of and returned with a nil error.
+//
+// Note: truncated JSON does NOT reproduce this. encoding/json validates the whole document
+// before writing, so the payload has to parse cleanly and fail on a type mismatch.
+func TestSnapshottingStore_Hydrate_PartialSnapshotDoesNotCorruptEntity(t *testing.T) {
+	t.Parallel()
+
+	eventStore, err := memory.NewEventStore()
+	if err != nil {
+		t.Fatalf("creating event store: %v", err)
+	}
+
+	inner, err := aggregatestore.New[*mockPointerEntity](eventStore, newMockPointerEntity,
+		aggregatestore.WithEventTypes[*mockPointerEntity](&mockPointerEntityEvent{}))
+	if err != nil {
+		t.Fatalf("creating inner store: %v", err)
+	}
+
+	// Seed a stream: three credits of one each.
+	id := uuid.Must(uuid.NewV4())
+	seed := inner.New(id)
+	for range 3 {
+		if err := seed.Append(&mockPointerEntityEvent{Amount: 1}); err != nil {
+			t.Fatalf("appending event: %v", err)
+		}
+	}
+	if err := inner.Save(t.Context(), seed, nil); err != nil {
+		t.Fatalf("seeding stream: %v", err)
+	}
+
+	snapshotting, err := aggregatestore.NewSnapshottingStore[*mockPointerEntity](
+		inner,
+		&mockSnapshotStore{
+			ReadSnapshotFn: func(_ context.Context, aggregateID typeid.ID, _ snapshotstore.ReadSnapshotOptions) (*snapshotstore.AggregateSnapshot, error) {
+				return &snapshotstore.AggregateSnapshot{
+					AggregateID:      aggregateID,
+					AggregateVersion: 2,
+					// Parses cleanly; owner lands, then balance fails on type.
+					Data: []byte(`{"owner":"corrupted","balance":"9999"}`),
+				}, nil
+			},
+		},
+		&mockSnapshotPolicy{ShouldSnapshotFn: func(typeid.ID, int64, time.Time) bool { return false }},
+	)
+	if err != nil {
+		t.Fatalf("creating snapshotting store: %v", err)
+	}
+
+	got, err := snapshotting.Load(t.Context(), id, nil)
+	if err != nil {
+		t.Fatalf("loading aggregate: %v", err)
+	}
+
+	if want := int64(3); got.Version() != want {
+		t.Errorf("want version %d, got %d", want, got.Version())
+	}
+	if want := 3; got.Entity().Balance != want {
+		t.Errorf("want balance %d, got %d", want, got.Entity().Balance)
+	}
+	if owner := got.Entity().Owner; owner != "" {
+		t.Errorf("state leaked from a failed snapshot unmarshal: want empty owner, got %q", owner)
+	}
+}
