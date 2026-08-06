@@ -178,7 +178,7 @@ type mockEntityEvent struct{}
 
 func (e *mockEntityEvent) EventType() string { return "incremented" }
 
-func (e *mockEntityEvent) New() estoria.EntityEvent[*mockEntity] { return &mockEntityEvent{} }
+func (e *mockEntityEvent) New() estoria.DomainEvent[*mockEntity] { return &mockEntityEvent{} }
 
 func (e *mockEntityEvent) ApplyTo(_ context.Context, entity *mockEntity) (*mockEntity, error) {
 	entity.Count++
@@ -197,7 +197,7 @@ func TestSnapshottingStore_VersionedLoad(t *testing.T) {
 		t.Fatalf("creating event store: %v", err)
 	}
 
-	inner, err := aggregatestore.New[*mockEntity](eventStore, newMockEntity,
+	inner, err := aggregatestore.New[*mockEntity](eventStore, "mockentity", newMockEntity,
 		aggregatestore.WithEventTypes[*mockEntity](&mockEntityEvent{}))
 	if err != nil {
 		t.Fatalf("creating inner store: %v", err)
@@ -216,9 +216,7 @@ func TestSnapshottingStore_VersionedLoad(t *testing.T) {
 	id := uuid.Must(uuid.NewV4())
 	aggregate := store.New(id)
 	for range 10 {
-		if err := aggregate.Append(&mockEntityEvent{}); err != nil {
-			t.Fatalf("appending event: %v", err)
-		}
+		aggregate.Append(&mockEntityEvent{})
 	}
 	if err := store.Save(t.Context(), aggregate, nil); err != nil {
 		t.Fatalf("saving aggregate: %v", err)
@@ -234,8 +232,8 @@ func TestSnapshottingStore_VersionedLoad(t *testing.T) {
 		if got.Version() != wantVersion {
 			t.Errorf("want version %d, got %d", wantVersion, got.Version())
 		}
-		if got.Entity().Count != int(wantVersion) {
-			t.Errorf("want count %d at version %d, got %d", wantVersion, wantVersion, got.Entity().Count)
+		if got.State().Count != int(wantVersion) {
+			t.Errorf("want count %d at version %d, got %d", wantVersion, wantVersion, got.State().Count)
 		}
 	}
 

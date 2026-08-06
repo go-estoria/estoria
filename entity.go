@@ -4,66 +4,71 @@ import (
 	"context"
 	"encoding/json"
 
-	"github.com/go-estoria/estoria/typeid"
 	"github.com/gofrs/uuid/v5"
 )
 
-// An Entity is anything whose state can be constructed by applying a series of events.
-type Entity interface {
-	// EntityID returns the entity's typed identifier.
-	EntityID() typeid.ID
+// Entity constrained aggregate state to types that could report their own typed ID.
+// estoria no longer requires that: the aggregate carries its identity, and the store
+// composes it from the aggregate type name and the UUID it is given.
+//
+// Deprecated: Entity is an alias for any so that existing constraints keep compiling.
+// It will be removed in v0.8.0; use a plain [S any] constraint instead.
+type Entity = any
+
+// A StateFactory creates a new instance of an aggregate's state type S.
+// The UUID identifies the aggregate the state belongs to; the state may record it,
+// but is not required to.
+type StateFactory[S any] func(id uuid.UUID) S
+
+// StateCodec is an interface for marshaling aggregate state to and from bytes.
+type StateCodec[S any] interface {
+	// MarshalState marshals state to bytes.
+	MarshalState(state S) ([]byte, error)
+	// UnmarshalState unmarshals state from bytes.
+	UnmarshalState(data []byte, dest *S) error
 }
 
-// An EntityFactory is a function that creates a new instance of an entity of type E.
-type EntityFactory[E Entity] func(id uuid.UUID) E
+// JSONStateCodec is a StateCodec that encodes state as JSON.
+type JSONStateCodec[S any] struct{}
 
-// EntityMarshaler is an interface for marshaling entities to and from a type T.
-type EntityMarshaler[E Entity] interface {
-	// MarshalEntity marshals an entity to a type T.
-	MarshalEntity(entity E) ([]byte, error)
-	// UnmarshalEntity unmarshals an entity from a type T.
-	UnmarshalEntity(data []byte, dest *E) error
+var _ StateCodec[struct{}] = JSONStateCodec[struct{}]{}
+
+func (c JSONStateCodec[S]) MarshalState(state S) ([]byte, error) {
+	return json.Marshal(state)
 }
 
-type JSONMarshaler[E Entity] struct{}
-
-var _ EntityMarshaler[Entity] = JSONMarshaler[Entity]{}
-
-func (m JSONMarshaler[E]) MarshalEntity(entity E) ([]byte, error) {
-	b, err := json.Marshal(entity)
-	return b, err
-}
-
-func (m JSONMarshaler[E]) UnmarshalEntity(data []byte, dest *E) error {
+func (c JSONStateCodec[S]) UnmarshalState(data []byte, dest *S) error {
 	return json.Unmarshal(data, &dest)
 }
 
-// EntityEvent is an event that can be applied to an entity to change its state.
-type EntityEvent[E Entity] interface {
+// A DomainEvent is an event that can be applied to an aggregate's state to produce
+// the next state.
+type DomainEvent[S any] interface {
 	// EventType returns the type of event.
 	EventType() string
 	// New returns a new instance of the event.
-	New() EntityEvent[E]
-	// ApplyTo applies the event to an entity, returning the new entity state.
-	ApplyTo(ctx context.Context, entity E) (E, error)
+	New() DomainEvent[S]
+	// ApplyTo applies the event to state, returning the new state.
+	ApplyTo(ctx context.Context, state S) (S, error)
 }
 
-// EntityEventMarshaler is an interface for marshaling entity events to and from a type T.
-type EntityEventMarshaler[E Entity] interface {
-	// MarshalEntityEvent marshals an entity event to a type T.
-	MarshalEntityEvent(event EntityEvent[E]) ([]byte, error)
-	// UnmarshalEntityEvent unmarshals an entity event from a type T.
-	UnmarshalEntityEvent(data []byte, dest EntityEvent[E]) error
+// DomainEventCodec is an interface for marshaling domain events to and from bytes.
+type DomainEventCodec[S any] interface {
+	// MarshalDomainEvent marshals a domain event to bytes.
+	MarshalDomainEvent(event DomainEvent[S]) ([]byte, error)
+	// UnmarshalDomainEvent unmarshals a domain event from bytes.
+	UnmarshalDomainEvent(data []byte, dest DomainEvent[S]) error
 }
 
-type JSONEntityEventMarshaler[E Entity] struct{}
+// JSONDomainEventCodec is a DomainEventCodec that encodes domain events as JSON.
+type JSONDomainEventCodec[S any] struct{}
 
-var _ EntityEventMarshaler[Entity] = JSONEntityEventMarshaler[Entity]{}
+var _ DomainEventCodec[struct{}] = JSONDomainEventCodec[struct{}]{}
 
-func (m JSONEntityEventMarshaler[E]) MarshalEntityEvent(event EntityEvent[E]) ([]byte, error) {
+func (c JSONDomainEventCodec[S]) MarshalDomainEvent(event DomainEvent[S]) ([]byte, error) {
 	return json.Marshal(event)
 }
 
-func (m JSONEntityEventMarshaler[E]) UnmarshalEntityEvent(data []byte, dest EntityEvent[E]) error {
+func (c JSONDomainEventCodec[S]) UnmarshalDomainEvent(data []byte, dest DomainEvent[S]) error {
 	return json.Unmarshal(data, dest)
 }
