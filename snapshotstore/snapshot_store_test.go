@@ -94,58 +94,6 @@ func TestMaxSnapshotsRetentionPolicy(t *testing.T) {
 	})
 }
 
-// TestJSONSnapshotMarshaler covers the default marshaler for the event-stream snapshot
-// store, which encodes the whole snapshot envelope into an event payload. Data is []byte,
-// so it goes over the wire base64-encoded and has to survive the round trip intact — a
-// snapshot payload that decodes to different bytes hydrates an aggregate to a corrupt state
-// rather than failing outright.
-func TestJSONSnapshotMarshaler(t *testing.T) {
-	t.Parallel()
-
-	marshaler := snapshotstore.JSONSnapshotMarshaler{}
-	want := &snapshotstore.AggregateSnapshot{
-		AggregateID:      typeid.NewV4("mockentity"),
-		AggregateVersion: 7,
-		Timestamp:        time.Date(2026, time.August, 5, 12, 0, 0, 0, time.UTC),
-		Data:             []byte(`{"owner":"alice","balance":42}`),
-	}
-
-	data, err := marshaler.MarshalSnapshot(want)
-	if err != nil {
-		t.Fatalf("marshaling snapshot: %v", err)
-	}
-
-	got := &snapshotstore.AggregateSnapshot{}
-	if err := marshaler.UnmarshalSnapshot(data, got); err != nil {
-		t.Fatalf("unmarshaling snapshot: %v", err)
-	}
-
-	if got.AggregateID != want.AggregateID {
-		t.Errorf("want aggregate ID %s, got %s", want.AggregateID, got.AggregateID)
-	}
-
-	if got.AggregateVersion != want.AggregateVersion {
-		t.Errorf("want aggregate version %d, got %d", want.AggregateVersion, got.AggregateVersion)
-	}
-
-	if !got.Timestamp.Equal(want.Timestamp) {
-		t.Errorf("want timestamp %s, got %s", want.Timestamp, got.Timestamp)
-	}
-
-	if string(got.Data) != string(want.Data) {
-		t.Errorf("want data %s, got %s", want.Data, got.Data)
-	}
-}
-
-func TestJSONSnapshotMarshaler_UnmarshalSnapshot_Invalid(t *testing.T) {
-	t.Parallel()
-
-	dest := &snapshotstore.AggregateSnapshot{}
-	if err := (snapshotstore.JSONSnapshotMarshaler{}).UnmarshalSnapshot([]byte(`{`), dest); err == nil {
-		t.Error("want an error for malformed JSON, got nil")
-	}
-}
-
 // TestMinAggregateVersionRetentionPolicy covers the version-based alternative, which decides
 // per snapshot rather than by position.
 func TestMinAggregateVersionRetentionPolicy(t *testing.T) {

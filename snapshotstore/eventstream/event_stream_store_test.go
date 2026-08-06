@@ -1,8 +1,5 @@
-// Package snapshotstore_test exercises the event-stream-backed snapshot store.
-//
-// Note the package name does not match its directory (`eventstream`), so importers must
-// alias it. Renaming is deferred to the Phase 3 distillation pass.
-package snapshotstore_test
+// Package eventstream_test exercises the event-stream-backed snapshot store.
+package eventstream_test
 
 import (
 	"context"
@@ -14,12 +11,12 @@ import (
 	"github.com/go-estoria/estoria/eventstore"
 	"github.com/go-estoria/estoria/eventstore/memory"
 	"github.com/go-estoria/estoria/snapshotstore"
-	eventstream "github.com/go-estoria/estoria/snapshotstore/eventstream"
+	"github.com/go-estoria/estoria/snapshotstore/eventstream"
 	"github.com/go-estoria/estoria/typeid"
 	"github.com/gofrs/uuid/v5"
 )
 
-var _ snapshotstore.SnapshotStore = (*eventstream.EventStreamStore)(nil)
+var _ snapshotstore.SnapshotStore = (*eventstream.Store)(nil)
 
 // closeCountingStore counts the iterators handed out and the ones closed, so a test can
 // assert the snapshot store does not leak cursors. Against a real backend a leaked iterator
@@ -50,7 +47,7 @@ func (i *closeCountingIterator) Close(ctx context.Context) error {
 	return i.StreamIterator.Close(ctx) //nolint:wrapcheck // pass through unchanged
 }
 
-func newStore(t *testing.T) (*eventstream.EventStreamStore, *closeCountingStore) {
+func newStore(t *testing.T) (*eventstream.Store, *closeCountingStore) {
 	t.Helper()
 
 	eventStore, err := memory.NewEventStore()
@@ -59,10 +56,10 @@ func newStore(t *testing.T) (*eventstream.EventStreamStore, *closeCountingStore)
 	}
 
 	counting := &closeCountingStore{Store: eventStore}
-	return eventstream.NewEventStreamStore(counting), counting
+	return eventstream.New(counting), counting
 }
 
-func writeSnapshots(t *testing.T, store *eventstream.EventStreamStore, aggregateID typeid.ID, versions ...int64) {
+func writeSnapshots(t *testing.T, store *eventstream.Store, aggregateID typeid.ID, versions ...int64) {
 	t.Helper()
 
 	for _, version := range versions {
@@ -206,7 +203,7 @@ func TestSnapshottingStore_VersionedLoad(t *testing.T) {
 	// Snapshot on every event, so a snapshot exists at each version including the tip.
 	store, err := aggregatestore.NewSnapshottingStore[*mockEntity](
 		inner,
-		eventstream.NewEventStreamStore(eventStore),
+		eventstream.New(eventStore),
 		snapshotstore.EventCountSnapshotPolicy{N: 1},
 	)
 	if err != nil {
@@ -244,5 +241,76 @@ func TestSnapshottingStore_VersionedLoad(t *testing.T) {
 	}
 	if want := int64(10); got.Version() != want {
 		t.Errorf("want version %d for an unbounded load, got %d", want, got.Version())
+	}
+}
+
+// TestStore_SkipsEventsWithoutSnapshotMetadata pins the migration rule for
+// snapshot streams written before the payload-plus-metadata format: an event without the
+// version metadata key is not a readable snapshot and is skipped, never decoded as state.
+// An old envelope body decodes into most state types "successfully" with nothing matched,
+// so treating it as a snapshot would silently corrupt an aggregate rather than fail.
+func TestStore_SkipsEventsWithoutSnapshotMetadata(t *testing.T) {
+	t.Parallel()
+
+	ctx := t.Context()
+
+	eventStore, err := memory.NewEventStore()
+	if err != nil {
+		t.Fatalf("creating event store: %v", err)
+	}
+
+	store := eventstream.New(eventStore)
+
+	aggregateID := typeid.New("mockentity", uuid.Must(uuid.NewV4()))
+	snapshotStreamID := typeid.New("mockentitysnapshot", aggregateID.UUID)
+
+	// A pre-v0.7.0 snapshot event: the whole envelope marshaled into the body, no metadata.
+	envelope := []byte(`{"AggregateID":{"Type":"mockentity","UUID":"` + aggregateID.UUID.String() + `"},"AggregateVersion":3,"Data":"eyJjb3VudCI6M30="}`)
+	if err := eventStore.AppendStream(ctx, snapshotStreamID, []*eventstore.WritableEvent{
+		{Type: "mockentitysnapshot", Data: envelope},
+	}, eventstore.AppendStreamOptions{}); err != nil {
+		t.Fatalf("appending old-format snapshot event: %v", err)
+	}
+
+	// With only the old-format event in the stream, no snapshot is visible — for an
+	// unbounded read and for a bounded read that walks the whole stream.
+	if _, err := store.ReadSnapshot(ctx, aggregateID, snapshotstore.ReadSnapshotOptions{}); !errors.Is(err, snapshotstore.ErrSnapshotNotFound) {
+		t.Errorf("want ErrSnapshotNotFound reading a stream of only old-format events, got %v", err)
+	}
+
+	if _, err := store.ReadSnapshot(ctx, aggregateID, snapshotstore.ReadSnapshotOptions{MaxVersion: 5}); !errors.Is(err, snapshotstore.ErrSnapshotNotFound) {
+		t.Errorf("want ErrSnapshotNotFound from a bounded read over only old-format events, got %v", err)
+	}
+
+	// A snapshot written in the current format lands after the old event and is found.
+	if err := store.WriteSnapshot(ctx, &snapshotstore.AggregateSnapshot{
+		AggregateID:      aggregateID,
+		AggregateVersion: 5,
+		Data:             []byte(`{"count":5}`),
+	}); err != nil {
+		t.Fatalf("writing snapshot: %v", err)
+	}
+
+	snap, err := store.ReadSnapshot(ctx, aggregateID, snapshotstore.ReadSnapshotOptions{})
+	if err != nil {
+		t.Fatalf("reading snapshot: %v", err)
+	}
+
+	if snap.AggregateVersion != 5 {
+		t.Errorf("want aggregate version 5, got %d", snap.AggregateVersion)
+	}
+
+	if string(snap.Data) != `{"count":5}` {
+		t.Errorf("want the state payload untouched, got %s", snap.Data)
+	}
+
+	if snap.Timestamp.IsZero() {
+		t.Error("want a store-assigned timestamp for a snapshot written without one")
+	}
+
+	// A bounded read below the new snapshot's version walks past it onto the old-format
+	// event and skips that too, rather than decoding it.
+	if _, err := store.ReadSnapshot(ctx, aggregateID, snapshotstore.ReadSnapshotOptions{MaxVersion: 4}); !errors.Is(err, snapshotstore.ErrSnapshotNotFound) {
+		t.Errorf("want ErrSnapshotNotFound from a bounded read that reaches only old-format events, got %v", err)
 	}
 }

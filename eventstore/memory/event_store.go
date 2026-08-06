@@ -12,24 +12,22 @@ import (
 	"github.com/go-estoria/estoria/typeid"
 )
 
-type EventMarshaler interface {
-	Marshal(event *eventstore.Event) ([]byte, error)
-	Unmarshal(data []byte, dest *eventstore.Event) error
-}
-
 // EventStore is an in-memory event store. It should not be used in production applications.
+//
+// Events are stored JSON-encoded and decoded on every read. The round trip is deliberate:
+// it normalizes values the way crossing a real backend's wire does — time.Time loses its
+// monotonic reading, nil and empty maps converge, pointer identity breaks — so development
+// against this store surfaces what would otherwise first break against a real one.
 type EventStore struct {
-	events        map[string][]*eventStoreDocument
+	events        map[string][][]byte
 	mu            sync.RWMutex
-	marshaler     EventMarshaler
 	globalCounter int64
 }
 
 // NewEventStore creates a new in-memory event store.
 func NewEventStore(opts ...EventStoreOption) (*EventStore, error) {
 	eventStore := &EventStore{
-		events:    map[string][]*eventStoreDocument{},
-		marshaler: JSONEventMarshaler{},
+		events: map[string][][]byte{},
 	}
 
 	for _, opt := range opts {
@@ -56,7 +54,7 @@ func (s *EventStore) AppendStream(_ context.Context, streamID typeid.ID, events 
 	if !ok {
 		// Note: the empty stream entry is intentionally left in the map on validation failure.
 		// ReadStream handles this correctly by checking len(stream) == 0.
-		s.events[streamID.String()] = []*eventStoreDocument{}
+		s.events[streamID.String()] = [][]byte{}
 		stream = s.events[streamID.String()]
 	}
 
@@ -80,7 +78,7 @@ func (s *EventStore) AppendStream(_ context.Context, streamID typeid.ID, events 
 		}
 	}
 
-	tx := []*eventStoreDocument{}
+	tx := [][]byte{}
 	for i, writableEvent := range events {
 		s.globalCounter++
 		globalPos := s.globalCounter
@@ -95,14 +93,12 @@ func (s *EventStore) AppendStream(_ context.Context, streamID typeid.ID, events 
 			Metadata:       writableEvent.Metadata,
 		}
 
-		data, err := s.marshaler.Marshal(event)
+		data, err := json.Marshal(event)
 		if err != nil {
 			return eventstore.EventMarshalingError{StreamID: streamID, EventID: event.ID, Err: err}
 		}
 
-		tx = append(tx, &eventStoreDocument{
-			Data: data,
-		})
+		tx = append(tx, data)
 	}
 
 	s.events[streamID.String()] = append(stream, tx...)
@@ -154,35 +150,8 @@ func (s *EventStore) ReadStream(_ context.Context, streamID typeid.ID, opts even
 		cursor:    cursor,
 		direction: opts.Direction,
 		limit:     limit,
-		marshaler: s.marshaler,
 	}, nil
 }
 
 // An EventStoreOption configures an EventStore.
 type EventStoreOption func(*EventStore) error
-
-// WithEventMarshaler configures the event store to use a custom event marshaler.
-func WithEventMarshaler(marshaler EventMarshaler) EventStoreOption {
-	return func(s *EventStore) error {
-		if marshaler == nil {
-			return errors.New("marshaler cannot be nil")
-		}
-
-		s.marshaler = marshaler
-		return nil
-	}
-}
-
-type eventStoreDocument struct {
-	Data []byte
-}
-
-type JSONEventMarshaler struct{}
-
-func (m JSONEventMarshaler) Marshal(event *eventstore.Event) ([]byte, error) {
-	return json.Marshal(event)
-}
-
-func (m JSONEventMarshaler) Unmarshal(src []byte, dest *eventstore.Event) error {
-	return json.Unmarshal(src, dest)
-}

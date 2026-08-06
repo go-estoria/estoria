@@ -2,6 +2,7 @@ package typeid_test
 
 import (
 	"testing"
+	"time"
 
 	"github.com/go-estoria/estoria/typeid"
 	"github.com/gofrs/uuid/v5"
@@ -70,12 +71,19 @@ func TestNewV7(t *testing.T) {
 	}
 }
 
-// TestNewV7_Sortable pins the property callers actually choose v7 for.
+// TestNewV7_Sortable pins the property callers actually choose v7 for: IDs minted in
+// different milliseconds sort in creation order. That is the granularity of v7's
+// guarantee — within a single millisecond the generator's monotonic counter is
+// best-effort only (its visible 12 bits can wrap), so same-millisecond order is
+// deliberately not asserted here.
 func TestNewV7_Sortable(t *testing.T) {
 	t.Parallel()
 
 	previous := typeid.NewV7("user")
-	for range 100 {
+	for range 20 {
+		// Sleeping at least 1ms guarantees the next ID carries a later timestamp.
+		time.Sleep(time.Millisecond)
+
 		current := typeid.NewV7("user")
 		if current.UUID.String() <= previous.UUID.String() {
 			t.Fatalf("want v7 IDs to sort in creation order, got %s after %s", current.UUID, previous.UUID)

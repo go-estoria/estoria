@@ -2,7 +2,6 @@ package memory_test
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"testing"
 
@@ -22,15 +21,11 @@ func TestEventStore_NewEventStore(t *testing.T) {
 			name: "creates a new event store",
 		},
 		{
-			name: "with a non-nil custom marshaler, creates a new event store",
+			name: "returns an error when applying an option fails",
 			opts: []memory.EventStoreOption{
-				memory.WithEventMarshaler(failMarshaler{}),
+				func(*memory.EventStore) error { return errors.New("mock error") },
 			},
-		},
-		{
-			name:    "returns an error if a nil marshaler is provided",
-			opts:    []memory.EventStoreOption{memory.WithEventMarshaler(nil)},
-			wantErr: eventstore.InitializationError{Err: errors.New("applying option: marshaler cannot be nil")},
+			wantErr: eventstore.InitializationError{Err: errors.New("applying option: mock error")},
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
@@ -328,20 +323,6 @@ func TestEventStore_AppendStream(t *testing.T) {
 				StreamID:        streamIDs[0],
 				ExpectedVersion: 0,
 				ActualVersion:   1,
-			},
-		},
-		{
-			name: "returns an error if an event fails to marshal",
-			haveEventStoreOpts: []memory.EventStoreOption{
-				memory.WithEventMarshaler(failMarshaler{}),
-			},
-			haveStreamID: streamIDs[0],
-			haveAppendEvents: []*eventstore.WritableEvent{
-				{Type: eventIDs[0].Type, Data: []byte("event 1 data")},
-			},
-			wantErr: eventstore.EventMarshalingError{
-				StreamID: streamIDs[0],
-				Err:      errors.New("fake marshal error"),
 			},
 		},
 	} {
@@ -892,50 +873,9 @@ func TestEventStore_ErrorTypes(t *testing.T) {
 		}
 	})
 
-	t.Run("EventMarshalingError satisfies errors.Is", func(t *testing.T) {
-		t.Parallel()
-		store, err := memory.NewEventStore(memory.WithEventMarshaler(failMarshaler{}))
-		if err != nil {
-			t.Fatalf("NewEventStore() error: %v", err)
-		}
-		gotErr := store.AppendStream(context.Background(), streamID, []*eventstore.WritableEvent{
-			{Type: "et", Data: []byte("d")},
-		}, eventstore.AppendStreamOptions{})
-		if gotErr == nil {
-			t.Fatal("expected error, got nil")
-		}
-		if !errors.Is(gotErr, eventstore.EventMarshalingError{}) {
-			t.Errorf("expected errors.Is to match EventMarshalingError, got: %v", gotErr)
-		}
-	})
-
-	t.Run("EventUnmarshalingError satisfies errors.Is", func(t *testing.T) {
-		t.Parallel()
-		store, err := memory.NewEventStore(memory.WithEventMarshaler(failUnmarshalMarshaler{}))
-		if err != nil {
-			t.Fatalf("NewEventStore() error: %v", err)
-		}
-		if err := store.AppendStream(context.Background(), streamID, []*eventstore.WritableEvent{
-			{Type: "et", Data: []byte("d")},
-		}, eventstore.AppendStreamOptions{}); err != nil {
-			t.Fatalf("AppendStream() error: %v", err)
-		}
-		iter, err := store.ReadStream(context.Background(), streamID, eventstore.ReadStreamOptions{})
-		if err != nil {
-			t.Fatalf("ReadStream() error: %v", err)
-		}
-		_, gotErr := iter.Next(context.Background())
-		if gotErr == nil {
-			t.Fatal("expected error, got nil")
-		}
-		if !errors.Is(gotErr, eventstore.EventUnmarshalingError{}) {
-			t.Errorf("expected errors.Is to match EventUnmarshalingError, got: %v", gotErr)
-		}
-	})
-
 	t.Run("InitializationError satisfies errors.Is", func(t *testing.T) {
 		t.Parallel()
-		_, gotErr := memory.NewEventStore(memory.WithEventMarshaler(nil))
+		_, gotErr := memory.NewEventStore(func(*memory.EventStore) error { return errors.New("mock error") })
 		if gotErr == nil {
 			t.Fatal("expected error, got nil")
 		}
@@ -943,28 +883,6 @@ func TestEventStore_ErrorTypes(t *testing.T) {
 			t.Errorf("expected errors.Is to match InitializationError, got: %v", gotErr)
 		}
 	})
-}
-
-// failMarshaler always returns errors for both Marshal and Unmarshal.
-type failMarshaler struct{}
-
-func (failMarshaler) Marshal(_ *eventstore.Event) ([]byte, error) {
-	return nil, errors.New("fake marshal error")
-}
-
-func (failMarshaler) Unmarshal(_ []byte, _ *eventstore.Event) error {
-	return errors.New("fake unmarshal error")
-}
-
-// failUnmarshalMarshaler marshals successfully (using JSON) but always fails to unmarshal.
-type failUnmarshalMarshaler struct{}
-
-func (failUnmarshalMarshaler) Marshal(event *eventstore.Event) ([]byte, error) {
-	return json.Marshal(event)
-}
-
-func (failUnmarshalMarshaler) Unmarshal(_ []byte, _ *eventstore.Event) error {
-	return errors.New("fake unmarshal error")
 }
 
 type eventsForStream struct {

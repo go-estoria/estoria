@@ -2,6 +2,7 @@ package memory
 
 import (
 	"context"
+	"encoding/json"
 
 	"github.com/go-estoria/estoria/eventstore"
 	"github.com/go-estoria/estoria/typeid"
@@ -9,12 +10,11 @@ import (
 
 type streamIterator struct {
 	streamID  typeid.ID
-	events    []*eventStoreDocument
+	events    [][]byte
 	cursor    int64
 	direction eventstore.ReadStreamDirection
 	limit     int64
 	retrieved int64
-	marshaler EventMarshaler
 }
 
 func (i *streamIterator) Next(_ context.Context) (*eventstore.Event, error) {
@@ -29,7 +29,7 @@ func (i *streamIterator) Next(_ context.Context) (*eventstore.Event, error) {
 		return nil, eventstore.ErrEndOfEventStream
 	}
 
-	doc := i.events[i.cursor]
+	data := i.events[i.cursor]
 
 	if i.direction == eventstore.Reverse {
 		i.cursor--
@@ -40,7 +40,7 @@ func (i *streamIterator) Next(_ context.Context) (*eventstore.Event, error) {
 	i.retrieved++
 
 	event := &eventstore.Event{}
-	if err := i.marshaler.Unmarshal(doc.Data, event); err != nil {
+	if err := json.Unmarshal(data, event); err != nil {
 		return nil, eventstore.EventUnmarshalingError{StreamID: i.streamID, Err: err}
 	}
 
