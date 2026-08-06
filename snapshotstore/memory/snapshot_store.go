@@ -16,11 +16,6 @@ type RetentionPolicy interface {
 	ShouldRetain(snap *snapshotstore.AggregateSnapshot, snapshotIndex, totalSnapshots int64) bool
 }
 
-type SnapshotMarshaler interface {
-	MarshalSnapshot(snap *snapshotstore.AggregateSnapshot) ([]byte, error)
-	UnmarshalSnapshot(data []byte, dest *snapshotstore.AggregateSnapshot) error
-}
-
 type SnapshotStore struct {
 	snapshots map[typeid.ID][]*snapshotstore.AggregateSnapshot
 	mu        sync.RWMutex

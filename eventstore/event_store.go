@@ -123,7 +123,10 @@ type Event struct {
 	GlobalPosition *int64
 	Timestamp      time.Time
 	Data           []byte
-	Metadata       map[string]string
+
+	// Metadata is optional key-value metadata associated with the event.
+	// Keys prefixed "estoria." are reserved for estoria itself.
+	Metadata map[string]string
 }
 
 // A WritableEvent is an event that can be written to an event store.
@@ -134,6 +137,8 @@ type WritableEvent struct {
 	Data []byte
 
 	// Metadata is optional key-value metadata associated with the event.
+	// Keys prefixed "estoria." are reserved for estoria itself; callers and
+	// backends must not write them.
 	Metadata map[string]string
 }
 

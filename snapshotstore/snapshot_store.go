@@ -2,7 +2,6 @@ package snapshotstore
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"time"
 
@@ -62,16 +61,6 @@ type MinAggregateVersionRetentionPolicy struct {
 
 func (p MinAggregateVersionRetentionPolicy) ShouldRetain(snap *AggregateSnapshot, _, _ int64) bool {
 	return snap.AggregateVersion >= p.MinVersion
-}
-
-type JSONSnapshotMarshaler struct{}
-
-func (m JSONSnapshotMarshaler) MarshalSnapshot(snap *AggregateSnapshot) ([]byte, error) {
-	return json.Marshal(snap)
-}
-
-func (m JSONSnapshotMarshaler) UnmarshalSnapshot(data []byte, dest *AggregateSnapshot) error {
-	return json.Unmarshal(data, dest)
 }
 
 var ErrSnapshotNotFound = errors.New("snapshot not found")

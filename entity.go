@@ -38,7 +38,7 @@ func (c JSONStateCodec[S]) MarshalState(state S) ([]byte, error) {
 }
 
 func (c JSONStateCodec[S]) UnmarshalState(data []byte, dest *S) error {
-	return json.Unmarshal(data, &dest)
+	return json.Unmarshal(data, dest)
 }
 
 // A DomainEvent is an event that can be applied to an aggregate's state to produce
