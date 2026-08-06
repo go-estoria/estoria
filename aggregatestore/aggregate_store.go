@@ -188,5 +188,14 @@ func (e SaveError) Unwrap() error {
 // ErrAggregateNotFound indicates that an aggregate was not found in the aggregate store.
 var ErrAggregateNotFound = errors.New("aggregate not found")
 
+// ErrEventsAppended reports a save that failed after its events were durably
+// appended to the event store: the events are facts in storage, but the
+// aggregate's in-memory state was not updated to reflect them. Recover by
+// discarding the aggregate and reloading it, which replays the appended events.
+//
+// Check for it with errors.Is, which finds it through any amount of wrapping.
+// A save error that does not carry it means nothing was appended.
+var ErrEventsAppended = errors.New("events appended but not applied to the aggregate")
+
 // ErrNilAggregate indicates that the provided aggregate is nil.
 var ErrNilAggregate = errors.New("aggregate is nil")

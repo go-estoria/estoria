@@ -3,6 +3,7 @@ package aggregatestore
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/go-estoria/estoria"
@@ -156,6 +157,8 @@ func (s *SnapshottingStore[S]) Hydrate(ctx context.Context, aggregate *Aggregate
 }
 
 // Save saves an aggregate, taking snapshots as needed.
+// An error that carries ErrEventsAppended means the events were appended but
+// not applied to the in-memory aggregate.
 func (s *SnapshottingStore[S]) Save(ctx context.Context, aggregate *Aggregate[S], opts *SaveOptions) error {
 	if aggregate == nil {
 		return SaveError{Err: ErrNilAggregate}
@@ -186,7 +189,12 @@ func (s *SnapshottingStore[S]) Save(ctx context.Context, aggregate *Aggregate[S]
 		if errors.Is(err, ErrNoUnappliedEvents) {
 			break
 		} else if err != nil {
-			return SaveError{AggregateID: aggregate.ID(), Operation: "applying next aggregate event", Err: err}
+			// The inner save succeeded, so the events are already facts in the store.
+			return SaveError{
+				AggregateID: aggregate.ID(),
+				Operation:   "applying next aggregate event",
+				Err:         fmt.Errorf("%w: %w", ErrEventsAppended, err),
+			}
 		}
 
 		if !s.policy.ShouldSnapshot(aggregate.ID(), aggregate.Version(), now) {

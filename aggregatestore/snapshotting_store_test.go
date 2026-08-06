@@ -815,7 +815,7 @@ func TestSnapshottingStore_Save(t *testing.T) {
 			haveAggregate: func() *aggregatestore.Aggregate[mockEntity] {
 				return newMockAggregate(aggregateID.UUID, 42)
 			}(),
-			wantErr: aggregatestore.SaveError{Err: errors.New("applying next aggregate event: event version mismatch: expected 43, got 45")},
+			wantErr: aggregatestore.SaveError{Err: errors.New("applying next aggregate event: events appended but not applied to the aggregate: event version mismatch: expected 43, got 45")},
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
