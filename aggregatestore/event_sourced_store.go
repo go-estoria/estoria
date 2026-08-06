@@ -259,7 +259,7 @@ func (s *EventSourcedStore[S]) Save(ctx context.Context, aggregate *Aggregate[S]
 
 	// apply the events to the aggregate
 	for {
-		if err := aggregate.applyNext(ctx); errors.Is(err, ErrNoUnappliedEvents) {
+		if err := aggregate.applyNext(); errors.Is(err, ErrNoUnappliedEvents) {
 			return nil
 		} else if err != nil {
 			return SaveError{AggregateID: aggregate.ID(), Operation: "applying aggregate event", Err: err}
@@ -326,7 +326,7 @@ func pointerConstructor[S any](newFn func() estoria.DomainEvent[S]) func() estor
 
 // Returns a projection.EventHandlerFunc that decodes and applies a domain event to an aggregate.
 func (s *EventSourcedStore[S]) eventHandlerForAggregate(aggregate *Aggregate[S]) projection.EventHandlerFunc {
-	return projection.EventHandlerFunc(func(ctx context.Context, event *eventstore.Event) error {
+	return projection.EventHandlerFunc(func(_ context.Context, event *eventstore.Event) error {
 		if event == nil {
 			return NewHydrateError(aggregate.ID(), "event handler", errors.New("received nil event in event handler"))
 		}
@@ -359,7 +359,7 @@ func (s *EventSourcedStore[S]) eventHandlerForAggregate(aggregate *Aggregate[S])
 			Timestamp:   event.Timestamp,
 			DomainEvent: domainEvent,
 		})
-		if err := aggregate.applyNext(ctx); err != nil {
+		if err := aggregate.applyNext(); err != nil {
 			return NewHydrateError(aggregate.ID(), "applying aggregate event",
 				fmt.Errorf("failed to apply event type '%s': %w", eventType, err),
 			)

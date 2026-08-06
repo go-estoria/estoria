@@ -177,9 +177,9 @@ func (e *mockEntityEvent) EventType() string { return "incremented" }
 
 func (e *mockEntityEvent) New() estoria.DomainEvent[*mockEntity] { return &mockEntityEvent{} }
 
-func (e *mockEntityEvent) ApplyTo(_ context.Context, entity *mockEntity) (*mockEntity, error) {
+func (e *mockEntityEvent) ApplyTo(entity *mockEntity) *mockEntity {
 	entity.Count++
-	return entity, nil
+	return entity
 }
 
 // TestSnapshottingStore_VersionedLoad exercises the symptom that made the ignored MaxVersion

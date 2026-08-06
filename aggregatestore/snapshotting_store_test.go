@@ -790,18 +790,14 @@ func TestSnapshottingStore_Save(t *testing.T) {
 			wantErr: aggregatestore.SaveError{Err: errors.New("saving aggregate using inner store: mock error")},
 		},
 		{
-			name: "returns an error when encountering an unexpected error applying an event",
+			// ApplyTo is total, so the apply loop can only fail when a queued event's
+			// version disagrees with the aggregate's next version.
+			name: "returns an error when a queued event is out of version order",
 			haveInner: &mockAggregateStore[mockEntity]{
 				SaveFn: func(_ context.Context, aggregate *aggregatestore.Aggregate[mockEntity], _ *aggregatestore.SaveOptions) error {
 					aggregate.TestOnlyWillApply(&aggregatestore.Event[mockEntity]{
-						Version: 43,
-						DomainEvent: mockEntityEventA{
-							mockEntityEventBase: mockEntityEventBase{
-								ApplyToFn: func(_ context.Context, e mockEntity) (mockEntity, error) {
-									return e, errors.New("mock error")
-								},
-							},
-						},
+						Version:     45,
+						DomainEvent: mockEntityEventA{},
 					})
 					return nil
 				},
@@ -819,7 +815,7 @@ func TestSnapshottingStore_Save(t *testing.T) {
 			haveAggregate: func() *aggregatestore.Aggregate[mockEntity] {
 				return newMockAggregate(aggregateID.UUID, 42)
 			}(),
-			wantErr: aggregatestore.SaveError{Err: errors.New("applying next aggregate event: applying event: mock error")},
+			wantErr: aggregatestore.SaveError{Err: errors.New("applying next aggregate event: event version mismatch: expected 43, got 45")},
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
@@ -995,9 +991,9 @@ func (e *mockPointerEntityEvent) New() estoria.DomainEvent[*mockPointerEntity] {
 	return &mockPointerEntityEvent{}
 }
 
-func (e *mockPointerEntityEvent) ApplyTo(_ context.Context, entity *mockPointerEntity) (*mockPointerEntity, error) {
+func (e *mockPointerEntityEvent) ApplyTo(entity *mockPointerEntity) *mockPointerEntity {
 	entity.Balance += e.Amount
-	return entity, nil
+	return entity
 }
 
 // TestSnapshottingStore_Save_DoesNotMutateCallerOptions guards against Save setting

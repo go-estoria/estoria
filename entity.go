@@ -1,7 +1,6 @@
 package estoria
 
 import (
-	"context"
 	"encoding/json"
 
 	"github.com/gofrs/uuid/v5"
@@ -49,7 +48,11 @@ type DomainEvent[S any] interface {
 	// New returns a new instance of the event.
 	New() DomainEvent[S]
 	// ApplyTo applies the event to state, returning the new state.
-	ApplyTo(ctx context.Context, state S) (S, error)
+	//
+	// ApplyTo is total: a persisted event is a fact, and applying one cannot fail.
+	// Validate commands before appending events; a payload that cannot be decoded
+	// surfaces as a hydration error before ApplyTo is ever reached.
+	ApplyTo(state S) S
 }
 
 // DomainEventCodec is an interface for marshaling domain events to and from bytes.
