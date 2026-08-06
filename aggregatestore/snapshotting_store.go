@@ -18,24 +18,24 @@ type SnapshotPolicy interface {
 
 // A SnapshottingStore wraps an aggregate store and uses a snapshot store to save snapshots
 // and/or hydrate aggregates from snapshots.
-type SnapshottingStore[E estoria.Entity] struct {
-	inner     Store[E]
-	reader    snapshotstore.SnapshotReader
-	writer    snapshotstore.SnapshotWriter
-	policy    SnapshotPolicy
-	marshaler estoria.EntityMarshaler[E]
-	log       estoria.Logger
+type SnapshottingStore[S any] struct {
+	inner      Store[S]
+	reader     snapshotstore.SnapshotReader
+	writer     snapshotstore.SnapshotWriter
+	policy     SnapshotPolicy
+	stateCodec estoria.StateCodec[S]
+	log        estoria.Logger
 }
 
-var _ Store[estoria.Entity] = (*SnapshottingStore[estoria.Entity])(nil)
+var _ Store[struct{}] = (*SnapshottingStore[struct{}])(nil)
 
 // NewSnapshottingStore creates a new SnapshottingStore.
-func NewSnapshottingStore[E estoria.Entity](
-	inner Store[E],
+func NewSnapshottingStore[S any](
+	inner Store[S],
 	store snapshotstore.SnapshotStore,
 	policy SnapshotPolicy,
-	opts ...SnapshottingStoreOption[E],
-) (*SnapshottingStore[E], error) {
+	opts ...SnapshottingStoreOption[S],
+) (*SnapshottingStore[S], error) {
 	switch {
 	case inner == nil:
 		return nil, InitializeError{Err: errors.New("inner store is required")}
@@ -45,13 +45,13 @@ func NewSnapshottingStore[E estoria.Entity](
 		return nil, InitializeError{Err: errors.New("snapshot policy is required")}
 	}
 
-	aggregateStore := &SnapshottingStore[E]{
-		inner:     inner,
-		reader:    store,
-		writer:    store,
-		policy:    policy,
-		marshaler: estoria.JSONMarshaler[E]{},
-		log:       estoria.GetLogger().WithGroup("snapshottingstore"),
+	aggregateStore := &SnapshottingStore[S]{
+		inner:      inner,
+		reader:     store,
+		writer:     store,
+		policy:     policy,
+		stateCodec: estoria.JSONStateCodec[S]{},
+		log:        estoria.GetLogger().WithGroup("snapshottingstore"),
 	}
 
 	for _, opt := range opts {
@@ -63,13 +63,18 @@ func NewSnapshottingStore[E estoria.Entity](
 	return aggregateStore, nil
 }
 
+// AggregateType returns the aggregate type name of the inner store.
+func (s *SnapshottingStore[S]) AggregateType() string {
+	return s.inner.AggregateType()
+}
+
 // New creates a new aggregate.
-func (s *SnapshottingStore[E]) New(id uuid.UUID) *Aggregate[E] {
+func (s *SnapshottingStore[S]) New(id uuid.UUID) *Aggregate[S] {
 	return s.inner.New(id)
 }
 
 // Load loads an aggregate by its ID.
-func (s *SnapshottingStore[E]) Load(ctx context.Context, id uuid.UUID, opts *LoadOptions) (*Aggregate[E], error) {
+func (s *SnapshottingStore[S]) Load(ctx context.Context, id uuid.UUID, opts *LoadOptions) (*Aggregate[S], error) {
 	aggregate := s.New(id)
 	s.log.Debug("loading aggregate", "aggregate_id", aggregate.ID())
 
@@ -86,7 +91,7 @@ func (s *SnapshottingStore[E]) Load(ctx context.Context, id uuid.UUID, opts *Loa
 }
 
 // Hydrate hydrates an aggregate, first attempting to load from a snapshot.
-func (s *SnapshottingStore[E]) Hydrate(ctx context.Context, aggregate *Aggregate[E], opts *HydrateOptions) error {
+func (s *SnapshottingStore[S]) Hydrate(ctx context.Context, aggregate *Aggregate[S], opts *HydrateOptions) error {
 	if opts == nil {
 		opts = &HydrateOptions{}
 	}
@@ -128,20 +133,20 @@ func (s *SnapshottingStore[E]) Hydrate(ctx context.Context, aggregate *Aggregate
 		return s.inner.Hydrate(ctx, aggregate, opts)
 	}
 
-	// Decode into a fresh entity rather than the aggregate's live one. When E is a
-	// pointer type the marshaler writes through to the entity in place, so a snapshot
+	// Decode into fresh state rather than the aggregate's live state. When S is a
+	// pointer type the codec writes through to the state in place, so a snapshot
 	// that is valid JSON but disagrees on a field's type — ordinary schema drift —
-	// applies the fields it can before failing. Decoding into the live entity would
+	// applies the fields it can before failing. Decoding into the live state would
 	// leave that partial state behind and then replay events on top of it, silently
 	// returning a corrupt aggregate with a nil error.
-	entity := s.inner.New(aggregate.ID().UUID).Entity()
-	if err := s.marshaler.UnmarshalEntity(snap.Data, &entity); err != nil {
+	state := s.inner.New(aggregate.ID().UUID).State()
+	if err := s.stateCodec.UnmarshalState(snap.Data, &state); err != nil {
 		log.Warn("failed to unmarshal snapshot, falling back to full hydration", "error", err)
 		return s.inner.Hydrate(ctx, aggregate, opts)
 	}
 
 	log.Debug("loaded snapshot", "version", snap.AggregateVersion)
-	aggregate.state.SetEntityAtVersion(entity, snap.AggregateVersion)
+	aggregate.setStateAtVersion(state, snap.AggregateVersion)
 
 	if opts.ToVersion > 0 && snap.AggregateVersion == opts.ToVersion {
 		return nil
@@ -151,7 +156,7 @@ func (s *SnapshottingStore[E]) Hydrate(ctx context.Context, aggregate *Aggregate
 }
 
 // Save saves an aggregate, taking snapshots as needed.
-func (s *SnapshottingStore[E]) Save(ctx context.Context, aggregate *Aggregate[E], opts *SaveOptions) error {
+func (s *SnapshottingStore[S]) Save(ctx context.Context, aggregate *Aggregate[S], opts *SaveOptions) error {
 	if aggregate == nil {
 		return SaveError{Err: ErrNilAggregate}
 	}
@@ -177,7 +182,7 @@ func (s *SnapshottingStore[E]) Save(ctx context.Context, aggregate *Aggregate[E]
 	now := time.Now()
 
 	for {
-		err := aggregate.state.ApplyNext(ctx)
+		err := aggregate.applyNext(ctx)
 		if errors.Is(err, ErrNoUnappliedEvents) {
 			break
 		} else if err != nil {
@@ -190,7 +195,7 @@ func (s *SnapshottingStore[E]) Save(ctx context.Context, aggregate *Aggregate[E]
 
 		log.Debug("taking snapshot", "version", aggregate.Version())
 
-		data, err := s.marshaler.MarshalEntity(aggregate.Entity())
+		data, err := s.stateCodec.MarshalState(aggregate.State())
 		if err != nil {
 			log.Error("failed to marshal snapshot", "error", err)
 			continue
@@ -210,27 +215,27 @@ func (s *SnapshottingStore[E]) Save(ctx context.Context, aggregate *Aggregate[E]
 }
 
 // A SnapshottingStoreOption is a functional option for configuring a SnapshottingStore.
-type SnapshottingStoreOption[E estoria.Entity] func(*SnapshottingStore[E]) error
+type SnapshottingStoreOption[S any] func(*SnapshottingStore[S]) error
 
-// WithSnapshotMarshaler sets the snapshot marshaler.
-func WithSnapshotMarshaler[E estoria.Entity](marshaler estoria.EntityMarshaler[E]) SnapshottingStoreOption[E] {
-	return func(s *SnapshottingStore[E]) error {
-		s.marshaler = marshaler
+// WithStateCodec sets the codec used to marshal state into snapshot payloads.
+func WithStateCodec[S any](codec estoria.StateCodec[S]) SnapshottingStoreOption[S] {
+	return func(s *SnapshottingStore[S]) error {
+		s.stateCodec = codec
 		return nil
 	}
 }
 
 // WithSnapshotReader sets the snapshot reader.
-func WithSnapshotReader[E estoria.Entity](reader snapshotstore.SnapshotReader) SnapshottingStoreOption[E] {
-	return func(s *SnapshottingStore[E]) error {
+func WithSnapshotReader[S any](reader snapshotstore.SnapshotReader) SnapshottingStoreOption[S] {
+	return func(s *SnapshottingStore[S]) error {
 		s.reader = reader
 		return nil
 	}
 }
 
 // WithSnapshotWriter sets the snapshot writer.
-func WithSnapshotWriter[E estoria.Entity](writer snapshotstore.SnapshotWriter) SnapshottingStoreOption[E] {
-	return func(s *SnapshottingStore[E]) error {
+func WithSnapshotWriter[S any](writer snapshotstore.SnapshotWriter) SnapshottingStoreOption[S] {
+	return func(s *SnapshottingStore[S]) error {
 		s.writer = writer
 		return nil
 	}

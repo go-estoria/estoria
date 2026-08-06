@@ -9,27 +9,36 @@ import (
 	"github.com/gofrs/uuid/v5"
 )
 
+// A CachedAggregate is what a cache holds for an aggregate: its state and the version
+// that state reflects. Identity is not part of the entry — entries are keyed by typed
+// ID, and CachedStore composes the aggregate from the key and the entry on a hit.
+type CachedAggregate[S any] struct {
+	State   S
+	Version int64
+}
+
 // An AggregateCache is a cache for aggregates.
 //
-// Aggregates are keyed by their typed ID rather than a bare UUID so that a cache backend
-// shared across aggregate types produces distinct, self-describing keys.
-type AggregateCache[E estoria.Entity] interface {
-	GetAggregate(ctx context.Context, aggregateID typeid.ID) (*Aggregate[E], error)
-	PutAggregate(ctx context.Context, aggregate *Aggregate[E]) error
+// Entries are keyed by their typed ID rather than a bare UUID so that a cache backend
+// shared across aggregate types produces distinct, self-describing keys. A get that
+// finds nothing returns a nil entry and a nil error.
+type AggregateCache[S any] interface {
+	GetAggregate(ctx context.Context, aggregateID typeid.ID) (*CachedAggregate[S], error)
+	PutAggregate(ctx context.Context, aggregateID typeid.ID, entry CachedAggregate[S]) error
 }
 
 // CachedStore wraps an aggreate store with an AggregateCache to cache aggregates.
-type CachedStore[E estoria.Entity] struct {
-	inner Store[E]
-	cache AggregateCache[E]
+type CachedStore[S any] struct {
+	inner Store[S]
+	cache AggregateCache[S]
 	log   estoria.Logger
 }
 
 // NewCachedStore creates a new CachedStore.
-func NewCachedStore[E estoria.Entity](
-	inner Store[E],
-	cacher AggregateCache[E],
-) (*CachedStore[E], error) {
+func NewCachedStore[S any](
+	inner Store[S],
+	cacher AggregateCache[S],
+) (*CachedStore[S], error) {
 	switch {
 	case inner == nil:
 		return nil, errors.New("inner store is required")
@@ -37,17 +46,22 @@ func NewCachedStore[E estoria.Entity](
 		return nil, errors.New("aggregate cache is required")
 	}
 
-	return &CachedStore[E]{
+	return &CachedStore[S]{
 		inner: inner,
 		cache: cacher,
 		log:   estoria.GetLogger().WithGroup("cachedstore"),
 	}, nil
 }
 
-var _ Store[estoria.Entity] = (*CachedStore[estoria.Entity])(nil)
+var _ Store[struct{}] = (*CachedStore[struct{}])(nil)
+
+// AggregateType returns the aggregate type name of the inner store.
+func (s *CachedStore[S]) AggregateType() string {
+	return s.inner.AggregateType()
+}
 
 // New creates a new aggregate with the given ID.
-func (s *CachedStore[E]) New(id uuid.UUID) *Aggregate[E] {
+func (s *CachedStore[S]) New(id uuid.UUID) *Aggregate[S] {
 	return s.inner.New(id)
 }
 
@@ -57,7 +71,7 @@ func (s *CachedStore[E]) New(id uuid.UUID) *Aggregate[E] {
 // holds whatever version an aggregate was last saved or loaded at, which is not necessarily
 // the requested one, and writing a deliberately-truncated aggregate back would then serve
 // that stale version to subsequent full loads.
-func (s *CachedStore[E]) Load(ctx context.Context, id uuid.UUID, opts *LoadOptions) (*Aggregate[E], error) {
+func (s *CachedStore[S]) Load(ctx context.Context, id uuid.UUID, opts *LoadOptions) (*Aggregate[S], error) {
 	if opts != nil && opts.ToVersion > 0 {
 		s.log.Debug("bypassing cache for versioned load", "aggregate_id", id, "to_version", opts.ToVersion)
 
@@ -69,24 +83,24 @@ func (s *CachedStore[E]) Load(ctx context.Context, id uuid.UUID, opts *LoadOptio
 		return aggregate, nil
 	}
 
-	aggregateID := s.inner.New(id).ID()
+	aggregateID := typeid.New(s.inner.AggregateType(), id)
 
-	aggregate, err := s.cache.GetAggregate(ctx, aggregateID)
+	entry, err := s.cache.GetAggregate(ctx, aggregateID)
 	switch {
-	case err == nil && aggregate != nil:
-		return aggregate, nil
+	case err == nil && entry != nil:
+		return newAggregate(aggregateID, entry.State, entry.Version), nil
 	case err != nil:
 		s.log.Warn("failed to read cache", "aggregate_id", aggregateID, "error", err)
-	case aggregate == nil:
+	default:
 		s.log.Debug("aggregate not in cache", "aggregate_id", aggregateID)
 	}
 
-	aggregate, err = s.inner.Load(ctx, id, opts)
+	aggregate, err := s.inner.Load(ctx, id, opts)
 	if err != nil {
 		return nil, LoadError{Operation: "loading from inner aggregate store", Err: err}
 	}
 
-	if err := s.cache.PutAggregate(ctx, aggregate); err != nil {
+	if err := s.cache.PutAggregate(ctx, aggregate.ID(), CachedAggregate[S]{State: aggregate.State(), Version: aggregate.Version()}); err != nil {
 		s.log.Warn("failed to write cache", "aggregate_id", aggregateID, "error", err)
 	}
 
@@ -94,12 +108,12 @@ func (s *CachedStore[E]) Load(ctx context.Context, id uuid.UUID, opts *LoadOptio
 }
 
 // Hydrate hydrates an aggregate by deferring to the inner store.
-func (s *CachedStore[E]) Hydrate(ctx context.Context, aggregate *Aggregate[E], opts *HydrateOptions) error {
+func (s *CachedStore[S]) Hydrate(ctx context.Context, aggregate *Aggregate[S], opts *HydrateOptions) error {
 	return s.inner.Hydrate(ctx, aggregate, opts)
 }
 
 // Save saves an aggregate using the inner store, then updates the cache.
-func (s *CachedStore[E]) Save(ctx context.Context, aggregate *Aggregate[E], opts *SaveOptions) error {
+func (s *CachedStore[S]) Save(ctx context.Context, aggregate *Aggregate[S], opts *SaveOptions) error {
 	if aggregate == nil {
 		return SaveError{Err: ErrNilAggregate}
 	}
@@ -108,17 +122,17 @@ func (s *CachedStore[E]) Save(ctx context.Context, aggregate *Aggregate[E], opts
 		return SaveError{AggregateID: aggregate.ID(), Operation: "saving to inner aggregate store", Err: err}
 	}
 
-	// An aggregate saved with SkipApply still has events queued, so its entity and version
+	// An aggregate saved with SkipApply still has events queued, so its state and version
 	// trail what was just persisted. Caching it would serve that trailing state to later
 	// loads, so leave the previous entry alone and let the next load repopulate it.
-	if len(aggregate.state.unappliedEvents) > 0 {
+	if len(aggregate.unappliedEvents) > 0 {
 		s.log.Debug("skipping cache write for aggregate with unapplied events",
 			"aggregate_id", aggregate.ID(),
-			"unapplied_events", len(aggregate.state.unappliedEvents))
+			"unapplied_events", len(aggregate.unappliedEvents))
 		return nil
 	}
 
-	if err := s.cache.PutAggregate(ctx, aggregate); err != nil {
+	if err := s.cache.PutAggregate(ctx, aggregate.ID(), CachedAggregate[S]{State: aggregate.State(), Version: aggregate.Version()}); err != nil {
 		s.log.Warn("failed to write cache", "aggregate_id", aggregate.ID(), "error", err)
 	}
 

@@ -4,17 +4,19 @@ import (
 	"context"
 	"errors"
 
-	"github.com/go-estoria/estoria"
 	"github.com/go-estoria/estoria/typeid"
 	"github.com/gofrs/uuid/v5"
 )
 
 // A Store is a read/write store for aggregates.
-type Store[E estoria.Entity] interface {
-	New(id uuid.UUID) *Aggregate[E]
-	Load(ctx context.Context, id uuid.UUID, opts *LoadOptions) (*Aggregate[E], error)
-	Hydrate(ctx context.Context, aggregate *Aggregate[E], opts *HydrateOptions) error
-	Save(ctx context.Context, aggregate *Aggregate[E], opts *SaveOptions) error
+type Store[S any] interface {
+	// AggregateType returns the aggregate type name used to compose the typed IDs
+	// under which the store's aggregates are addressed.
+	AggregateType() string
+	New(id uuid.UUID) *Aggregate[S]
+	Load(ctx context.Context, id uuid.UUID, opts *LoadOptions) (*Aggregate[S], error)
+	Hydrate(ctx context.Context, aggregate *Aggregate[S], opts *HydrateOptions) error
+	Save(ctx context.Context, aggregate *Aggregate[S], opts *SaveOptions) error
 }
 
 // LoadOptions are options for loading an aggregate.
