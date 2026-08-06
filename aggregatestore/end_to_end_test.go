@@ -37,9 +37,9 @@ func (fundsDeposited) EventType() string { return "fundsdeposited" }
 
 func (fundsDeposited) New() estoria.DomainEvent[account] { return &fundsDeposited{} }
 
-func (e fundsDeposited) ApplyTo(_ context.Context, a account) (account, error) {
+func (e fundsDeposited) ApplyTo(a account) account {
 	a.Balance += e.Amount
-	return a, nil
+	return a
 }
 
 type fundsWithdrawn struct {
@@ -50,9 +50,9 @@ func (fundsWithdrawn) EventType() string { return "fundswithdrawn" }
 
 func (fundsWithdrawn) New() estoria.DomainEvent[account] { return &fundsWithdrawn{} }
 
-func (e fundsWithdrawn) ApplyTo(_ context.Context, a account) (account, error) {
+func (e fundsWithdrawn) ApplyTo(a account) account {
 	a.Balance -= e.Amount
-	return a, nil
+	return a
 }
 
 // mapAggregateCache stores entries the way the contrib caches do: state and version,

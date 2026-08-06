@@ -1,7 +1,6 @@
 package aggregatestore
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"time"
@@ -74,19 +73,14 @@ func (a *Aggregate[S]) Version() int64 {
 // applyNext applies the next domain event in the apply queue to the state.
 // A successfully applied event increments the aggregate's version. If
 // there are no events in the apply queue, ErrNoUnappliedEvents is returned.
-func (a *Aggregate[S]) applyNext(ctx context.Context) error {
+func (a *Aggregate[S]) applyNext() error {
 	if len(a.unappliedEvents) == 0 {
 		return ErrNoUnappliedEvents
 	} else if a.unappliedEvents[0].Version != a.version+1 {
 		return fmt.Errorf("event version mismatch: expected %d, got %d", a.version+1, a.unappliedEvents[0].Version)
 	}
 
-	state, err := a.unappliedEvents[0].DomainEvent.ApplyTo(ctx, a.state)
-	if err != nil {
-		return fmt.Errorf("applying event: %w", err)
-	}
-
-	a.state = state
+	a.state = a.unappliedEvents[0].DomainEvent.ApplyTo(a.state)
 	a.version = a.unappliedEvents[0].Version
 	a.unappliedEvents = a.unappliedEvents[1:]
 

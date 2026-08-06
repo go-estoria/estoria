@@ -23,13 +23,8 @@ type eventSourcedStoreTestCase[E any] struct {
 	wantErr        error
 }
 
-type mockEntityEventBase struct {
-	ApplyToFn func(context.Context, mockEntity) (mockEntity, error)
-}
-
 type mockEntityEventA struct {
-	mockEntityEventBase `json:"-"`
-	A                   string `json:"a"`
+	A string `json:"a"`
 }
 
 func (e mockEntityEventA) EventType() string {
@@ -40,22 +35,13 @@ func (e mockEntityEventA) New() estoria.DomainEvent[mockEntity] {
 	return &mockEntityEventA{}
 }
 
-func (e mockEntityEventA) ApplyTo(ctx context.Context, m mockEntity) (mockEntity, error) {
-	var err error
-	if e.ApplyToFn != nil {
-		m, err = e.ApplyToFn(ctx, m)
-	}
-
-	if err == nil {
-		m.numAppliedEvents++
-	}
-
-	return m, err
+func (e mockEntityEventA) ApplyTo(m mockEntity) mockEntity {
+	m.numAppliedEvents++
+	return m
 }
 
 type mockEntityEventB struct {
-	mockEntityEventBase `json:"-"`
-	B                   string `json:"b"`
+	B string `json:"b"`
 }
 
 func (e mockEntityEventB) EventType() string {
@@ -66,22 +52,13 @@ func (e mockEntityEventB) New() estoria.DomainEvent[mockEntity] {
 	return &mockEntityEventB{}
 }
 
-func (e mockEntityEventB) ApplyTo(ctx context.Context, m mockEntity) (mockEntity, error) {
-	var err error
-	if e.ApplyToFn != nil {
-		m, err = e.ApplyToFn(ctx, m)
-	}
-
-	if err == nil {
-		m.numAppliedEvents++
-	}
-
-	return m, err
+func (e mockEntityEventB) ApplyTo(m mockEntity) mockEntity {
+	m.numAppliedEvents++
+	return m
 }
 
 type mockEntityEventC struct {
-	mockEntityEventBase `json:"-"`
-	C                   string `json:"c"`
+	C string `json:"c"`
 }
 
 func (e mockEntityEventC) EventType() string {
@@ -92,22 +69,13 @@ func (e mockEntityEventC) New() estoria.DomainEvent[mockEntity] {
 	return &mockEntityEventC{}
 }
 
-func (e mockEntityEventC) ApplyTo(ctx context.Context, m mockEntity) (mockEntity, error) {
-	var err error
-	if e.ApplyToFn != nil {
-		m, err = e.ApplyToFn(ctx, m)
-	}
-
-	if err == nil {
-		m.numAppliedEvents++
-	}
-
-	return m, err
+func (e mockEntityEventC) ApplyTo(m mockEntity) mockEntity {
+	m.numAppliedEvents++
+	return m
 }
 
 type mockEntityEventD struct {
-	mockEntityEventBase `json:"-"`
-	D                   string `json:"d"`
+	D string `json:"d"`
 }
 
 func (e mockEntityEventD) EventType() string {
@@ -118,22 +86,13 @@ func (e mockEntityEventD) New() estoria.DomainEvent[mockEntity] {
 	return &mockEntityEventD{}
 }
 
-func (e mockEntityEventD) ApplyTo(ctx context.Context, m mockEntity) (mockEntity, error) {
-	var err error
-	if e.ApplyToFn != nil {
-		m, err = e.ApplyToFn(ctx, m)
-	}
-
-	if err == nil {
-		m.numAppliedEvents++
-	}
-
-	return m, err
+func (e mockEntityEventD) ApplyTo(m mockEntity) mockEntity {
+	m.numAppliedEvents++
+	return m
 }
 
 type mockEntityEventE struct {
-	mockEntityEventBase `json:"-"`
-	E                   string `json:"e"`
+	E string `json:"e"`
 }
 
 func (e mockEntityEventE) EventType() string {
@@ -144,34 +103,9 @@ func (e mockEntityEventE) New() estoria.DomainEvent[mockEntity] {
 	return &mockEntityEventE{}
 }
 
-func (e mockEntityEventE) ApplyTo(ctx context.Context, m mockEntity) (mockEntity, error) {
-	var err error
-	if e.ApplyToFn != nil {
-		m, err = e.ApplyToFn(ctx, m)
-	}
-
-	if err == nil {
-		m.numAppliedEvents++
-	}
-
-	return m, err
-}
-
-type mockEntityEventF struct {
-	mockEntityEventBase `json:"-"`
-	F                   string `json:"f"`
-}
-
-func (e mockEntityEventF) EventType() string {
-	return "mockEntityEventF"
-}
-
-func (e mockEntityEventF) New() estoria.DomainEvent[mockEntity] {
-	return &mockEntityEventF{}
-}
-
-func (e mockEntityEventF) ApplyTo(_ context.Context, m mockEntity) (mockEntity, error) {
-	return m, errors.New("mock error")
+func (e mockEntityEventE) ApplyTo(m mockEntity) mockEntity {
+	m.numAppliedEvents++
+	return m
 }
 
 // mockEntityValueEvent exercises the value-typed prototype path: New() returns
@@ -189,10 +123,10 @@ func (e mockEntityValueEvent) New() estoria.DomainEvent[mockEntity] {
 	return mockEntityValueEvent{}
 }
 
-func (e mockEntityValueEvent) ApplyTo(_ context.Context, m mockEntity) (mockEntity, error) {
+func (e mockEntityValueEvent) ApplyTo(m mockEntity) mockEntity {
 	m.numAppliedEvents++
 	m.lastValueEventValue = e.Value
-	return m, nil
+	return m
 }
 
 // mockEntityNilNewEvent is a malformed prototype whose New() returns nil. It's
@@ -209,8 +143,8 @@ func (e mockEntityNilNewEvent) New() estoria.DomainEvent[mockEntity] {
 	return nil
 }
 
-func (e mockEntityNilNewEvent) ApplyTo(_ context.Context, m mockEntity) (mockEntity, error) {
-	return m, nil
+func (e mockEntityNilNewEvent) ApplyTo(m mockEntity) mockEntity {
+	return m
 }
 
 // mockEntityValueEventWithDefault is a value-typed event whose New() seeds a
@@ -229,10 +163,10 @@ func (e mockEntityValueEventWithDefault) New() estoria.DomainEvent[mockEntity] {
 	return mockEntityValueEventWithDefault{Default: "seeded"}
 }
 
-func (e mockEntityValueEventWithDefault) ApplyTo(_ context.Context, m mockEntity) (mockEntity, error) {
+func (e mockEntityValueEventWithDefault) ApplyTo(m mockEntity) mockEntity {
 	m.numAppliedEvents++
 	m.lastValueEventValue = e.Default
-	return m, nil
+	return m
 }
 
 type mockStreamReader struct {
@@ -266,6 +200,28 @@ func (m mockStreamIterator) Next(_ context.Context) (*eventstore.Event, error) {
 
 func (m mockStreamIterator) Close(_ context.Context) error {
 	return m.closeErr
+}
+
+// sequencedStreamIterator yields a fixed sequence of events, then reports end-of-stream.
+// Unlike mockStreamIterator, it terminates, so a test that expects an error mid-stream
+// fails fast rather than hanging if the error is never produced.
+type sequencedStreamIterator struct {
+	events []*eventstore.Event
+	cursor int
+}
+
+func (m *sequencedStreamIterator) Next(_ context.Context) (*eventstore.Event, error) {
+	if m.cursor >= len(m.events) {
+		return nil, eventstore.ErrEndOfEventStream
+	}
+
+	event := m.events[m.cursor]
+	m.cursor++
+	return event, nil
+}
+
+func (m *sequencedStreamIterator) Close(_ context.Context) error {
+	return nil
 }
 
 type mockEventMarshaler[E any] struct {
@@ -1290,40 +1246,33 @@ func TestEventSourcedStore_HydrateAggregate(t *testing.T) {
 			wantErr: errors.New("projecting event stream: processing event: unmarshaling event data: failed to unmarshal event data for event type 'mockEntityEventA': mock error"),
 		},
 		{
-			name: "returns an error when unable to apply an event to the aggregate",
+			// ApplyTo is total, so the only way applying can fail during hydration is an
+			// event whose stream version does not line up with the aggregate's next version.
+			name: "returns an error when an event arrives out of version order",
 			haveEventStore: func() eventstore.Store {
-				events := []*eventstore.WritableEvent{}
-				for _, event := range []estoria.DomainEvent[mockEntity]{
-					mockEntityEventA{A: "a"},
-					mockEntityEventB{B: "b"},
-					mockEntityEventC{C: "c"},
-					mockEntityEventD{D: "d"},
-					mockEntityEventF{F: "f"},
-					mockEntityEventE{E: "e"},
-				} {
-					events = append(events, &eventstore.WritableEvent{
-						Type: event.EventType(),
-						Data: mustJSONMarshal(event),
-					})
-				}
 				store, _ := memory.NewEventStore()
-				store.AppendStream(context.Background(), aggregateID, events, eventstore.AppendStreamOptions{})
 				return store
 			},
 			haveStoreOpts: []aggregatestore.EventSourcedStoreOption[mockEntity]{
+				aggregatestore.WithEventStreamReader[mockEntity](mockStreamReader{
+					readStreamIterator: &sequencedStreamIterator{
+						events: []*eventstore.Event{
+							{
+								ID:            typeid.NewV4("mockEntityEventA"),
+								StreamVersion: 5,
+								Data:          mustJSONMarshal(mockEntityEventA{A: "a"}),
+							},
+						},
+					},
+				}),
 				aggregatestore.WithEventTypes(
 					mockEntityEventA{},
-					mockEntityEventB{},
-					mockEntityEventC{},
-					mockEntityEventD{},
-					mockEntityEventE{},
-					mockEntityEventF{},
 				),
 			},
 			haveAggregate: func() *aggregatestore.Aggregate[mockEntity] {
 				return newMockAggregate(aggregateID.UUID, 0)
 			},
-			wantErr: errors.New("projecting event stream: processing event: applying aggregate event: failed to apply event type 'mockEntityEventF': applying event: mock error"),
+			wantErr: errors.New("projecting event stream: processing event: applying aggregate event: failed to apply event type 'mockEntityEventA': event version mismatch: expected 1, got 5"),
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1632,26 +1581,26 @@ func TestEventSourcedStore_SaveAggregate(t *testing.T) {
 			wantErr: errors.New("saving events to stream: mock error"),
 		},
 		{
-			name: "returns an error when unable to apply an event to the aggregate",
+			// ApplyTo is total, so the post-append apply loop can only fail when the apply
+			// queue disagrees with the version arithmetic — here forced by pre-seeding the
+			// queue with an event whose version the aggregate cannot be at.
+			name: "returns an error when a queued event is out of version order",
 			haveEventStore: func() eventstore.Store {
 				store, _ := memory.NewEventStore()
 				return store
 			},
 			haveAggregate: func() *aggregatestore.Aggregate[mockEntity] {
 				agg := newMockAggregate(aggregateID.UUID, 0)
+				agg.TestOnlyWillApply(&aggregatestore.Event[mockEntity]{
+					Version:     99,
+					DomainEvent: mockEntityEventA{},
+				})
 				agg.Append(
-					mockEntityEventA{
-						A: "a",
-						mockEntityEventBase: mockEntityEventBase{
-							ApplyToFn: func(_ context.Context, e mockEntity) (mockEntity, error) {
-								return e, errors.New("mock error")
-							},
-						},
-					},
+					mockEntityEventA{A: "a"},
 				)
 				return agg
 			},
-			wantErr: errors.New("applying aggregate event: applying event: mock error"),
+			wantErr: errors.New("applying aggregate event: event version mismatch: expected 1, got 99"),
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {

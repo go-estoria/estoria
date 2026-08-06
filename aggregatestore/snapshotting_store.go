@@ -182,7 +182,7 @@ func (s *SnapshottingStore[S]) Save(ctx context.Context, aggregate *Aggregate[S]
 	now := time.Now()
 
 	for {
-		err := aggregate.applyNext(ctx)
+		err := aggregate.applyNext()
 		if errors.Is(err, ErrNoUnappliedEvents) {
 			break
 		} else if err != nil {

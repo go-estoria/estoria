@@ -1,7 +1,6 @@
 package estoria_test
 
 import (
-	"context"
 	"testing"
 
 	"github.com/go-estoria/estoria"
@@ -89,9 +88,9 @@ func (e *mockDomainEvent) New() estoria.DomainEvent[mockState] {
 	return &mockDomainEvent{}
 }
 
-func (e *mockDomainEvent) ApplyTo(_ context.Context, state mockState) (mockState, error) {
+func (e *mockDomainEvent) ApplyTo(state mockState) mockState {
 	state.Balance += e.Amount
-	return state, nil
+	return state
 }
 
 func TestJSONDomainEventCodec(t *testing.T) {
@@ -141,11 +140,7 @@ func TestDomainEvent_ApplyTo(t *testing.T) {
 		t.Error("want a new instance, got nil")
 	}
 
-	got, err := event.ApplyTo(t.Context(), mockState{Balance: 100})
-	if err != nil {
-		t.Fatalf("applying event: %v", err)
-	}
-
+	got := event.ApplyTo(mockState{Balance: 100})
 	if got.Balance != 125 {
 		t.Errorf("want balance 125, got %d", got.Balance)
 	}
