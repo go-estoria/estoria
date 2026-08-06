@@ -24,7 +24,7 @@ jobs:
     name: Tag and Release
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           # Full history so pr-semver-bump can see existing version tags.
           fetch-depth: 0
