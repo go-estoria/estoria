@@ -1,18 +1,18 @@
-package snapshotstore_test
+package eventstream_test
 
 import (
 	"testing"
 
 	"github.com/go-estoria/estoria/eventstore/memory"
 	"github.com/go-estoria/estoria/snapshotstore"
-	eventstreamstore "github.com/go-estoria/estoria/snapshotstore/eventstream"
+	"github.com/go-estoria/estoria/snapshotstore/eventstream"
 	"github.com/go-estoria/estoria/snapshotstore/storetest"
 )
 
 // Unlike the in-memory snapshot store, this one retains every snapshot ever written, so it
 // exercises the MaxVersion clause's non-trivial branch: it must return the newest snapshot
 // at or below the bound rather than reporting one absent.
-func TestEventStreamStore_AcceptanceTest(t *testing.T) {
+func TestStore_AcceptanceTest(t *testing.T) {
 	t.Parallel()
 
 	storetest.RunSnapshotStoreSuite(t, func(t *testing.T) snapshotstore.SnapshotStore {
@@ -26,6 +26,6 @@ func TestEventStreamStore_AcceptanceTest(t *testing.T) {
 			t.Fatalf("creating backing event store: %v", err)
 		}
 
-		return eventstreamstore.NewEventStreamStore(eventStore)
+		return eventstream.New(eventStore)
 	})
 }

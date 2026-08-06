@@ -5,41 +5,59 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"strings"
 
 	"github.com/go-estoria/estoria"
 	"github.com/go-estoria/estoria/eventstore"
 	"github.com/go-estoria/estoria/eventstore/projection"
+	"github.com/go-estoria/estoria/typeid"
 	"github.com/gofrs/uuid/v5"
 )
 
 // An EventSourcedStore loads and saves aggregates using an EventStore.
 // It loads and hydrates aggregates by reading events from the event store and applying
 // them to the aggregate. It saves aggregates by appending events to the event store.
-type EventSourcedStore[E estoria.Entity] struct {
+type EventSourcedStore[S any] struct {
 	eventReader eventstore.StreamReader
 	eventWriter eventstore.StreamWriter
 
-	newEntity             estoria.EntityFactory[E]
-	entityEventPrototypes map[string]func() estoria.EntityEvent[E]
-	entityEventMarshaler  estoria.EntityEventMarshaler[E]
+	aggregateType         string
+	newState              estoria.StateFactory[S]
+	domainEventPrototypes map[string]func() estoria.DomainEvent[S]
+	domainEventCodec      estoria.DomainEventCodec[S]
 
 	log estoria.Logger
 }
 
-var _ Store[estoria.Entity] = (*EventSourcedStore[estoria.Entity])(nil)
+var _ Store[struct{}] = (*EventSourcedStore[struct{}])(nil)
 
 // New creates a new event sourced aggregate store.
-func New[E estoria.Entity](
+//
+// The aggregate type names the kind of aggregate the store manages and becomes the
+// type component of every aggregate ID the store composes. It addresses streams in
+// storage, so it must remain stable for the lifetime of the aggregates it names.
+func New[S any](
 	eventStore eventstore.Store,
-	entityFactory estoria.EntityFactory[E],
-	opts ...EventSourcedStoreOption[E],
-) (*EventSourcedStore[E], error) {
-	store := &EventSourcedStore[E]{
+	aggregateType string,
+	stateFactory estoria.StateFactory[S],
+	opts ...EventSourcedStoreOption[S],
+) (*EventSourcedStore[S], error) {
+	switch {
+	case aggregateType == "":
+		return nil, InitializeError{Err: errors.New("aggregate type is required")}
+	case strings.Contains(aggregateType, "_"):
+		// An underscore separates the type from the UUID in the "type_uuid" string
+		// form, so a type containing one produces ambiguous IDs.
+		return nil, InitializeError{Err: errors.New("aggregate type must not contain '_'")}
+	}
+
+	store := &EventSourcedStore[S]{
 		eventReader:           eventStore,
 		eventWriter:           eventStore,
-		newEntity:             entityFactory,
-		entityEventPrototypes: make(map[string]func() estoria.EntityEvent[E]),
-		entityEventMarshaler:  estoria.JSONEntityEventMarshaler[E]{},
+		aggregateType:         aggregateType,
+		newState:              stateFactory,
+		domainEventPrototypes: make(map[string]func() estoria.DomainEvent[S]),
+		domainEventCodec:      estoria.JSONDomainEventCodec[S]{},
 		log:                   estoria.GetLogger().WithGroup("eventsourcedstore"),
 	}
 
@@ -56,13 +74,19 @@ func New[E estoria.Entity](
 	return store, nil
 }
 
+// AggregateType returns the aggregate type name used to compose the typed IDs
+// under which the store's aggregates are addressed.
+func (s *EventSourcedStore[S]) AggregateType() string {
+	return s.aggregateType
+}
+
 // New creates a new aggregate with the given ID.
-func (s *EventSourcedStore[E]) New(id uuid.UUID) *Aggregate[E] {
-	return NewAggregate(s.newEntity(id), 0)
+func (s *EventSourcedStore[S]) New(id uuid.UUID) *Aggregate[S] {
+	return newAggregate(typeid.New(s.aggregateType, id), s.newState(id), 0)
 }
 
 // Load loads an aggregate by its ID.
-func (s *EventSourcedStore[E]) Load(ctx context.Context, id uuid.UUID, opts *LoadOptions) (*Aggregate[E], error) {
+func (s *EventSourcedStore[S]) Load(ctx context.Context, id uuid.UUID, opts *LoadOptions) (*Aggregate[S], error) {
 	if id == uuid.Nil {
 		return nil, LoadError{Err: errors.New("aggregate ID is nil")}
 	} else if opts == nil {
@@ -89,7 +113,7 @@ func (s *EventSourcedStore[E]) Load(ctx context.Context, id uuid.UUID, opts *Loa
 }
 
 // Hydrate hydrates an aggregate by reading and applying events from the event store.
-func (s *EventSourcedStore[E]) Hydrate(ctx context.Context, aggregate *Aggregate[E], opts *HydrateOptions) error {
+func (s *EventSourcedStore[S]) Hydrate(ctx context.Context, aggregate *Aggregate[S], opts *HydrateOptions) error {
 	if opts == nil {
 		opts = &HydrateOptions{}
 	}
@@ -177,14 +201,16 @@ func (s *EventSourcedStore[E]) Hydrate(ctx context.Context, aggregate *Aggregate
 }
 
 // Save saves an aggregate by appending its unsaved events to the event store.
-func (s *EventSourcedStore[E]) Save(ctx context.Context, aggregate *Aggregate[E], opts *SaveOptions) error {
+// An error that carries ErrEventsAppended means the events were appended but
+// not applied to the in-memory aggregate.
+func (s *EventSourcedStore[S]) Save(ctx context.Context, aggregate *Aggregate[S], opts *SaveOptions) error {
 	if aggregate == nil {
 		return SaveError{Err: ErrNilAggregate}
 	} else if s.eventWriter == nil {
 		return SaveError{AggregateID: aggregate.ID(), Err: errors.New("event store has no event stream writer")}
 	}
 
-	unsavedEvents := aggregate.state.UnsavedEvents()
+	unsavedEvents := aggregate.unsavedEvents
 	if len(unsavedEvents) == 0 {
 		if aggregate.Version() == 0 {
 			return SaveError{AggregateID: aggregate.ID(), Err: errors.New("new aggregate has no events to save")}
@@ -199,7 +225,7 @@ func (s *EventSourcedStore[E]) Save(ctx context.Context, aggregate *Aggregate[E]
 	events := make([]*eventstore.WritableEvent, len(unsavedEvents))
 
 	for i, unsavedEvent := range unsavedEvents {
-		data, err := s.entityEventMarshaler.MarshalEntityEvent(unsavedEvent.EntityEvent)
+		data, err := s.domainEventCodec.MarshalDomainEvent(unsavedEvent.DomainEvent)
 		if err != nil {
 			return SaveError{AggregateID: aggregate.ID(), Operation: "marshaling event data", Err: err}
 		}
@@ -220,10 +246,10 @@ func (s *EventSourcedStore[E]) Save(ctx context.Context, aggregate *Aggregate[E]
 	// queue the events for application
 	for i, unsavedEvent := range unsavedEvents {
 		unsavedEvent.Version = aggregate.Version() + int64(i) + 1
-		aggregate.state.WillApply(unsavedEvent)
+		aggregate.willApply(unsavedEvent)
 	}
 
-	aggregate.state.ClearUnsavedEvents()
+	aggregate.clearUnsavedEvents()
 
 	if opts == nil {
 		opts = &SaveOptions{}
@@ -235,45 +261,50 @@ func (s *EventSourcedStore[E]) Save(ctx context.Context, aggregate *Aggregate[E]
 
 	// apply the events to the aggregate
 	for {
-		if err := aggregate.state.ApplyNext(ctx); errors.Is(err, ErrNoUnappliedEvents) {
+		if err := aggregate.applyNext(); errors.Is(err, ErrNoUnappliedEvents) {
 			return nil
 		} else if err != nil {
-			return SaveError{AggregateID: aggregate.ID(), Operation: "applying aggregate event", Err: err}
+			// The append above succeeded, so the events are already facts in the store.
+			return SaveError{
+				AggregateID: aggregate.ID(),
+				Operation:   "applying aggregate event",
+				Err:         fmt.Errorf("%w: %w", ErrEventsAppended, err),
+			}
 		}
 	}
 }
 
-// Use registers entity event prototypes with the store.
+// Use registers domain event prototypes with the store.
 //
 // A prototype's New() method may return either a pointer to the event type or a
 // value of the event type. For value-returning prototypes, Use inspects the
 // returned type once at registration time and wraps New so that subsequent
-// calls allocate an addressable pointer instance; this lets the marshaler
+// calls allocate an addressable pointer instance; this lets the codec
 // unmarshal into the event without per-hydrate reflection.
-func (s *EventSourcedStore[E]) Use(eventPrototypes ...estoria.EntityEvent[E]) error {
+func (s *EventSourcedStore[S]) Use(eventPrototypes ...estoria.DomainEvent[S]) error {
 	for _, prototype := range eventPrototypes {
-		if _, registered := s.entityEventPrototypes[prototype.EventType()]; registered {
+		if _, registered := s.domainEventPrototypes[prototype.EventType()]; registered {
 			return InitializeError{
-				Operation: "registering entity event prototype",
+				Operation: "registering domain event prototype",
 				Err:       errors.New("duplicate event type " + prototype.EventType()),
 			}
 		}
 
-		s.entityEventPrototypes[prototype.EventType()] = pointerConstructor(prototype.New)
+		s.domainEventPrototypes[prototype.EventType()] = pointerConstructor(prototype.New)
 	}
 
 	return nil
 }
 
-// pointerConstructor returns a constructor that always yields an EntityEvent[E]
+// pointerConstructor returns a constructor that always yields a DomainEvent[S]
 // whose dynamic type is a pointer, so json.Unmarshal can write into it. If
 // newFn already returns a pointer, it is used directly with no overhead.
 // Otherwise the underlying type is captured once and each call invokes newFn
 // (preserving any defaults the user set) and copies the result into a fresh
 // addressable instance, returning the pointer.
-func pointerConstructor[E estoria.Entity](newFn func() estoria.EntityEvent[E]) func() estoria.EntityEvent[E] {
+func pointerConstructor[S any](newFn func() estoria.DomainEvent[S]) func() estoria.DomainEvent[S] {
 	sample := newFn()
-	// A nil-returning New() violates the EntityEvent contract, but the
+	// A nil-returning New() violates the DomainEvent contract, but the
 	// hydration path already surfaces this with a clean error. Returning
 	// newFn directly preserves that behavior instead of letting reflect.New(nil)
 	// panic in the value-wrapping closure below.
@@ -286,56 +317,56 @@ func pointerConstructor[E estoria.Entity](newFn func() estoria.EntityEvent[E]) f
 	}
 
 	t := reflect.TypeOf(sample)
-	return func() estoria.EntityEvent[E] {
+	return func() estoria.DomainEvent[S] {
 		ptr := reflect.New(t)
 		ptr.Elem().Set(reflect.ValueOf(newFn()))
-		ev, ok := ptr.Interface().(estoria.EntityEvent[E])
+		ev, ok := ptr.Interface().(estoria.DomainEvent[S])
 		if !ok {
-			// Unreachable: *T satisfies EntityEvent[E] whenever T does (Go's method-set
+			// Unreachable: *T satisfies DomainEvent[S] whenever T does (Go's method-set
 			// rules guarantee *T's method set is a superset of T's), and T satisfies it
 			// by virtue of newFn's return type.
-			panic(fmt.Sprintf("pointerConstructor: *%s does not satisfy EntityEvent[E]", t.Name()))
+			panic(fmt.Sprintf("pointerConstructor: *%s does not satisfy DomainEvent[S]", t.Name()))
 		}
 		return ev
 	}
 }
 
-// Returns a projection.EventHandlerFunc that decodes and applies an entity event to an aggregate.
-func (s *EventSourcedStore[E]) eventHandlerForAggregate(aggregate *Aggregate[E]) projection.EventHandlerFunc {
-	return projection.EventHandlerFunc(func(ctx context.Context, event *eventstore.Event) error {
+// Returns a projection.EventHandlerFunc that decodes and applies a domain event to an aggregate.
+func (s *EventSourcedStore[S]) eventHandlerForAggregate(aggregate *Aggregate[S]) projection.EventHandlerFunc {
+	return projection.EventHandlerFunc(func(_ context.Context, event *eventstore.Event) error {
 		if event == nil {
 			return NewHydrateError(aggregate.ID(), "event handler", errors.New("received nil event in event handler"))
 		}
 
 		eventType := event.ID.Type
-		newEvent, ok := s.entityEventPrototypes[eventType]
+		newEvent, ok := s.domainEventPrototypes[eventType]
 		if !ok || newEvent == nil {
-			return NewHydrateError(aggregate.ID(), "obtaining entity prototype",
+			return NewHydrateError(aggregate.ID(), "obtaining domain event prototype",
 				fmt.Errorf("no prototype registered for event type '%s'", eventType),
 			)
 		}
 
-		entityEvent := newEvent()
-		if entityEvent == nil {
-			return NewHydrateError(aggregate.ID(), "creating entity event instance",
+		domainEvent := newEvent()
+		if domainEvent == nil {
+			return NewHydrateError(aggregate.ID(), "creating domain event instance",
 				fmt.Errorf("prototype.New() returned nil for event type '%s'", eventType),
 			)
 		}
 
-		if err := s.entityEventMarshaler.UnmarshalEntityEvent(event.Data, entityEvent); err != nil {
+		if err := s.domainEventCodec.UnmarshalDomainEvent(event.Data, domainEvent); err != nil {
 			return NewHydrateError(aggregate.ID(), "unmarshaling event data",
 				fmt.Errorf("failed to unmarshal event data for event type '%s': %w", eventType, err),
 			)
 		}
 
 		// enqueue and apply the event immediately
-		aggregate.state.WillApply(&AggregateEvent[E, estoria.EntityEvent[E]]{
+		aggregate.willApply(&Event[S]{
 			ID:          event.ID,
 			Version:     event.StreamVersion,
 			Timestamp:   event.Timestamp,
-			EntityEvent: entityEvent,
+			DomainEvent: domainEvent,
 		})
-		if err := aggregate.state.ApplyNext(ctx); err != nil {
+		if err := aggregate.applyNext(); err != nil {
 			return NewHydrateError(aggregate.ID(), "applying aggregate event",
 				fmt.Errorf("failed to apply event type '%s': %w", eventType, err),
 			)
@@ -346,35 +377,35 @@ func (s *EventSourcedStore[E]) eventHandlerForAggregate(aggregate *Aggregate[E])
 }
 
 // An EventSourcedStoreOption is a functional option for configuring an EventSourcedStore.
-type EventSourcedStoreOption[E estoria.Entity] func(*EventSourcedStore[E]) error
+type EventSourcedStoreOption[S any] func(*EventSourcedStore[S]) error
 
-// WithEventTypes registers entity event prototypes with the store.
-func WithEventTypes[E estoria.Entity](eventPrototypes ...estoria.EntityEvent[E]) EventSourcedStoreOption[E] {
-	return func(s *EventSourcedStore[E]) error {
+// WithEventTypes registers domain event prototypes with the store.
+func WithEventTypes[S any](eventPrototypes ...estoria.DomainEvent[S]) EventSourcedStoreOption[S] {
+	return func(s *EventSourcedStore[S]) error {
 		return s.Use(eventPrototypes...)
 	}
 }
 
 // WithEventStreamReader sets the event stream reader for the store.
-func WithEventStreamReader[E estoria.Entity](reader eventstore.StreamReader) EventSourcedStoreOption[E] {
-	return func(s *EventSourcedStore[E]) error {
+func WithEventStreamReader[S any](reader eventstore.StreamReader) EventSourcedStoreOption[S] {
+	return func(s *EventSourcedStore[S]) error {
 		s.eventReader = reader
 		return nil
 	}
 }
 
 // WithEventStreamWriter sets the event stream writer for the store.
-func WithEventStreamWriter[E estoria.Entity](writer eventstore.StreamWriter) EventSourcedStoreOption[E] {
-	return func(s *EventSourcedStore[E]) error {
+func WithEventStreamWriter[S any](writer eventstore.StreamWriter) EventSourcedStoreOption[S] {
+	return func(s *EventSourcedStore[S]) error {
 		s.eventWriter = writer
 		return nil
 	}
 }
 
-// WithEntityEventMarshaler sets the entity event marshaler for the store.
-func WithEntityEventMarshaler[E estoria.Entity](marshaler estoria.EntityEventMarshaler[E]) EventSourcedStoreOption[E] {
-	return func(s *EventSourcedStore[E]) error {
-		s.entityEventMarshaler = marshaler
+// WithDomainEventCodec sets the domain event codec for the store.
+func WithDomainEventCodec[S any](codec estoria.DomainEventCodec[S]) EventSourcedStoreOption[S] {
+	return func(s *EventSourcedStore[S]) error {
+		s.domainEventCodec = codec
 		return nil
 	}
 }

@@ -8,6 +8,9 @@ name: Release Info
 # check reflects the current state, not just the state at open time.
 on:
   pull_request:
+    # Only PRs targeting main carry release semantics; PRs into integration
+    # branches release nothing and need no label.
+    branches: [main]
     types:
       - opened
       - edited

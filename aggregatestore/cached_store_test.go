@@ -6,21 +6,20 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/go-estoria/estoria"
 	"github.com/go-estoria/estoria/aggregatestore"
 	"github.com/go-estoria/estoria/typeid"
 	"github.com/gofrs/uuid/v5"
 )
 
 // mockCache is a mock implementation of aggregatestore.AggregateCache.
-type mockCache[E estoria.Entity] struct {
-	GetAggregateFn func(context.Context, typeid.ID) (*aggregatestore.Aggregate[E], error)
-	PutAggregateFn func(context.Context, *aggregatestore.Aggregate[E]) error
+type mockCache[E any] struct {
+	GetAggregateFn func(context.Context, typeid.ID) (*aggregatestore.CachedAggregate[E], error)
+	PutAggregateFn func(context.Context, typeid.ID, aggregatestore.CachedAggregate[E]) error
 }
 
 var _ aggregatestore.AggregateCache[mockEntity] = (*mockCache[mockEntity])(nil)
 
-func (c *mockCache[E]) GetAggregate(ctx context.Context, id typeid.ID) (*aggregatestore.Aggregate[E], error) {
+func (c *mockCache[E]) GetAggregate(ctx context.Context, id typeid.ID) (*aggregatestore.CachedAggregate[E], error) {
 	if c.GetAggregateFn != nil {
 		return c.GetAggregateFn(ctx, id)
 	}
@@ -28,12 +27,12 @@ func (c *mockCache[E]) GetAggregate(ctx context.Context, id typeid.ID) (*aggrega
 	return nil, fmt.Errorf("unexpected call: GetAggregate(id=%s)", id)
 }
 
-func (c *mockCache[E]) PutAggregate(ctx context.Context, aggregate *aggregatestore.Aggregate[E]) error {
+func (c *mockCache[E]) PutAggregate(ctx context.Context, id typeid.ID, entry aggregatestore.CachedAggregate[E]) error {
 	if c.PutAggregateFn != nil {
-		return c.PutAggregateFn(ctx, aggregate)
+		return c.PutAggregateFn(ctx, id, entry)
 	}
 
-	return fmt.Errorf("unexpected call: PutAggregate(aggregate=%v)", nil)
+	return fmt.Errorf("unexpected call: PutAggregate(id=%s, entry=%v)", id, entry)
 }
 
 func TestNewCachedStore(t *testing.T) {
@@ -92,19 +91,19 @@ func TestCachedStore_Load(t *testing.T) {
 			haveInner: func() aggregatestore.Store[mockEntity] {
 				return &mockAggregateStore[mockEntity]{
 					NewFn: func(id uuid.UUID) *aggregatestore.Aggregate[mockEntity] {
-						return aggregatestore.NewAggregate(newMockEntity(id), 0)
+						return newMockAggregate(id, 0)
 					},
 				}
 			},
 			haveCache: func() aggregatestore.AggregateCache[mockEntity] {
 				return &mockCache[mockEntity]{
-					GetAggregateFn: func(_ context.Context, id typeid.ID) (*aggregatestore.Aggregate[mockEntity], error) {
-						return aggregatestore.NewAggregate(newMockEntity(id.UUID), 42), nil
+					GetAggregateFn: func(_ context.Context, id typeid.ID) (*aggregatestore.CachedAggregate[mockEntity], error) {
+						return &aggregatestore.CachedAggregate[mockEntity]{State: newMockEntity(id.UUID), Version: 42}, nil
 					},
 				}
 			},
 			wantAggregate: func() *aggregatestore.Aggregate[mockEntity] {
-				return aggregatestore.NewAggregate(newMockEntity(aggregateID), 42)
+				return newMockAggregate(aggregateID, 42)
 			}(),
 		},
 		{
@@ -112,22 +111,22 @@ func TestCachedStore_Load(t *testing.T) {
 			haveInner: func() aggregatestore.Store[mockEntity] {
 				return &mockAggregateStore[mockEntity]{
 					NewFn: func(id uuid.UUID) *aggregatestore.Aggregate[mockEntity] {
-						return aggregatestore.NewAggregate(newMockEntity(id), 0)
+						return newMockAggregate(id, 0)
 					},
 					LoadFn: func(_ context.Context, id uuid.UUID, _ *aggregatestore.LoadOptions) (*aggregatestore.Aggregate[mockEntity], error) {
-						return aggregatestore.NewAggregate(newMockEntity(id), 42), nil
+						return newMockAggregate(id, 42), nil
 					},
 				}
 			},
 			haveCache: func() aggregatestore.AggregateCache[mockEntity] {
 				return &mockCache[mockEntity]{
-					GetAggregateFn: func(context.Context, typeid.ID) (*aggregatestore.Aggregate[mockEntity], error) {
+					GetAggregateFn: func(context.Context, typeid.ID) (*aggregatestore.CachedAggregate[mockEntity], error) {
 						return nil, nil
 					},
 				}
 			},
 			wantAggregate: func() *aggregatestore.Aggregate[mockEntity] {
-				return aggregatestore.NewAggregate(newMockEntity(aggregateID), 42)
+				return newMockAggregate(aggregateID, 42)
 			}(),
 		},
 		{
@@ -135,22 +134,22 @@ func TestCachedStore_Load(t *testing.T) {
 			haveInner: func() aggregatestore.Store[mockEntity] {
 				return &mockAggregateStore[mockEntity]{
 					NewFn: func(id uuid.UUID) *aggregatestore.Aggregate[mockEntity] {
-						return aggregatestore.NewAggregate(newMockEntity(id), 0)
+						return newMockAggregate(id, 0)
 					},
 					LoadFn: func(_ context.Context, id uuid.UUID, _ *aggregatestore.LoadOptions) (*aggregatestore.Aggregate[mockEntity], error) {
-						return aggregatestore.NewAggregate(newMockEntity(id), 42), nil
+						return newMockAggregate(id, 42), nil
 					},
 				}
 			},
 			haveCache: func() aggregatestore.AggregateCache[mockEntity] {
 				return &mockCache[mockEntity]{
-					GetAggregateFn: func(context.Context, typeid.ID) (*aggregatestore.Aggregate[mockEntity], error) {
+					GetAggregateFn: func(context.Context, typeid.ID) (*aggregatestore.CachedAggregate[mockEntity], error) {
 						return nil, errors.New("mock error")
 					},
 				}
 			},
 			wantAggregate: func() *aggregatestore.Aggregate[mockEntity] {
-				return aggregatestore.NewAggregate(newMockEntity(aggregateID), 42)
+				return newMockAggregate(aggregateID, 42)
 			}(),
 		},
 		{
@@ -158,7 +157,7 @@ func TestCachedStore_Load(t *testing.T) {
 			haveInner: func() aggregatestore.Store[mockEntity] {
 				return &mockAggregateStore[mockEntity]{
 					NewFn: func(id uuid.UUID) *aggregatestore.Aggregate[mockEntity] {
-						return aggregatestore.NewAggregate(newMockEntity(id), 0)
+						return newMockAggregate(id, 0)
 					},
 					LoadFn: func(context.Context, uuid.UUID, *aggregatestore.LoadOptions) (*aggregatestore.Aggregate[mockEntity], error) {
 						return nil, errors.New("mock error")
@@ -167,7 +166,7 @@ func TestCachedStore_Load(t *testing.T) {
 			},
 			haveCache: func() aggregatestore.AggregateCache[mockEntity] {
 				return &mockCache[mockEntity]{
-					GetAggregateFn: func(context.Context, typeid.ID) (*aggregatestore.Aggregate[mockEntity], error) {
+					GetAggregateFn: func(context.Context, typeid.ID) (*aggregatestore.CachedAggregate[mockEntity], error) {
 						return nil, nil
 					},
 				}
@@ -231,7 +230,7 @@ func TestCachedStore_Hydrate(t *testing.T) {
 			haveInner: func() aggregatestore.Store[mockEntity] {
 				return &mockAggregateStore[mockEntity]{
 					HydrateFn: func(_ context.Context, aggregate *aggregatestore.Aggregate[mockEntity], _ *aggregatestore.HydrateOptions) error {
-						aggregate.State().SetEntityAtVersion(newMockEntity(aggregateID), 42)
+						aggregate.TestOnlySetStateAtVersion(newMockEntity(aggregateID), 42)
 						return nil
 					},
 				}
@@ -240,10 +239,10 @@ func TestCachedStore_Hydrate(t *testing.T) {
 				return &mockCache[mockEntity]{}
 			},
 			haveAggregate: func() *aggregatestore.Aggregate[mockEntity] {
-				return aggregatestore.NewAggregate(newMockEntity(aggregateID), 0)
+				return newMockAggregate(aggregateID, 0)
 			},
 			wantAggregate: func() *aggregatestore.Aggregate[mockEntity] {
-				return aggregatestore.NewAggregate(newMockEntity(aggregateID), 42)
+				return newMockAggregate(aggregateID, 42)
 			}(),
 		},
 		{
@@ -322,26 +321,26 @@ func TestCachedStore_Save(t *testing.T) {
 			haveInner: func() aggregatestore.Store[mockEntity] {
 				return &mockAggregateStore[mockEntity]{
 					SaveFn: func(_ context.Context, aggregate *aggregatestore.Aggregate[mockEntity], _ *aggregatestore.SaveOptions) error {
-						aggregate.State().SetEntityAtVersion(newMockEntity(aggregateID), 42)
+						aggregate.TestOnlySetStateAtVersion(newMockEntity(aggregateID), 42)
 						return nil
 					},
 				}
 			},
 			haveCache: func() aggregatestore.AggregateCache[mockEntity] {
 				return &mockCache[mockEntity]{
-					PutAggregateFn: func(context.Context, *aggregatestore.Aggregate[mockEntity]) error {
+					PutAggregateFn: func(context.Context, typeid.ID, aggregatestore.CachedAggregate[mockEntity]) error {
 						return nil
 					},
 				}
 			},
 			haveAggregate: func() *aggregatestore.Aggregate[mockEntity] {
-				return aggregatestore.NewAggregate(newMockEntity(aggregateID), 0)
+				return newMockAggregate(aggregateID, 0)
 			},
 			wantAggregate: func() *aggregatestore.Aggregate[mockEntity] {
-				return aggregatestore.NewAggregate(newMockEntity(aggregateID), 42)
+				return newMockAggregate(aggregateID, 42)
 			}(),
 			wantCachedAggregate: func() *aggregatestore.Aggregate[mockEntity] {
-				return aggregatestore.NewAggregate(newMockEntity(aggregateID), 42)
+				return newMockAggregate(aggregateID, 42)
 			}(),
 		},
 		{
@@ -357,7 +356,7 @@ func TestCachedStore_Save(t *testing.T) {
 				return &mockCache[mockEntity]{}
 			},
 			haveAggregate: func() *aggregatestore.Aggregate[mockEntity] {
-				return aggregatestore.NewAggregate(newMockEntity(aggregateID), 42)
+				return newMockAggregate(aggregateID, 42)
 			},
 			wantErr: errors.New("saving to inner aggregate store: mock error"),
 		},
@@ -366,23 +365,23 @@ func TestCachedStore_Save(t *testing.T) {
 			haveInner: func() aggregatestore.Store[mockEntity] {
 				return &mockAggregateStore[mockEntity]{
 					SaveFn: func(_ context.Context, aggregate *aggregatestore.Aggregate[mockEntity], _ *aggregatestore.SaveOptions) error {
-						aggregate.State().SetEntityAtVersion(newMockEntity(aggregateID), 42)
+						aggregate.TestOnlySetStateAtVersion(newMockEntity(aggregateID), 42)
 						return nil
 					},
 				}
 			},
 			haveCache: func() aggregatestore.AggregateCache[mockEntity] {
 				return &mockCache[mockEntity]{
-					PutAggregateFn: func(context.Context, *aggregatestore.Aggregate[mockEntity]) error {
+					PutAggregateFn: func(context.Context, typeid.ID, aggregatestore.CachedAggregate[mockEntity]) error {
 						return errors.New("mock error")
 					},
 				}
 			},
 			haveAggregate: func() *aggregatestore.Aggregate[mockEntity] {
-				return aggregatestore.NewAggregate(newMockEntity(aggregateID), 0)
+				return newMockAggregate(aggregateID, 0)
 			},
 			wantAggregate: func() *aggregatestore.Aggregate[mockEntity] {
-				return aggregatestore.NewAggregate(newMockEntity(aggregateID), 42)
+				return newMockAggregate(aggregateID, 42)
 			}(),
 		},
 	} {
@@ -459,22 +458,22 @@ func TestCachedStore_Load_BypassesCacheForVersionedLoad(t *testing.T) {
 
 	inner := &mockAggregateStore[mockEntity]{
 		NewFn: func(id uuid.UUID) *aggregatestore.Aggregate[mockEntity] {
-			return aggregatestore.NewAggregate(newMockEntity(id), 0)
+			return newMockAggregate(id, 0)
 		},
 		LoadFn: func(_ context.Context, id uuid.UUID, opts *aggregatestore.LoadOptions) (*aggregatestore.Aggregate[mockEntity], error) {
 			if opts == nil || opts.ToVersion == 0 {
-				return aggregatestore.NewAggregate(newMockEntity(id), 10), nil
+				return newMockAggregate(id, 10), nil
 			}
-			return aggregatestore.NewAggregate(newMockEntity(id), opts.ToVersion), nil
+			return newMockAggregate(id, opts.ToVersion), nil
 		},
 	}
 
 	cache := &mockCache[mockEntity]{
-		GetAggregateFn: func(_ context.Context, id typeid.ID) (*aggregatestore.Aggregate[mockEntity], error) {
+		GetAggregateFn: func(_ context.Context, id typeid.ID) (*aggregatestore.CachedAggregate[mockEntity], error) {
 			cacheReads++
-			return aggregatestore.NewAggregate(newMockEntity(id.UUID), 10), nil
+			return &aggregatestore.CachedAggregate[mockEntity]{State: newMockEntity(id.UUID), Version: 10}, nil
 		},
-		PutAggregateFn: func(context.Context, *aggregatestore.Aggregate[mockEntity]) error {
+		PutAggregateFn: func(context.Context, typeid.ID, aggregatestore.CachedAggregate[mockEntity]) error {
 			cacheWrites++
 			return nil
 		},
