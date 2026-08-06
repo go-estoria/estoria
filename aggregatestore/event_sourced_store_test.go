@@ -1600,7 +1600,7 @@ func TestEventSourcedStore_SaveAggregate(t *testing.T) {
 				)
 				return agg
 			},
-			wantErr: errors.New("applying aggregate event: event version mismatch: expected 1, got 99"),
+			wantErr: errors.New("applying aggregate event: events appended but not applied to the aggregate: event version mismatch: expected 1, got 99"),
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
