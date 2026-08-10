@@ -23,13 +23,6 @@ func (id ID) String() string {
 
 // ValidateTypeName reports whether name is a valid type name for an ID: it
 // must be non-empty and must neither start nor end with an underscore.
-//
-// Interior underscores are fine. The UUID half of the "type_uuid" string form
-// has a fixed 36-character canonical shape, so the boundary between type and
-// UUID is always the underscore 37 characters from the end, no matter how many
-// underscores the type contains. The aggregate store enforces this rule on
-// aggregate and event type names at construction, and Parse enforces it on the
-// way back in, so the three stay consistent.
 func ValidateTypeName(name string) error {
 	switch {
 	case name == "":
@@ -47,13 +40,6 @@ const minIDLength = 1 + 1 + 36
 
 // Parse parses the string representation of an ID in the format "type_uuid",
 // so that IDs can round-trip through paths, query strings, and logs.
-//
-// Parse accepts exactly what ID.String produces for a valid ID, and nothing
-// else. The ID is split from the tail: the UUID must be in the canonical
-// hyphenated form String produces, the character before it must be the
-// underscore separator, and everything in front is the type name, which must
-// satisfy ValidateTypeName. Types may therefore contain interior underscores
-// without ambiguity.
 func Parse(s string) (ID, error) {
 	if len(s) < minIDLength {
 		return ID{}, fmt.Errorf("invalid ID %q: too short for the \"type_uuid\" form", s)

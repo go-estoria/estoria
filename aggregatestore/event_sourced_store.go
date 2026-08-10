@@ -43,9 +43,6 @@ func New[S any](
 	stateFactory estoria.StateFactory[S],
 	opts ...EventSourcedStoreOption[S],
 ) (*EventSourcedStore[S], error) {
-	// The type is half of every aggregate ID the store composes, so it must
-	// satisfy the "type_uuid" grammar; interior underscores are fine, since the
-	// UUID half's fixed shape keeps the form unambiguous.
 	if err := typeid.ValidateTypeName(aggregateType); err != nil {
 		return nil, InitializeError{Err: fmt.Errorf("invalid aggregate type: %w", err)}
 	}
@@ -323,8 +320,6 @@ func (s *EventSourcedStore[S]) Use(eventPrototypes ...estoria.DomainEvent[S]) er
 	for _, prototype := range eventPrototypes {
 		eventType := prototype.EventType()
 
-		// The same grammar New enforces on the aggregate type: event types
-		// become the type half of store-minted event IDs.
 		if err := typeid.ValidateTypeName(eventType); err != nil {
 			return InitializeError{
 				Operation: op,
