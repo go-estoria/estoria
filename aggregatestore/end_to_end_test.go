@@ -110,7 +110,7 @@ func newComposedStore(
 		t.Fatalf("creating event sourced store: %v", err)
 	}
 
-	snapshotting, err := aggregatestore.NewSnapshottingStore[account](eventSourced, snapshotStore,
+	snapshotting, err := aggregatestore.NewSnapshottingStore(eventSourced, snapshotStore,
 		snapshotstore.EventCountSnapshotPolicy{N: 3})
 	if err != nil {
 		t.Fatalf("creating snapshotting store: %v", err)
@@ -121,7 +121,7 @@ func newComposedStore(
 		t.Fatalf("creating cached store: %v", err)
 	}
 
-	hookable, err := aggregatestore.NewHookableStore[account](cached)
+	hookable, err := aggregatestore.NewHookableStore(cached)
 	if err != nil {
 		t.Fatalf("creating hookable store: %v", err)
 	}
