@@ -272,13 +272,19 @@ func (s *EventSourcedStore[S]) Save(ctx context.Context, aggregate *Aggregate[S]
 		}
 	}
 
-	// Queue the events for application, carrying the identity, version, and
-	// timestamp the store assigned: the returned events are the events of record.
+	// Queue the events for application. Identity, version, and timestamp come
+	// from the store's report — the returned events are the events of record —
+	// while the domain event and metadata are the ones that were appended; the
+	// store returns payload bytes, and re-decoding facts already held decoded
+	// would only add a failure path.
 	for i, unsavedEvent := range unsavedEvents {
-		unsavedEvent.ID = written[i].ID
-		unsavedEvent.Version = written[i].StreamVersion
-		unsavedEvent.Timestamp = written[i].Timestamp
-		aggregate.willApply(unsavedEvent)
+		aggregate.willApply(&Event[S]{
+			ID:          written[i].ID,
+			Version:     written[i].StreamVersion,
+			Timestamp:   written[i].Timestamp,
+			DomainEvent: unsavedEvent.DomainEvent,
+			Metadata:    unsavedEvent.Metadata,
+		})
 	}
 
 	aggregate.clearUnsavedEvents()
