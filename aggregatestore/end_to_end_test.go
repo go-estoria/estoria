@@ -149,7 +149,7 @@ func newComposedStore(
 func TestEndToEnd_FullComposition(t *testing.T) {
 	t.Parallel()
 
-	ctx := context.Background()
+	ctx := t.Context()
 
 	eventStore, err := memory.NewEventStore()
 	if err != nil {
