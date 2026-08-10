@@ -532,7 +532,7 @@ func readStream(t *testing.T, store eventstore.Store, streamID typeid.ID, opts e
 
 	t.Cleanup(func() { _ = iter.Close(context.WithoutCancel(t.Context())) })
 
-	events, err := eventstore.ReadAll(t.Context(), iter)
+	events, err := eventstore.Collect(t.Context(), iter)
 	if err != nil {
 		t.Fatalf("reading events: %v", err)
 	}

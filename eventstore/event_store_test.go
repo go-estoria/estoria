@@ -28,13 +28,13 @@ func TestVersionPtr(t *testing.T) {
 	}
 }
 
-func TestReadAll(t *testing.T) {
+func TestCollect(t *testing.T) {
 	t.Parallel()
 
 	t.Run("reads every event up to the end of the stream", func(t *testing.T) {
 		t.Parallel()
 
-		events, err := eventstore.ReadAll(t.Context(), newIterator(3, nil))
+		events, err := eventstore.Collect(t.Context(), newIterator(3, nil))
 		if err != nil {
 			t.Fatalf("reading events: %v", err)
 		}
@@ -53,7 +53,7 @@ func TestReadAll(t *testing.T) {
 	t.Run("returns an empty slice for a stream with no events", func(t *testing.T) {
 		t.Parallel()
 
-		events, err := eventstore.ReadAll(t.Context(), newIterator(0, nil))
+		events, err := eventstore.Collect(t.Context(), newIterator(0, nil))
 		if err != nil {
 			t.Fatalf("reading events: %v", err)
 		}
@@ -74,7 +74,7 @@ func TestReadAll(t *testing.T) {
 
 		wantErr := errors.New("backend went away")
 
-		events, err := eventstore.ReadAll(t.Context(), newIterator(2, wantErr))
+		events, err := eventstore.Collect(t.Context(), newIterator(2, wantErr))
 		if !errors.Is(err, wantErr) {
 			t.Fatalf("want the underlying error to be wrapped, got %v", err)
 		}

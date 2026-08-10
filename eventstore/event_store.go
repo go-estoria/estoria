@@ -114,6 +114,48 @@ type AppendStreamOptions struct {
 	StreamMustNotExist bool
 }
 
+// A GlobalReader reads events across all of a store's streams in the store's
+// global order.
+//
+// GlobalReader is optional and deliberately not part of Store: a backend
+// implements it only when it has a single ordering authority for everything it
+// stores, and one without such an authority is not forced to fake one. Callers
+// discover support with a type assertion.
+//
+// Global reads are forward-only: they exist so read models and projections can
+// consume history in order and resume from a position.
+type GlobalReader interface {
+	// ReadAll creates an iterator over events from all streams, in
+	// ascending global order.
+	//
+	// Every event an implementation yields must carry a non-nil GlobalPosition,
+	// and positions must be strictly increasing across the read — with gaps
+	// allowed, since backends may consume positions they never commit. The
+	// positions yielded here must be the same ones per-stream reads report for
+	// the same events. eventstore/storetest enforces all of this.
+	//
+	// A read with nothing to yield — an empty store, or a position at or past
+	// the newest event — returns a valid iterator that immediately reports
+	// ErrEndOfEventStream. ErrStreamNotFound has no place in a global read:
+	// it answers whether an addressed stream exists, and a global read
+	// addresses none.
+	ReadAll(ctx context.Context, opts ReadAllOptions) (StreamIterator, error)
+}
+
+// ReadAllOptions are options for reading events across all streams.
+type ReadAllOptions struct {
+	// AfterPosition specifies the exclusive global position after which to
+	// read: only events with GlobalPosition > AfterPosition are returned.
+	//
+	// Default: 0 (read from the beginning)
+	AfterPosition int64
+
+	// Count is the number of events to read.
+	//
+	// Default: 0 (read all events)
+	Count int64
+}
+
 // VersionPtr returns a pointer to the given version value.
 // This is a convenience function for constructing AppendStreamOptions
 // with a specific expected version.
@@ -258,9 +300,10 @@ var ErrStreamIteratorClosed = errors.New("stream iterator closed")
 // ErrEndOfEventStream is returned by a stream iterator when there are no more events in the stream.
 var ErrEndOfEventStream = errors.New("end of event stream")
 
-// ReadAll reads all events from the given stream iterator until it reaches the end of the stream
-// or encounters an error. It returns a slice of events and any error encountered.
-func ReadAll(ctx context.Context, iter StreamIterator) ([]*Event, error) {
+// Collect reads the given stream iterator to the end of the stream, collecting
+// the events into a slice. On an iteration error it returns the events read so far
+// alongside the error.
+func Collect(ctx context.Context, iter StreamIterator) ([]*Event, error) {
 	events := []*Event{}
 	for {
 		event, err := iter.Next(ctx)
