@@ -35,6 +35,68 @@ func TestNew(t *testing.T) {
 	}
 }
 
+// TestParse_RoundTrip pins Parse as the inverse of String: any valid ID the
+// library mints must survive the round trip through its string form, including
+// one carrying the nil UUID, which String serializes like any other, and types
+// with interior underscores, which the tail-anchored split keeps unambiguous.
+func TestParse_RoundTrip(t *testing.T) {
+	t.Parallel()
+
+	for _, id := range []typeid.ID{
+		typeid.NewV4("user"),
+		typeid.NewV7("user"),
+		typeid.New("usersnapshot", uuid.Must(uuid.NewV4())),
+		typeid.New("user", uuid.Nil),
+		typeid.New("funds_deposited", uuid.Must(uuid.NewV4())),
+		typeid.New("user_account_v2", uuid.Must(uuid.NewV4())),
+	} {
+		parsed, err := typeid.Parse(id.String())
+		if err != nil {
+			t.Fatalf("parsing %q: %v", id.String(), err)
+		}
+
+		if parsed != id {
+			t.Errorf("want %v, got %v", id, parsed)
+		}
+	}
+}
+
+// TestParse_RejectsNonCanonicalIDs pins that Parse accepts exactly what String
+// produces and nothing else. The lenient UUID forms matter most: accepting a
+// string String never produces means a parsed ID no longer serializes back to
+// the input it came from, and two spellings address the same aggregate.
+func TestParse_RejectsNonCanonicalIDs(t *testing.T) {
+	t.Parallel()
+
+	for _, tt := range []struct {
+		name string
+		id   string
+	}{
+		{"empty string", ""},
+		{"no separator", "user"},
+		{"empty type", "_9791012c-cd5b-4795-9c54-6085975d599b"},
+		{"empty UUID", "user_"},
+		{"malformed UUID", "user_not-a-uuid"},
+		{"malformed 36-character UUID", "user_zzzzzzzz-zzzz-zzzz-zzzz-zzzzzzzzzzzz"},
+		{"bare UUID with no type", "9791012c-cd5b-4795-9c54-6085975d599b"},
+		{"no separator before the UUID", "user9791012c-cd5b-4795-9c54-6085975d599b"},
+		{"leading underscore in the type", "_user_9791012c-cd5b-4795-9c54-6085975d599b"},
+		{"trailing underscore in the type", "user__9791012c-cd5b-4795-9c54-6085975d599b"},
+		{"braced UUID", "user_{9791012c-cd5b-4795-9c54-6085975d599b}"},
+		{"URN UUID", "user_urn:uuid:9791012c-cd5b-4795-9c54-6085975d599b"},
+		{"hashless UUID", "user_9791012ccd5b47959c546085975d599b"},
+		{"uppercase UUID", "user_9791012C-CD5B-4795-9C54-6085975D599B"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			if parsed, err := typeid.Parse(tt.id); err == nil {
+				t.Errorf("want an error parsing %q, got %v", tt.id, parsed)
+			}
+		})
+	}
+}
+
 func TestNewV4(t *testing.T) {
 	t.Parallel()
 
