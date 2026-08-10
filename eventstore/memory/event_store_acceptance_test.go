@@ -23,6 +23,19 @@ func TestEventStore_AcceptanceTest(t *testing.T) {
 	})
 }
 
+func TestEventStore_StreamDeleterAcceptanceTest(t *testing.T) {
+	t.Parallel()
+
+	store, err := memory.NewEventStore()
+	if err != nil {
+		t.Fatalf("creating event store: %v", err)
+	}
+
+	storetest.RunStreamDeleterSuite(t, func(*testing.T) storetest.DeleterStore {
+		return store
+	})
+}
+
 // The global reader suite requires exclusive ownership of the store's history,
 // so unlike the suite above, every clause gets a fresh store.
 func TestEventStore_GlobalReaderAcceptanceTest(t *testing.T) {
