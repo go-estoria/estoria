@@ -21,3 +21,9 @@ func (a *Aggregate[S]) TestOnlyWillApply(event *Event[S]) {
 func (a *Aggregate[S]) TestOnlySetStateAtVersion(state S, version int64) {
 	a.setStateAtVersion(state, version)
 }
+
+// TestOnlyUnappliedEvents returns the events queued for application, as a save with
+// SkipApply leaves them, so tests can observe the identities a save copied onto them.
+func (a *Aggregate[S]) TestOnlyUnappliedEvents() []*Event[S] {
+	return a.unappliedEvents
+}

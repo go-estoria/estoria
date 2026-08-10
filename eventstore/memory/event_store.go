@@ -39,15 +39,15 @@ func NewEventStore(opts ...EventStoreOption) (*EventStore, error) {
 	return eventStore, nil
 }
 
-// AppendStream appends events to a stream.
+// AppendStream appends events to a stream and returns the written events.
 // ctx is accepted for interface compatibility but is not used by this implementation.
-func (s *EventStore) AppendStream(_ context.Context, streamID typeid.ID, events []*eventstore.WritableEvent, opts eventstore.AppendStreamOptions) error {
+func (s *EventStore) AppendStream(_ context.Context, streamID typeid.ID, events []*eventstore.WritableEvent, opts eventstore.AppendStreamOptions) ([]*eventstore.Event, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	// Validate mutually exclusive options
 	if opts.ExpectVersion != nil && opts.StreamMustNotExist {
-		return errors.New("ExpectVersion and StreamMustNotExist are mutually exclusive")
+		return nil, errors.New("ExpectVersion and StreamMustNotExist are mutually exclusive")
 	}
 
 	stream, ok := s.events[streamID.String()]
@@ -62,7 +62,7 @@ func (s *EventStore) AppendStream(_ context.Context, streamID typeid.ID, events 
 
 	// Check StreamMustNotExist
 	if opts.StreamMustNotExist && currentVersion > 0 {
-		return eventstore.StreamVersionMismatchError{
+		return nil, eventstore.StreamVersionMismatchError{
 			StreamID:        streamID,
 			ExpectedVersion: 0,
 			ActualVersion:   currentVersion,
@@ -71,7 +71,7 @@ func (s *EventStore) AppendStream(_ context.Context, streamID typeid.ID, events 
 
 	// Check ExpectVersion (nil means no check)
 	if opts.ExpectVersion != nil && *opts.ExpectVersion != currentVersion {
-		return eventstore.StreamVersionMismatchError{
+		return nil, eventstore.StreamVersionMismatchError{
 			StreamID:        streamID,
 			ExpectedVersion: *opts.ExpectVersion,
 			ActualVersion:   currentVersion,
@@ -79,6 +79,8 @@ func (s *EventStore) AppendStream(_ context.Context, streamID typeid.ID, events 
 	}
 
 	tx := [][]byte{}
+	written := make([]*eventstore.Event, 0, len(events))
+
 	for i, writableEvent := range events {
 		s.globalCounter++
 		globalPos := s.globalCounter
@@ -96,14 +98,25 @@ func (s *EventStore) AppendStream(_ context.Context, streamID typeid.ID, events 
 
 		data, err := json.Marshal(event)
 		if err != nil {
-			return eventstore.EventMarshalingError{StreamID: streamID, EventID: event.ID, Err: err}
+			return nil, eventstore.EventMarshalingError{StreamID: streamID, EventID: event.ID, Err: err}
+		}
+
+		// Return the decoded form rather than the struct above, so the returned
+		// event is byte-for-byte what a subsequent read yields after the store's
+		// deliberate wire round trip — same normalized timestamp, same converged
+		// nil-vs-empty maps.
+		readBack := &eventstore.Event{}
+		if err := json.Unmarshal(data, readBack); err != nil {
+			return nil, eventstore.EventUnmarshalingError{StreamID: streamID, EventID: event.ID, Err: err}
 		}
 
 		tx = append(tx, data)
+		written = append(written, readBack)
 	}
 
 	s.events[streamID.String()] = append(stream, tx...)
-	return nil
+
+	return written, nil
 }
 
 // startCursor returns the 0-based index into a stream of streamLen events at which a read

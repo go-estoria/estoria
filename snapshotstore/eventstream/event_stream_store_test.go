@@ -266,7 +266,7 @@ func TestStore_SkipsEventsWithoutSnapshotMetadata(t *testing.T) {
 
 	// A pre-v0.7.0 snapshot event: the whole envelope marshaled into the body, no metadata.
 	envelope := []byte(`{"AggregateID":{"Type":"mockentity","UUID":"` + aggregateID.UUID.String() + `"},"AggregateVersion":3,"Data":"eyJjb3VudCI6M30="}`)
-	if err := eventStore.AppendStream(ctx, snapshotStreamID, []*eventstore.WritableEvent{
+	if _, err := eventStore.AppendStream(ctx, snapshotStreamID, []*eventstore.WritableEvent{
 		{Type: "mockentitysnapshot", Data: envelope},
 	}, eventstore.AppendStreamOptions{}); err != nil {
 		t.Fatalf("appending old-format snapshot event: %v", err)

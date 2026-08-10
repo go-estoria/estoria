@@ -182,8 +182,8 @@ type mockStreamWriter struct {
 	appendStreamErr error
 }
 
-func (m mockStreamWriter) AppendStream(_ context.Context, _ typeid.ID, _ []*eventstore.WritableEvent, _ eventstore.AppendStreamOptions) error {
-	return m.appendStreamErr
+func (m mockStreamWriter) AppendStream(_ context.Context, _ typeid.ID, _ []*eventstore.WritableEvent, _ eventstore.AppendStreamOptions) ([]*eventstore.Event, error) {
+	return nil, m.appendStreamErr
 }
 
 type mockStreamIterator struct {
@@ -1669,7 +1669,7 @@ func TestEventSourcedStore_HydratesValueTypedEvent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error creating event store: %v", err)
 	}
-	if err := es.AppendStream(context.Background(), aggregateID, []*eventstore.WritableEvent{{
+	if _, err := es.AppendStream(context.Background(), aggregateID, []*eventstore.WritableEvent{{
 		Type: mockEntityValueEvent{}.EventType(),
 		Data: mustJSONMarshal(mockEntityValueEvent{Value: "hello"}),
 	}}, eventstore.AppendStreamOptions{}); err != nil {
@@ -1715,7 +1715,7 @@ func TestEventSourcedStore_PreservesValueTypedEventDefaults(t *testing.T) {
 	}
 	// Persist a payload that omits the "default" field, so we know any value
 	// that ends up on the entity came from the prototype's New(), not the JSON.
-	if err := es.AppendStream(context.Background(), aggregateID, []*eventstore.WritableEvent{{
+	if _, err := es.AppendStream(context.Background(), aggregateID, []*eventstore.WritableEvent{{
 		Type: mockEntityValueEventWithDefault{}.EventType(),
 		Data: []byte(`{"value":"hi"}`),
 	}}, eventstore.AppendStreamOptions{}); err != nil {
@@ -1752,7 +1752,7 @@ func TestEventSourcedStore_NilReturningPrototypeIsHandledCleanly(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error creating event store: %v", err)
 	}
-	if err := es.AppendStream(context.Background(), aggregateID, []*eventstore.WritableEvent{{
+	if _, err := es.AppendStream(context.Background(), aggregateID, []*eventstore.WritableEvent{{
 		Type: mockEntityNilNewEvent{}.EventType(),
 		Data: []byte(`{}`),
 	}}, eventstore.AppendStreamOptions{}); err != nil {

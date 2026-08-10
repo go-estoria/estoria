@@ -336,7 +336,7 @@ func TestEventStore_AppendStream(t *testing.T) {
 			totalEvents := 0
 			if tt.haveEvents != nil {
 				for _, eventSet := range tt.haveEvents {
-					if err = store.AppendStream(context.Background(), eventSet.streamID, eventSet.events, eventstore.AppendStreamOptions{}); err != nil {
+					if _, err = store.AppendStream(context.Background(), eventSet.streamID, eventSet.events, eventstore.AppendStreamOptions{}); err != nil {
 						t.Fatalf("AppendStream() error: %v", err)
 					}
 
@@ -344,7 +344,7 @@ func TestEventStore_AppendStream(t *testing.T) {
 				}
 			}
 
-			gotErr := store.AppendStream(context.Background(), tt.haveStreamID, tt.haveAppendEvents, tt.haveAppendOpts)
+			_, gotErr := store.AppendStream(context.Background(), tt.haveStreamID, tt.haveAppendEvents, tt.haveAppendOpts)
 			if tt.wantErr != nil {
 				if gotErr == nil || gotErr.Error() != tt.wantErr.Error() {
 					t.Errorf("unexpected AppendStream() error: wanted %v got %v", tt.wantErr, gotErr)
@@ -671,7 +671,7 @@ func TestEventStore_ReadStream(t *testing.T) {
 			}
 
 			for _, eventSet := range tt.haveEvents {
-				if err = store.AppendStream(context.Background(), eventSet.streamID, eventSet.events, eventstore.AppendStreamOptions{}); err != nil {
+				if _, err = store.AppendStream(context.Background(), eventSet.streamID, eventSet.events, eventstore.AppendStreamOptions{}); err != nil {
 					t.Fatalf("AppendStream() error: %v", err)
 				}
 			}
@@ -755,7 +755,7 @@ func TestEventStore_Metadata(t *testing.T) {
 		"user_id":        "user-42",
 	}
 
-	if err := store.AppendStream(context.Background(), streamID, []*eventstore.WritableEvent{
+	if _, err := store.AppendStream(context.Background(), streamID, []*eventstore.WritableEvent{
 		{Type: "eventtype1", Data: []byte("data"), Metadata: meta},
 	}, eventstore.AppendStreamOptions{}); err != nil {
 		t.Fatalf("AppendStream() error: %v", err)
@@ -792,13 +792,13 @@ func TestEventStore_GlobalPosition(t *testing.T) {
 	}
 
 	// Append events across two streams
-	if err := store.AppendStream(context.Background(), streamID1, []*eventstore.WritableEvent{
+	if _, err := store.AppendStream(context.Background(), streamID1, []*eventstore.WritableEvent{
 		{Type: "eventtype1", Data: []byte("s1e1")},
 		{Type: "eventtype1", Data: []byte("s1e2")},
 	}, eventstore.AppendStreamOptions{}); err != nil {
 		t.Fatalf("AppendStream() error: %v", err)
 	}
-	if err := store.AppendStream(context.Background(), streamID2, []*eventstore.WritableEvent{
+	if _, err := store.AppendStream(context.Background(), streamID2, []*eventstore.WritableEvent{
 		{Type: "eventtype2", Data: []byte("s2e1")},
 	}, eventstore.AppendStreamOptions{}); err != nil {
 		t.Fatalf("AppendStream() error: %v", err)
@@ -856,13 +856,13 @@ func TestEventStore_ErrorTypes(t *testing.T) {
 			t.Fatalf("NewEventStore() error: %v", err)
 		}
 		// Append initial event so stream exists at version 1
-		if err := store.AppendStream(context.Background(), streamID, []*eventstore.WritableEvent{
+		if _, err := store.AppendStream(context.Background(), streamID, []*eventstore.WritableEvent{
 			{Type: "et", Data: []byte("d")},
 		}, eventstore.AppendStreamOptions{}); err != nil {
 			t.Fatalf("AppendStream() error: %v", err)
 		}
 		// Now append with wrong expected version
-		gotErr := store.AppendStream(context.Background(), streamID, []*eventstore.WritableEvent{
+		_, gotErr := store.AppendStream(context.Background(), streamID, []*eventstore.WritableEvent{
 			{Type: "et", Data: []byte("d2")},
 		}, eventstore.AppendStreamOptions{ExpectVersion: eventstore.VersionPtr(99)})
 		if gotErr == nil {

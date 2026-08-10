@@ -51,6 +51,7 @@ func RunEventStoreSuite(t *testing.T, newStore NewStoreFunc) {
 		run  func(t *testing.T, store eventstore.Store)
 	}{
 		{"assigns an ID, stream ID, stream version, and timestamp to each appended event", clauseAssignsEventFields},
+		{"returns the written events as a subsequent read returns them", clauseReturnsWrittenEvents},
 		{"round-trips event data", clauseRoundTripsData},
 		{"round-trips event metadata", clauseRoundTripsMetadata},
 		{"round-trips the data content type verbatim", clauseRoundTripsContentType},
@@ -134,7 +135,7 @@ func clauseDoesNotMutateEvents(t *testing.T, store eventstore.Store) {
 
 	const wantContentType = "application/x-storetest"
 
-	wantMetadata := map[string]string{"correlation_id": "abc-123"}
+	wantMetadata := map[string]string{testCorrelationKey: testCorrelationID}
 
 	streamID := newStreamID()
 
@@ -144,7 +145,7 @@ func clauseDoesNotMutateEvents(t *testing.T, store eventstore.Store) {
 		event.Metadata = maps.Clone(wantMetadata)
 	}
 
-	if err := store.AppendStream(t.Context(), streamID, events, eventstore.AppendStreamOptions{}); err != nil {
+	if _, err := store.AppendStream(t.Context(), streamID, events, eventstore.AppendStreamOptions{}); err != nil {
 		t.Fatalf("appending %d events: %v", count, err)
 	}
 
@@ -173,9 +174,9 @@ func clauseDoesNotMutateEvents(t *testing.T, store eventstore.Store) {
 // on it.
 func clauseRoundTripsMetadata(t *testing.T, store eventstore.Store) {
 	streamID := newStreamID()
-	want := map[string]string{"correlation_id": "abc-123", "actor": "user-7"}
+	want := map[string]string{testCorrelationKey: testCorrelationID, "actor": "user-7"}
 
-	err := store.AppendStream(t.Context(), streamID, []*eventstore.WritableEvent{{
+	_, err := store.AppendStream(t.Context(), streamID, []*eventstore.WritableEvent{{
 		Type: eventType,
 		Data: eventData(0),
 		// Clone, so a store that writes through the caller's map cannot edit the
@@ -196,6 +197,75 @@ func clauseRoundTripsMetadata(t *testing.T, store eventstore.Store) {
 	}
 }
 
+// clauseReturnsWrittenEvents pins that AppendStream's return value carries the events
+// of record: each returned event matches, field for field, what a subsequent read of
+// the stream yields at the same position. A store that fabricates IDs or timestamps it
+// did not persist — or reports them before assigning them — hands callers identities
+// that no later read agrees with.
+func clauseReturnsWrittenEvents(t *testing.T, store eventstore.Store) {
+	const count = 3
+
+	streamID := newStreamID()
+
+	events := writableEvents(count)
+	for _, event := range events {
+		event.DataContentType = "application/x-storetest"
+		event.Metadata = map[string]string{testCorrelationKey: testCorrelationID}
+	}
+
+	written, err := store.AppendStream(t.Context(), streamID, events, eventstore.AppendStreamOptions{})
+	if err != nil {
+		t.Fatalf("appending %d events: %v", count, err)
+	}
+
+	if len(written) != count {
+		t.Fatalf("want %d written events returned, got %d", count, len(written))
+	}
+
+	read := readStream(t, store, streamID, eventstore.ReadStreamOptions{})
+	if len(read) != count {
+		t.Fatalf("want %d events read, got %d", count, len(read))
+	}
+
+	for i, got := range written {
+		want := read[i]
+
+		if got.ID != want.ID {
+			t.Errorf("event %d: want the read event's ID %s, got %s", i, want.ID, got.ID)
+		}
+
+		if got.StreamID != want.StreamID {
+			t.Errorf("event %d: want stream ID %s, got %s", i, want.StreamID, got.StreamID)
+		}
+
+		if got.StreamVersion != want.StreamVersion {
+			t.Errorf("event %d: want stream version %d, got %d", i, want.StreamVersion, got.StreamVersion)
+		}
+
+		if !got.Timestamp.Equal(want.Timestamp) {
+			t.Errorf("event %d: want the read event's timestamp %s, got %s", i, want.Timestamp, got.Timestamp)
+		}
+
+		switch {
+		case (got.GlobalPosition == nil) != (want.GlobalPosition == nil):
+			t.Errorf("event %d: want global position presence to match the read event's, got returned %v, read %v",
+				i, got.GlobalPosition, want.GlobalPosition)
+		case got.GlobalPosition != nil && *got.GlobalPosition != *want.GlobalPosition:
+			t.Errorf("event %d: want global position %d, got %d", i, *want.GlobalPosition, *got.GlobalPosition)
+		}
+
+		assertJSONEqual(t, i, want.Data, got.Data)
+
+		if got.DataContentType != want.DataContentType {
+			t.Errorf("event %d: want data content type %q, got %q", i, want.DataContentType, got.DataContentType)
+		}
+
+		if !maps.Equal(got.Metadata, want.Metadata) {
+			t.Errorf("event %d: want metadata %v, got %v", i, want.Metadata, got.Metadata)
+		}
+	}
+}
+
 // clauseRoundTripsContentType pins that a store returns the content-type declaration
 // exactly as it was written — including an empty one. The declaration is the codec
 // layer's statement about the payload bytes; a store that rewrites it, or "helpfully"
@@ -206,7 +276,7 @@ func clauseRoundTripsContentType(t *testing.T, store eventstore.Store) {
 
 	const wantDeclared = "application/x-storetest"
 
-	err := store.AppendStream(t.Context(), streamID, []*eventstore.WritableEvent{
+	_, err := store.AppendStream(t.Context(), streamID, []*eventstore.WritableEvent{
 		{
 			Type:            eventType,
 			Data:            eventData(0),
@@ -338,7 +408,7 @@ func clauseExpectVersionMismatch(t *testing.T, store eventstore.Store) {
 	streamID := newStreamID()
 	appendEvents(t, store, streamID, 3, eventstore.AppendStreamOptions{})
 
-	err := store.AppendStream(t.Context(), streamID, writableEvents(1), eventstore.AppendStreamOptions{
+	_, err := store.AppendStream(t.Context(), streamID, writableEvents(1), eventstore.AppendStreamOptions{
 		ExpectVersion: eventstore.VersionPtr(2),
 	})
 	if !errors.Is(err, eventstore.StreamVersionMismatchError{}) {
@@ -382,7 +452,7 @@ func clauseStreamMustNotExistExisting(t *testing.T, store eventstore.Store) {
 	streamID := newStreamID()
 	appendEvents(t, store, streamID, 2, eventstore.AppendStreamOptions{})
 
-	err := store.AppendStream(t.Context(), streamID, writableEvents(1), eventstore.AppendStreamOptions{
+	_, err := store.AppendStream(t.Context(), streamID, writableEvents(1), eventstore.AppendStreamOptions{
 		StreamMustNotExist: true,
 	})
 	if !errors.Is(err, eventstore.StreamVersionMismatchError{}) {
@@ -400,7 +470,7 @@ func clauseStreamMustNotExistExisting(t *testing.T, store eventstore.Store) {
 func clauseMutuallyExclusiveOptions(t *testing.T, store eventstore.Store) {
 	streamID := newStreamID()
 
-	err := store.AppendStream(t.Context(), streamID, writableEvents(1), eventstore.AppendStreamOptions{
+	_, err := store.AppendStream(t.Context(), streamID, writableEvents(1), eventstore.AppendStreamOptions{
 		ExpectVersion:      eventstore.VersionPtr(0),
 		StreamMustNotExist: true,
 	})
@@ -416,6 +486,13 @@ func newStreamID() typeid.ID {
 }
 
 const eventType = "eventtype"
+
+// testCorrelationKey and testCorrelationID are the metadata entry clauses write
+// when exercising the Metadata field.
+const (
+	testCorrelationKey = "correlation_id"
+	testCorrelationID  = "abc-123"
+)
 
 // eventData is the payload the suite writes at 0-based position i. Clauses rebuild expected
 // payloads through this rather than reading them back off the slice they handed the store.
@@ -440,7 +517,7 @@ func writableEvents(n int) []*eventstore.WritableEvent {
 func appendEvents(t *testing.T, store eventstore.Store, streamID typeid.ID, n int, opts eventstore.AppendStreamOptions) {
 	t.Helper()
 
-	if err := store.AppendStream(t.Context(), streamID, writableEvents(n), opts); err != nil {
+	if _, err := store.AppendStream(t.Context(), streamID, writableEvents(n), opts); err != nil {
 		t.Fatalf("appending %d events: %v", n, err)
 	}
 }

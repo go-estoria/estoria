@@ -86,7 +86,16 @@ const (
 type StreamWriter interface {
 	// AppendStream appends events to an event stream.
 	// The expected version of the stream can be specified in the options.
-	AppendStream(ctx context.Context, streamID typeid.ID, events []*WritableEvent, opts AppendStreamOptions) error
+	//
+	// On success, AppendStream returns the written events in append order, each
+	// populated exactly as a subsequent read of the stream would return it: the
+	// store-assigned ID, stream ID and version, timestamp, and global position
+	// (where the backend has one), alongside the payload, content type, and
+	// metadata as written. Callers rely on the returned events being the events
+	// of record — fabricating IDs or timestamps the store did not persist puts
+	// every downstream consumer at odds with what a read reports, and
+	// eventstore/storetest enforces the equivalence.
+	AppendStream(ctx context.Context, streamID typeid.ID, events []*WritableEvent, opts AppendStreamOptions) ([]*Event, error)
 }
 
 // AppendStreamOptions are options for appending events to a stream.

@@ -242,7 +242,7 @@ func (s *EventSourcedStore[S]) Save(ctx context.Context, aggregate *Aggregate[S]
 		}
 
 		events[i] = &eventstore.WritableEvent{
-			Type:            unsavedEvent.ID.Type,
+			Type:            unsavedEvent.DomainEvent.EventType(),
 			Data:            data,
 			DataContentType: s.domainEventCodec.ContentType(),
 			// A copy, so a backend that holds onto the map cannot alias metadata
@@ -252,15 +252,32 @@ func (s *EventSourcedStore[S]) Save(ctx context.Context, aggregate *Aggregate[S]
 	}
 
 	// write to event stream
-	if err := s.eventWriter.AppendStream(ctx, aggregate.ID(), events, eventstore.AppendStreamOptions{
+	written, err := s.eventWriter.AppendStream(ctx, aggregate.ID(), events, eventstore.AppendStreamOptions{
 		ExpectVersion: eventstore.VersionPtr(aggregate.Version()),
-	}); err != nil {
+	})
+	if err != nil {
 		return SaveError{AggregateID: aggregate.ID(), Operation: "saving events to stream", Err: err}
 	}
 
-	// queue the events for application
+	if len(written) != len(unsavedEvents) {
+		// The append succeeded, so the events are facts in the store; the store
+		// only failed to report them back. Without their assigned versions nothing
+		// can be applied, so this surfaces the same recovery contract as any other
+		// post-append failure: discard the aggregate and reload it.
+		return SaveError{
+			AggregateID: aggregate.ID(),
+			Operation:   "confirming appended events",
+			Err: fmt.Errorf("%w: event store reported %d written events for %d appended",
+				ErrEventsAppended, len(written), len(unsavedEvents)),
+		}
+	}
+
+	// Queue the events for application, carrying the identity, version, and
+	// timestamp the store assigned: the returned events are the events of record.
 	for i, unsavedEvent := range unsavedEvents {
-		unsavedEvent.Version = aggregate.Version() + int64(i) + 1
+		unsavedEvent.ID = written[i].ID
+		unsavedEvent.Version = written[i].StreamVersion
+		unsavedEvent.Timestamp = written[i].Timestamp
 		aggregate.willApply(unsavedEvent)
 	}
 
