@@ -54,7 +54,7 @@ func (s *emptyFilteredReadIsNotFoundStore) ReadStream(ctx context.Context, id ty
 	}
 	defer iter.Close(ctx)
 
-	events, err := eventstore.ReadAll(ctx, iter)
+	events, err := eventstore.Collect(ctx, iter)
 	if err != nil {
 		return nil, fmt.Errorf("reading events: %w", err)
 	} else if len(events) == 0 {

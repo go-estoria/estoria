@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"sync"
 	"time"
 
@@ -20,8 +21,18 @@ import (
 // against this store surfaces what would otherwise first break against a real one.
 type EventStore struct {
 	events        map[string][][]byte
+	globalLog     []globalLogEntry
 	mu            sync.RWMutex
 	globalCounter int64
+}
+
+// A globalLogEntry is one committed event in the store's global order. The
+// position rides alongside the envelope so a global read can seek without
+// decoding, because positions can carry gaps: a failed append consumes counter
+// values it never commits.
+type globalLogEntry struct {
+	position int64
+	data     []byte
 }
 
 // NewEventStore creates a new in-memory event store.
@@ -78,7 +89,7 @@ func (s *EventStore) AppendStream(_ context.Context, streamID typeid.ID, events 
 		}
 	}
 
-	tx := [][]byte{}
+	tx := []globalLogEntry{}
 	written := make([]*eventstore.Event, 0, len(events))
 
 	for i, writableEvent := range events {
@@ -110,14 +121,53 @@ func (s *EventStore) AppendStream(_ context.Context, streamID typeid.ID, events 
 			return nil, eventstore.EventUnmarshalingError{StreamID: streamID, EventID: event.ID, Err: err}
 		}
 
-		tx = append(tx, data)
+		tx = append(tx, globalLogEntry{position: globalPos, data: data})
 		written = append(written, readBack)
 	}
 
-	s.events[streamID.String()] = append(stream, tx...)
+	for _, entry := range tx {
+		s.events[streamID.String()] = append(s.events[streamID.String()], entry.data)
+	}
+
+	s.globalLog = append(s.globalLog, tx...)
 
 	return written, nil
 }
+
+// ReadAll reads events from all streams in ascending global order.
+// ctx is accepted for interface compatibility but is not used by this implementation.
+func (s *EventStore) ReadAll(_ context.Context, opts eventstore.ReadAllOptions) (eventstore.StreamIterator, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	// The log is position-ordered by construction, so the first event past the
+	// bound is found by binary search; positions may carry gaps, so the bound
+	// cannot be used as an index.
+	start := sort.Search(len(s.globalLog), func(i int) bool {
+		return s.globalLog[i].position > opts.AfterPosition
+	})
+
+	events := make([][]byte, 0, len(s.globalLog)-start)
+	for _, entry := range s.globalLog[start:] {
+		events = append(events, entry.data)
+	}
+
+	limit := int64(0)
+	if opts.Count > 0 {
+		limit = opts.Count
+	}
+
+	// An empty tail yields an iterator that immediately reports
+	// ErrEndOfEventStream: a global read addresses no particular stream, so
+	// there is no stream whose absence could be reported.
+	return &streamIterator{
+		events:    events,
+		direction: eventstore.Forward,
+		limit:     limit,
+	}, nil
+}
+
+var _ eventstore.GlobalReader = (*EventStore)(nil)
 
 // startCursor returns the 0-based index into a stream of streamLen events at which a read
 // begins, given the read's direction and version boundary.
