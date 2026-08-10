@@ -56,7 +56,13 @@ func newStore(t *testing.T) (*eventstream.Store, *closeCountingStore) {
 	}
 
 	counting := &closeCountingStore{Store: eventStore}
-	return eventstream.New(counting), counting
+
+	store, err := eventstream.New(counting)
+	if err != nil {
+		t.Fatalf("creating snapshot store: %v", err)
+	}
+
+	return store, counting
 }
 
 func writeSnapshots(t *testing.T, store *eventstream.Store, aggregateID typeid.ID, versions ...int64) {
@@ -201,9 +207,14 @@ func TestSnapshottingStore_VersionedLoad(t *testing.T) {
 	}
 
 	// Snapshot on every event, so a snapshot exists at each version including the tip.
+	snapshotStore, err := eventstream.New(eventStore)
+	if err != nil {
+		t.Fatalf("creating snapshot store: %v", err)
+	}
+
 	store, err := aggregatestore.NewSnapshottingStore[*mockEntity](
 		inner,
-		eventstream.New(eventStore),
+		snapshotStore,
 		snapshotstore.EventCountSnapshotPolicy{N: 1},
 	)
 	if err != nil {
@@ -259,7 +270,10 @@ func TestStore_SkipsEventsWithoutSnapshotMetadata(t *testing.T) {
 		t.Fatalf("creating event store: %v", err)
 	}
 
-	store := eventstream.New(eventStore)
+	store, err := eventstream.New(eventStore)
+	if err != nil {
+		t.Fatalf("creating snapshot store: %v", err)
+	}
 
 	aggregateID := typeid.New("mockentity", uuid.Must(uuid.NewV4()))
 	snapshotStreamID := typeid.New("mockentitysnapshot", aggregateID.UUID)
