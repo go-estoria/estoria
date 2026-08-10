@@ -156,6 +156,32 @@ type ReadAllOptions struct {
 	Count int64
 }
 
+// A StreamDeleter deletes events from streams.
+//
+// StreamDeleter is optional and deliberately not part of Store: a backend
+// implements it when its storage can remove committed events. Callers discover
+// support with a type assertion.
+type StreamDeleter interface {
+	// DeleteStream deletes events from a stream. With zero options the entire
+	// stream is deleted and its ID may be reused: a subsequent append starts a
+	// new stream at version 1. With ToVersion set the stream is truncated
+	// instead: events at or below ToVersion are removed, later events keep
+	// their versions, and appends continue from the existing tip even when
+	// truncation has emptied the stream. Deleting a stream that was never
+	// written reports ErrStreamNotFound.
+	DeleteStream(ctx context.Context, streamID typeid.ID, opts DeleteStreamOptions) error
+}
+
+// DeleteStreamOptions are options for deleting events from a stream.
+type DeleteStreamOptions struct {
+	// ToVersion is the inclusive upper bound of versions to delete, truncating
+	// the stream rather than deleting it. A bound at or beyond the stream tip
+	// empties the stream without deleting it.
+	//
+	// Default: 0 (delete the entire stream)
+	ToVersion int64
+}
+
 // VersionPtr returns a pointer to the given version value.
 // This is a convenience function for constructing AppendStreamOptions
 // with a specific expected version.
