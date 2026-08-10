@@ -349,7 +349,7 @@ func TestSnapshottingStore_Load(t *testing.T) {
 				t.Fatal("unexpected nil store")
 			}
 
-			gotAggregate, gotErr := store.Load(context.Background(), tt.haveAggregateID, tt.haveOpts)
+			gotAggregate, gotErr := store.Load(t.Context(), tt.haveAggregateID, tt.haveOpts)
 
 			if tt.wantErr != nil {
 				if gotErr == nil || gotErr.Error() != tt.wantErr.Error() {
@@ -617,7 +617,7 @@ func TestSnapshottingStore_Hydrate(t *testing.T) {
 			}
 
 			gotAggregate := tt.haveAggregate
-			gotErr := store.Hydrate(context.Background(), gotAggregate, tt.haveOpts)
+			gotErr := store.Hydrate(t.Context(), gotAggregate, tt.haveOpts)
 
 			if tt.wantErr != nil {
 				if gotErr == nil || gotErr.Error() != tt.wantErr.Error() {
@@ -838,7 +838,7 @@ func TestSnapshottingStore_Save(t *testing.T) {
 			}
 
 			gotAggregate := tt.haveAggregate
-			gotErr := store.Save(context.Background(), gotAggregate, tt.haveOpts)
+			gotErr := store.Save(t.Context(), gotAggregate, tt.haveOpts)
 
 			if tt.wantErr != nil {
 				if gotErr == nil || gotErr.Error() != tt.wantErr.Error() {
@@ -875,7 +875,7 @@ func TestSnapshottingStore_LoadsAggregateSnapshottedAtStreamTip(t *testing.T) {
 
 	const snapshotEvery = 3
 
-	ctx := context.Background()
+	ctx := t.Context()
 	aggregateID := uuid.Must(uuid.NewV4())
 
 	eventStore, err := memory.NewEventStore()

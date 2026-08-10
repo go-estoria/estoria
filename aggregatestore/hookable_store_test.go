@@ -196,7 +196,7 @@ func TestHookableStore_Load(t *testing.T) {
 			store.BeforeLoad(tt.havePreloadHooks...)
 			store.AfterLoad(tt.haveHooks[aggregatestore.AfterLoad]...)
 
-			gotAggregate, gotErr := store.Load(context.Background(), tt.haveAggregateID, tt.haveOpts)
+			gotAggregate, gotErr := store.Load(t.Context(), tt.haveAggregateID, tt.haveOpts)
 
 			if tt.wantErr != nil {
 				if gotErr == nil || gotErr.Error() != tt.wantErr.Error() {
@@ -265,7 +265,7 @@ func TestHookableStore_Hydrate(t *testing.T) {
 			}
 
 			gotAggregate := tt.haveAggregate
-			gotErr := store.Hydrate(context.Background(), gotAggregate, tt.haveOpts)
+			gotErr := store.Hydrate(t.Context(), gotAggregate, tt.haveOpts)
 
 			if tt.wantErr != nil {
 				if gotErr == nil || gotErr.Error() != tt.wantErr.Error() {
@@ -441,7 +441,7 @@ func TestHookableStore_Save(t *testing.T) {
 			store.AfterSave(tt.haveHooks[aggregatestore.AfterSave]...)
 
 			gotAggregate := tt.haveAggregate
-			gotErr := store.Save(context.Background(), gotAggregate, tt.haveOpts)
+			gotErr := store.Save(t.Context(), gotAggregate, tt.haveOpts)
 
 			if tt.wantErr != nil {
 				if gotErr == nil || gotErr.Error() != tt.wantErr.Error() {

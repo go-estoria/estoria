@@ -165,7 +165,7 @@ func (s *Store) WriteSnapshot(ctx context.Context, snap *snapshotstore.Aggregate
 		metadata[SnapshotTimestampMetadataKey] = snap.Timestamp.Format(time.RFC3339Nano)
 	}
 
-	if err := s.eventWriter.AppendStream(ctx, snapshotStreamID, []*eventstore.WritableEvent{
+	if _, err := s.eventWriter.AppendStream(ctx, snapshotStreamID, []*eventstore.WritableEvent{
 		{
 			Type:            snapshotStreamPrefix,
 			Data:            snap.Data,

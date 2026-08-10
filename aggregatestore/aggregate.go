@@ -51,11 +51,13 @@ func (a *Aggregate[S]) Append(events ...estoria.DomainEvent[S]) {
 // carrying its own copy of the given metadata. Keys prefixed "estoria." are
 // reserved for estoria itself; an event carrying one fails the save before
 // anything is appended to the event store.
+//
+// An unsaved event has no ID, version, or timestamp: those are assigned by the
+// event store, and the save copies them back onto the event once it is written.
 func (a *Aggregate[S]) AppendWithMetadata(metadata map[string]string, events ...estoria.DomainEvent[S]) {
 	estoria.GetLogger().Debug("appending events to aggregate", "aggregate_id", a.ID(), "aggregate_version", a.Version(), "events", len(events))
 	for _, event := range events {
 		a.unsavedEvents = append(a.unsavedEvents, &Event[S]{
-			ID:          typeid.NewV4(event.EventType()),
 			DomainEvent: event,
 			Metadata:    maps.Clone(metadata),
 		})
@@ -136,6 +138,10 @@ func (a *Aggregate[S]) willApply(event *Event[S]) {
 // An Event is an event that applies to an aggregate to change its state.
 // It consists of a unique ID, a timestamp, and a domain event, which holds data
 // specific to an event representing an incremental change to the underlying state.
+//
+// ID, Version, and Timestamp are assigned by the event store: an event loaded
+// during hydration carries them already, and an event queued by Append carries
+// zero values until a save writes it and copies back what the store assigned.
 type Event[S any] struct {
 	ID          typeid.ID
 	Version     int64

@@ -182,8 +182,8 @@ type mockStreamWriter struct {
 	appendStreamErr error
 }
 
-func (m mockStreamWriter) AppendStream(_ context.Context, _ typeid.ID, _ []*eventstore.WritableEvent, _ eventstore.AppendStreamOptions) error {
-	return m.appendStreamErr
+func (m mockStreamWriter) AppendStream(_ context.Context, _ typeid.ID, _ []*eventstore.WritableEvent, _ eventstore.AppendStreamOptions) ([]*eventstore.Event, error) {
+	return nil, m.appendStreamErr
 }
 
 type mockStreamIterator struct {
@@ -381,7 +381,7 @@ func TestEventSourcedStore_LoadAggregate(t *testing.T) {
 					})
 				}
 				store, _ := memory.NewEventStore()
-				store.AppendStream(context.Background(), aggregateID, events, eventstore.AppendStreamOptions{})
+				store.AppendStream(t.Context(), aggregateID, events, eventstore.AppendStreamOptions{})
 				return store
 			},
 			haveStoreOpts: []aggregatestore.EventSourcedStoreOption[mockEntity]{
@@ -413,7 +413,7 @@ func TestEventSourcedStore_LoadAggregate(t *testing.T) {
 					})
 				}
 				store, _ := memory.NewEventStore()
-				store.AppendStream(context.Background(), aggregateID, events, eventstore.AppendStreamOptions{})
+				store.AppendStream(t.Context(), aggregateID, events, eventstore.AppendStreamOptions{})
 				return store
 			},
 			haveStoreOpts: []aggregatestore.EventSourcedStoreOption[mockEntity]{
@@ -457,7 +457,7 @@ func TestEventSourcedStore_LoadAggregate(t *testing.T) {
 				t.Errorf("unexpected error creating store: %v", err)
 			}
 
-			gotAggregate, err := store.Load(context.Background(), tt.haveAggregateID.UUID, tt.haveLoadOpts)
+			gotAggregate, err := store.Load(t.Context(), tt.haveAggregateID.UUID, tt.haveLoadOpts)
 
 			if tt.wantErr != nil {
 				if err == nil || err.Error() != tt.wantErr.Error() {
@@ -525,7 +525,7 @@ func TestEventSourcedStore_HydrateAggregate(t *testing.T) {
 					})
 				}
 				store, _ := memory.NewEventStore()
-				store.AppendStream(context.Background(), aggregateID, events, eventstore.AppendStreamOptions{})
+				store.AppendStream(t.Context(), aggregateID, events, eventstore.AppendStreamOptions{})
 				return store
 			},
 			haveStoreOpts: []aggregatestore.EventSourcedStoreOption[mockEntity]{
@@ -564,7 +564,7 @@ func TestEventSourcedStore_HydrateAggregate(t *testing.T) {
 					})
 				}
 				store, _ := memory.NewEventStore()
-				store.AppendStream(context.Background(), aggregateID, events, eventstore.AppendStreamOptions{})
+				store.AppendStream(t.Context(), aggregateID, events, eventstore.AppendStreamOptions{})
 				return store
 			},
 			haveStoreOpts: []aggregatestore.EventSourcedStoreOption[mockEntity]{
@@ -603,7 +603,7 @@ func TestEventSourcedStore_HydrateAggregate(t *testing.T) {
 					})
 				}
 				store, _ := memory.NewEventStore()
-				store.AppendStream(context.Background(), aggregateID, events, eventstore.AppendStreamOptions{})
+				store.AppendStream(t.Context(), aggregateID, events, eventstore.AppendStreamOptions{})
 				return store
 			},
 			haveStoreOpts: []aggregatestore.EventSourcedStoreOption[mockEntity]{
@@ -642,7 +642,7 @@ func TestEventSourcedStore_HydrateAggregate(t *testing.T) {
 					})
 				}
 				store, _ := memory.NewEventStore()
-				store.AppendStream(context.Background(), aggregateID, events, eventstore.AppendStreamOptions{})
+				store.AppendStream(t.Context(), aggregateID, events, eventstore.AppendStreamOptions{})
 				return store
 			},
 			haveStoreOpts: []aggregatestore.EventSourcedStoreOption[mockEntity]{
@@ -681,7 +681,7 @@ func TestEventSourcedStore_HydrateAggregate(t *testing.T) {
 					})
 				}
 				store, _ := memory.NewEventStore()
-				store.AppendStream(context.Background(), aggregateID, events, eventstore.AppendStreamOptions{})
+				store.AppendStream(t.Context(), aggregateID, events, eventstore.AppendStreamOptions{})
 				return store
 			},
 			haveStoreOpts: []aggregatestore.EventSourcedStoreOption[mockEntity]{
@@ -720,7 +720,7 @@ func TestEventSourcedStore_HydrateAggregate(t *testing.T) {
 					})
 				}
 				store, _ := memory.NewEventStore()
-				store.AppendStream(context.Background(), aggregateID, events, eventstore.AppendStreamOptions{})
+				store.AppendStream(t.Context(), aggregateID, events, eventstore.AppendStreamOptions{})
 				return store
 			},
 			haveStoreOpts: []aggregatestore.EventSourcedStoreOption[mockEntity]{
@@ -759,7 +759,7 @@ func TestEventSourcedStore_HydrateAggregate(t *testing.T) {
 					})
 				}
 				store, _ := memory.NewEventStore()
-				store.AppendStream(context.Background(), aggregateID, events, eventstore.AppendStreamOptions{})
+				store.AppendStream(t.Context(), aggregateID, events, eventstore.AppendStreamOptions{})
 				return store
 			},
 			haveStoreOpts: []aggregatestore.EventSourcedStoreOption[mockEntity]{
@@ -798,7 +798,7 @@ func TestEventSourcedStore_HydrateAggregate(t *testing.T) {
 					})
 				}
 				store, _ := memory.NewEventStore()
-				store.AppendStream(context.Background(), aggregateID, events, eventstore.AppendStreamOptions{})
+				store.AppendStream(t.Context(), aggregateID, events, eventstore.AppendStreamOptions{})
 				return store
 			},
 			haveStoreOpts: []aggregatestore.EventSourcedStoreOption[mockEntity]{
@@ -837,7 +837,7 @@ func TestEventSourcedStore_HydrateAggregate(t *testing.T) {
 					})
 				}
 				store, _ := memory.NewEventStore()
-				store.AppendStream(context.Background(), aggregateID, events, eventstore.AppendStreamOptions{})
+				store.AppendStream(t.Context(), aggregateID, events, eventstore.AppendStreamOptions{})
 				return store
 			},
 			haveStoreOpts: []aggregatestore.EventSourcedStoreOption[mockEntity]{
@@ -876,7 +876,7 @@ func TestEventSourcedStore_HydrateAggregate(t *testing.T) {
 					})
 				}
 				store, _ := memory.NewEventStore()
-				store.AppendStream(context.Background(), aggregateID, events, eventstore.AppendStreamOptions{})
+				store.AppendStream(t.Context(), aggregateID, events, eventstore.AppendStreamOptions{})
 				return store
 			},
 			haveStoreOpts: []aggregatestore.EventSourcedStoreOption[mockEntity]{
@@ -915,7 +915,7 @@ func TestEventSourcedStore_HydrateAggregate(t *testing.T) {
 					})
 				}
 				store, _ := memory.NewEventStore()
-				store.AppendStream(context.Background(), aggregateID, events, eventstore.AppendStreamOptions{})
+				store.AppendStream(t.Context(), aggregateID, events, eventstore.AppendStreamOptions{})
 				return store
 			},
 			haveStoreOpts: []aggregatestore.EventSourcedStoreOption[mockEntity]{
@@ -954,7 +954,7 @@ func TestEventSourcedStore_HydrateAggregate(t *testing.T) {
 					})
 				}
 				store, _ := memory.NewEventStore()
-				store.AppendStream(context.Background(), aggregateID, events, eventstore.AppendStreamOptions{})
+				store.AppendStream(t.Context(), aggregateID, events, eventstore.AppendStreamOptions{})
 				return store
 			},
 			haveStoreOpts: []aggregatestore.EventSourcedStoreOption[mockEntity]{
@@ -993,7 +993,7 @@ func TestEventSourcedStore_HydrateAggregate(t *testing.T) {
 					})
 				}
 				store, _ := memory.NewEventStore()
-				store.AppendStream(context.Background(), aggregateID, events, eventstore.AppendStreamOptions{})
+				store.AppendStream(t.Context(), aggregateID, events, eventstore.AppendStreamOptions{})
 				return store
 			},
 			haveStoreOpts: []aggregatestore.EventSourcedStoreOption[mockEntity]{
@@ -1032,7 +1032,7 @@ func TestEventSourcedStore_HydrateAggregate(t *testing.T) {
 					})
 				}
 				store, _ := memory.NewEventStore()
-				store.AppendStream(context.Background(), aggregateID, events, eventstore.AppendStreamOptions{})
+				store.AppendStream(t.Context(), aggregateID, events, eventstore.AppendStreamOptions{})
 				return store
 			},
 			haveStoreOpts: []aggregatestore.EventSourcedStoreOption[mockEntity]{
@@ -1151,7 +1151,7 @@ func TestEventSourcedStore_HydrateAggregate(t *testing.T) {
 					})
 				}
 				store, _ := memory.NewEventStore()
-				store.AppendStream(context.Background(), aggregateID, events, eventstore.AppendStreamOptions{})
+				store.AppendStream(t.Context(), aggregateID, events, eventstore.AppendStreamOptions{})
 				return store
 			},
 			haveStoreOpts: []aggregatestore.EventSourcedStoreOption[mockEntity]{
@@ -1182,7 +1182,7 @@ func TestEventSourcedStore_HydrateAggregate(t *testing.T) {
 					})
 				}
 				store, _ := memory.NewEventStore()
-				store.AppendStream(context.Background(), aggregateID, events, eventstore.AppendStreamOptions{})
+				store.AppendStream(t.Context(), aggregateID, events, eventstore.AppendStreamOptions{})
 				return store
 			},
 			haveStoreOpts: []aggregatestore.EventSourcedStoreOption[mockEntity]{
@@ -1210,7 +1210,7 @@ func TestEventSourcedStore_HydrateAggregate(t *testing.T) {
 					})
 				}
 				store, _ := memory.NewEventStore()
-				store.AppendStream(context.Background(), aggregateID, events, eventstore.AppendStreamOptions{})
+				store.AppendStream(t.Context(), aggregateID, events, eventstore.AppendStreamOptions{})
 				return store
 			},
 			haveAggregate: func() *aggregatestore.Aggregate[mockEntity] {
@@ -1231,7 +1231,7 @@ func TestEventSourcedStore_HydrateAggregate(t *testing.T) {
 					})
 				}
 				store, _ := memory.NewEventStore()
-				store.AppendStream(context.Background(), aggregateID, events, eventstore.AppendStreamOptions{})
+				store.AppendStream(t.Context(), aggregateID, events, eventstore.AppendStreamOptions{})
 				return store
 			},
 			haveStoreOpts: []aggregatestore.EventSourcedStoreOption[mockEntity]{
@@ -1293,7 +1293,7 @@ func TestEventSourcedStore_HydrateAggregate(t *testing.T) {
 				hadID = aggregate.ID()
 			}
 
-			gotErr := store.Hydrate(context.Background(), aggregate, tt.haveHydrateOpts)
+			gotErr := store.Hydrate(t.Context(), aggregate, tt.haveHydrateOpts)
 
 			if tt.wantErr != nil {
 				if gotErr == nil || gotErr.Error() != tt.wantErr.Error() {
@@ -1396,7 +1396,7 @@ func TestEventSourcedStore_SaveAggregate(t *testing.T) {
 					})
 				}
 				store, _ := memory.NewEventStore()
-				store.AppendStream(context.Background(), aggregateID, events, eventstore.AppendStreamOptions{})
+				store.AppendStream(t.Context(), aggregateID, events, eventstore.AppendStreamOptions{})
 				return store
 			},
 			haveAggregate: func() *aggregatestore.Aggregate[mockEntity] {
@@ -1427,7 +1427,7 @@ func TestEventSourcedStore_SaveAggregate(t *testing.T) {
 					})
 				}
 				store, _ := memory.NewEventStore()
-				store.AppendStream(context.Background(), aggregateID, events, eventstore.AppendStreamOptions{})
+				store.AppendStream(t.Context(), aggregateID, events, eventstore.AppendStreamOptions{})
 				return store
 			},
 			haveAggregate: func() *aggregatestore.Aggregate[mockEntity] {
@@ -1460,7 +1460,7 @@ func TestEventSourcedStore_SaveAggregate(t *testing.T) {
 					})
 				}
 				store, _ := memory.NewEventStore()
-				store.AppendStream(context.Background(), aggregateID, events, eventstore.AppendStreamOptions{})
+				store.AppendStream(t.Context(), aggregateID, events, eventstore.AppendStreamOptions{})
 				return store
 			},
 			haveAggregate: func() *aggregatestore.Aggregate[mockEntity] {
@@ -1487,7 +1487,7 @@ func TestEventSourcedStore_SaveAggregate(t *testing.T) {
 					})
 				}
 				store, _ := memory.NewEventStore()
-				store.AppendStream(context.Background(), aggregateID, events, eventstore.AppendStreamOptions{})
+				store.AppendStream(t.Context(), aggregateID, events, eventstore.AppendStreamOptions{})
 				return store
 			},
 			haveAggregate: func() *aggregatestore.Aggregate[mockEntity] {
@@ -1621,7 +1621,7 @@ func TestEventSourcedStore_SaveAggregate(t *testing.T) {
 				hadID = aggregate.ID()
 			}
 
-			gotErr := store.Save(context.Background(), aggregate, tt.haveSaveOpts)
+			gotErr := store.Save(t.Context(), aggregate, tt.haveSaveOpts)
 
 			if tt.wantErr != nil {
 				if gotErr == nil || gotErr.Error() != tt.wantErr.Error() {
@@ -1669,7 +1669,7 @@ func TestEventSourcedStore_HydratesValueTypedEvent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error creating event store: %v", err)
 	}
-	if err := es.AppendStream(context.Background(), aggregateID, []*eventstore.WritableEvent{{
+	if _, err := es.AppendStream(t.Context(), aggregateID, []*eventstore.WritableEvent{{
 		Type: mockEntityValueEvent{}.EventType(),
 		Data: mustJSONMarshal(mockEntityValueEvent{Value: "hello"}),
 	}}, eventstore.AppendStreamOptions{}); err != nil {
@@ -1683,7 +1683,7 @@ func TestEventSourcedStore_HydratesValueTypedEvent(t *testing.T) {
 		t.Fatalf("unexpected error creating store: %v", err)
 	}
 
-	aggregate, err := store.Load(context.Background(), aggregateID.UUID, nil)
+	aggregate, err := store.Load(t.Context(), aggregateID.UUID, nil)
 	if err != nil {
 		t.Fatalf("unexpected error loading aggregate: %v", err)
 	}
@@ -1715,7 +1715,7 @@ func TestEventSourcedStore_PreservesValueTypedEventDefaults(t *testing.T) {
 	}
 	// Persist a payload that omits the "default" field, so we know any value
 	// that ends up on the entity came from the prototype's New(), not the JSON.
-	if err := es.AppendStream(context.Background(), aggregateID, []*eventstore.WritableEvent{{
+	if _, err := es.AppendStream(t.Context(), aggregateID, []*eventstore.WritableEvent{{
 		Type: mockEntityValueEventWithDefault{}.EventType(),
 		Data: []byte(`{"value":"hi"}`),
 	}}, eventstore.AppendStreamOptions{}); err != nil {
@@ -1729,7 +1729,7 @@ func TestEventSourcedStore_PreservesValueTypedEventDefaults(t *testing.T) {
 		t.Fatalf("unexpected error creating store: %v", err)
 	}
 
-	aggregate, err := store.Load(context.Background(), aggregateID.UUID, nil)
+	aggregate, err := store.Load(t.Context(), aggregateID.UUID, nil)
 	if err != nil {
 		t.Fatalf("unexpected error loading aggregate: %v", err)
 	}
@@ -1752,7 +1752,7 @@ func TestEventSourcedStore_NilReturningPrototypeIsHandledCleanly(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error creating event store: %v", err)
 	}
-	if err := es.AppendStream(context.Background(), aggregateID, []*eventstore.WritableEvent{{
+	if _, err := es.AppendStream(t.Context(), aggregateID, []*eventstore.WritableEvent{{
 		Type: mockEntityNilNewEvent{}.EventType(),
 		Data: []byte(`{}`),
 	}}, eventstore.AppendStreamOptions{}); err != nil {
@@ -1766,7 +1766,7 @@ func TestEventSourcedStore_NilReturningPrototypeIsHandledCleanly(t *testing.T) {
 		t.Fatalf("unexpected error creating store: %v", err)
 	}
 
-	_, err = store.Load(context.Background(), aggregateID.UUID, nil)
+	_, err = store.Load(t.Context(), aggregateID.UUID, nil)
 	if err == nil {
 		t.Fatal("expected hydration error for nil-returning prototype, got nil")
 	}

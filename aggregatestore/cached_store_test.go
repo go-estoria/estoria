@@ -184,7 +184,7 @@ func TestCachedStore_Load(t *testing.T) {
 				t.Fatalf("unexpected error creating cached store: %v", err)
 			}
 
-			gotAggregate, gotErr := store.Load(context.Background(), aggregateID, tt.haveOpts)
+			gotAggregate, gotErr := store.Load(t.Context(), aggregateID, tt.haveOpts)
 
 			if tt.wantErr != nil {
 				if gotErr == nil || gotErr.Error() != tt.wantErr.Error() {
@@ -274,7 +274,7 @@ func TestCachedStore_Hydrate(t *testing.T) {
 			}
 
 			gotAggregate := tt.haveAggregate()
-			gotErr := store.Hydrate(context.Background(), gotAggregate, tt.haveOpts)
+			gotErr := store.Hydrate(t.Context(), gotAggregate, tt.haveOpts)
 
 			if tt.wantErr != nil {
 				if gotErr == nil || gotErr.Error() != tt.wantErr.Error() {
@@ -398,7 +398,7 @@ func TestCachedStore_Save(t *testing.T) {
 			}
 
 			gotAggregate := tt.haveAggregate()
-			gotErr := store.Save(context.Background(), gotAggregate, tt.haveOpts)
+			gotErr := store.Save(t.Context(), gotAggregate, tt.haveOpts)
 
 			if tt.wantErr != nil {
 				if gotErr == nil || gotErr.Error() != tt.wantErr.Error() {

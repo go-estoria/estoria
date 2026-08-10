@@ -1,7 +1,6 @@
 package aggregatestore_test
 
 import (
-	"context"
 	"errors"
 	"testing"
 
@@ -25,7 +24,7 @@ import (
 func TestSaveAtomicity_SentinelSurvivesComposition(t *testing.T) {
 	t.Parallel()
 
-	ctx := context.Background()
+	ctx := t.Context()
 
 	eventStore, err := memory.NewEventStore()
 	if err != nil {
@@ -60,7 +59,7 @@ func TestSaveAtomicity_SentinelSurvivesComposition(t *testing.T) {
 func TestSaveAtomicity_PreAppendFailureCarriesNoSentinel(t *testing.T) {
 	t.Parallel()
 
-	ctx := context.Background()
+	ctx := t.Context()
 
 	eventStore, err := memory.NewEventStore()
 	if err != nil {
@@ -96,7 +95,7 @@ func TestSaveAtomicity_PreAppendFailureCarriesNoSentinel(t *testing.T) {
 func TestSaveAtomicity_EventSourcedStoreSite(t *testing.T) {
 	t.Parallel()
 
-	ctx := context.Background()
+	ctx := t.Context()
 
 	eventStore, err := memory.NewEventStore()
 	if err != nil {

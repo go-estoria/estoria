@@ -1,7 +1,6 @@
 package memory_test
 
 import (
-	"context"
 	"errors"
 	"sync"
 	"testing"
@@ -134,7 +133,7 @@ func writeVersions(t *testing.T, store *memory.SnapshotStore, aggregateID typeid
 	t.Helper()
 
 	for _, version := range versions {
-		if err := store.WriteSnapshot(context.Background(), &snapshotstore.AggregateSnapshot{
+		if err := store.WriteSnapshot(t.Context(), &snapshotstore.AggregateSnapshot{
 			AggregateID:      aggregateID,
 			AggregateVersion: version,
 			Data:             []byte(`{}`),
