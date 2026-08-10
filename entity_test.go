@@ -125,6 +125,22 @@ func TestJSONDomainEventCodec_UnmarshalDomainEvent_Invalid(t *testing.T) {
 	}
 }
 
+// TestJSONCodecs_ContentType pins the declaration the JSON codecs stamp on every
+// payload they produce, against the literal string rather than the constant: the
+// value is wire-visible on stored events and snapshots, so changing it is a
+// contract break even if the constant and its uses move in lockstep.
+func TestJSONCodecs_ContentType(t *testing.T) {
+	t.Parallel()
+
+	if got := (estoria.JSONStateCodec[mockState]{}).ContentType(); got != "application/json" {
+		t.Errorf(`want state codec content type "application/json", got %q`, got)
+	}
+
+	if got := (estoria.JSONDomainEventCodec[mockState]{}).ContentType(); got != "application/json" {
+		t.Errorf(`want domain event codec content type "application/json", got %q`, got)
+	}
+}
+
 // TestDomainEvent_ApplyTo covers the double satisfying the DomainEvent contract, so the
 // interface's shape is exercised rather than only its marshaling.
 func TestDomainEvent_ApplyTo(t *testing.T) {

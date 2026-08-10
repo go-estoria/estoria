@@ -117,6 +117,10 @@ func (m *mockSnapshotMarshaler) UnmarshalState(data []byte, entity *mockEntity) 
 	return errors.New("unexpected call to Unmarshal")
 }
 
+func (m *mockSnapshotMarshaler) ContentType() string {
+	return "application/x-mock"
+}
+
 func TestNewSnapshottingStore(t *testing.T) {
 	t.Parallel()
 

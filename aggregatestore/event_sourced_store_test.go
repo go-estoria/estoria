@@ -238,6 +238,10 @@ func (m mockEventMarshaler[E]) UnmarshalDomainEvent(_ []byte, _ estoria.DomainEv
 	return m.unmarshalErr
 }
 
+func (m mockEventMarshaler[E]) ContentType() string {
+	return "application/x-mock"
+}
+
 func TestNewEventSourcedStore(t *testing.T) {
 	t.Parallel()
 

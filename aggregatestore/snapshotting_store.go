@@ -134,6 +134,19 @@ func (s *SnapshottingStore[S]) Hydrate(ctx context.Context, aggregate *Aggregate
 		return s.inner.Hydrate(ctx, aggregate, opts)
 	}
 
+	// A snapshot declaring a content type the codec does not read is skipped
+	// before any decode is attempted: a payload in the wrong encoding can decode
+	// into state "successfully" with nothing matched, which is silent corruption,
+	// not an error. Full hydration is always correct, and the next snapshot write
+	// self-heals in the codec's own encoding. A snapshot declaring nothing
+	// predates content-type declarations and is decoded as before.
+	if snap.DataContentType != "" && snap.DataContentType != s.stateCodec.ContentType() {
+		log.Warn("snapshot content type does not match the state codec, falling back to full hydration",
+			"snapshot_content_type", snap.DataContentType,
+			"codec_content_type", s.stateCodec.ContentType())
+		return s.inner.Hydrate(ctx, aggregate, opts)
+	}
+
 	// Decode into fresh state rather than the aggregate's live state. When S is a
 	// pointer type the codec writes through to the state in place, so a snapshot
 	// that is valid JSON but disagrees on a field's type — ordinary schema drift —
@@ -213,6 +226,7 @@ func (s *SnapshottingStore[S]) Save(ctx context.Context, aggregate *Aggregate[S]
 			AggregateID:      aggregate.ID(),
 			AggregateVersion: aggregate.Version(),
 			Data:             data,
+			DataContentType:  s.stateCodec.ContentType(),
 		}); err != nil {
 			log.Error("failed to write snapshot", "error", err)
 			continue

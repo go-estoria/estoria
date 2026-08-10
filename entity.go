@@ -19,12 +19,19 @@ type Entity = any
 // but is not required to.
 type StateFactory[S any] func(id uuid.UUID) S
 
+// ContentTypeJSON is the content type declared by the JSON codecs.
+const ContentTypeJSON = "application/json"
+
 // StateCodec is an interface for marshaling aggregate state to and from bytes.
 type StateCodec[S any] interface {
 	// MarshalState marshals state to bytes.
 	MarshalState(state S) ([]byte, error)
 	// UnmarshalState unmarshals state from bytes.
 	UnmarshalState(data []byte, dest *S) error
+	// ContentType returns the MIME content type of the bytes the codec produces
+	// and consumes. It is declared on the payloads the codec encodes, so that
+	// storage backends can act on the encoding without sniffing bytes.
+	ContentType() string
 }
 
 // JSONStateCodec is a StateCodec that encodes state as JSON.
@@ -38,6 +45,10 @@ func (c JSONStateCodec[S]) MarshalState(state S) ([]byte, error) {
 
 func (c JSONStateCodec[S]) UnmarshalState(data []byte, dest *S) error {
 	return json.Unmarshal(data, dest)
+}
+
+func (c JSONStateCodec[S]) ContentType() string {
+	return ContentTypeJSON
 }
 
 // A DomainEvent is an event that can be applied to an aggregate's state to produce
@@ -61,6 +72,10 @@ type DomainEventCodec[S any] interface {
 	MarshalDomainEvent(event DomainEvent[S]) ([]byte, error)
 	// UnmarshalDomainEvent unmarshals a domain event from bytes.
 	UnmarshalDomainEvent(data []byte, dest DomainEvent[S]) error
+	// ContentType returns the MIME content type of the bytes the codec produces
+	// and consumes. It is declared on the payloads the codec encodes, so that
+	// storage backends can act on the encoding without sniffing bytes.
+	ContentType() string
 }
 
 // JSONDomainEventCodec is a DomainEventCodec that encodes domain events as JSON.
@@ -74,4 +89,8 @@ func (c JSONDomainEventCodec[S]) MarshalDomainEvent(event DomainEvent[S]) ([]byt
 
 func (c JSONDomainEventCodec[S]) UnmarshalDomainEvent(data []byte, dest DomainEvent[S]) error {
 	return json.Unmarshal(data, dest)
+}
+
+func (c JSONDomainEventCodec[S]) ContentType() string {
+	return ContentTypeJSON
 }

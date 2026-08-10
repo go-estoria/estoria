@@ -53,6 +53,7 @@ func RunEventStoreSuite(t *testing.T, newStore NewStoreFunc) {
 		{"assigns an ID, stream ID, stream version, and timestamp to each appended event", clauseAssignsEventFields},
 		{"round-trips event data", clauseRoundTripsData},
 		{"round-trips event metadata", clauseRoundTripsMetadata},
+		{"round-trips the data content type verbatim", clauseRoundTripsContentType},
 		{"does not modify the events it is given", clauseDoesNotMutateEvents},
 		{"reports ErrStreamNotFound for a stream that was never written", clauseUnwrittenStreamNotFound},
 		{"yields an empty iterator when reading past the stream tip", clauseReadPastTip},
@@ -131,8 +132,21 @@ func clauseRoundTripsData(t *testing.T, store eventstore.Store) {
 func clauseDoesNotMutateEvents(t *testing.T, store eventstore.Store) {
 	const count = 3
 
+	const wantContentType = "application/x-storetest"
+
+	wantMetadata := map[string]string{"correlation_id": "abc-123"}
+
 	streamID := newStreamID()
-	events := appendEvents(t, store, streamID, count, eventstore.AppendStreamOptions{})
+
+	events := writableEvents(count)
+	for _, event := range events {
+		event.DataContentType = wantContentType
+		event.Metadata = maps.Clone(wantMetadata)
+	}
+
+	if err := store.AppendStream(t.Context(), streamID, events, eventstore.AppendStreamOptions{}); err != nil {
+		t.Fatalf("appending %d events: %v", count, err)
+	}
 
 	for i, event := range events {
 		if event.Type != eventType {
@@ -141,6 +155,14 @@ func clauseDoesNotMutateEvents(t *testing.T, store eventstore.Store) {
 
 		if !reflect.DeepEqual(event.Data, eventData(i)) {
 			t.Errorf("event %d: store modified Data: want %s, got %s", i, eventData(i), event.Data)
+		}
+
+		if event.DataContentType != wantContentType {
+			t.Errorf("event %d: store modified DataContentType: want %q, got %q", i, wantContentType, event.DataContentType)
+		}
+
+		if !maps.Equal(event.Metadata, wantMetadata) {
+			t.Errorf("event %d: store modified Metadata: want %v, got %v", i, wantMetadata, event.Metadata)
 		}
 	}
 }
@@ -171,6 +193,46 @@ func clauseRoundTripsMetadata(t *testing.T, store eventstore.Store) {
 
 	if got := events[0].Metadata; !reflect.DeepEqual(got, want) {
 		t.Errorf("want metadata %v, got %v", want, got)
+	}
+}
+
+// clauseRoundTripsContentType pins that a store returns the content-type declaration
+// exactly as it was written — including an empty one. The declaration is the codec
+// layer's statement about the payload bytes; a store that rewrites it, or "helpfully"
+// fills in a default, mislabels bytes it did not produce, and the reader's codec acts
+// on the lie.
+func clauseRoundTripsContentType(t *testing.T, store eventstore.Store) {
+	streamID := newStreamID()
+
+	const wantDeclared = "application/x-storetest"
+
+	err := store.AppendStream(t.Context(), streamID, []*eventstore.WritableEvent{
+		{
+			Type:            eventType,
+			Data:            eventData(0),
+			DataContentType: wantDeclared,
+		},
+		{
+			Type: eventType,
+			Data: eventData(1),
+			// No declaration: it must read back empty, not defaulted.
+		},
+	}, eventstore.AppendStreamOptions{})
+	if err != nil {
+		t.Fatalf("appending events: %v", err)
+	}
+
+	events := readStream(t, store, streamID, eventstore.ReadStreamOptions{})
+	if len(events) != 2 {
+		t.Fatalf("want 2 events, got %d", len(events))
+	}
+
+	if got := events[0].DataContentType; got != wantDeclared {
+		t.Errorf("want data content type %q, got %q", wantDeclared, got)
+	}
+
+	if got := events[1].DataContentType; got != "" {
+		t.Errorf("want an empty data content type for an undeclared payload, got %q", got)
 	}
 }
 
@@ -375,15 +437,12 @@ func writableEvents(n int) []*eventstore.WritableEvent {
 	return events
 }
 
-func appendEvents(t *testing.T, store eventstore.Store, streamID typeid.ID, n int, opts eventstore.AppendStreamOptions) []*eventstore.WritableEvent {
+func appendEvents(t *testing.T, store eventstore.Store, streamID typeid.ID, n int, opts eventstore.AppendStreamOptions) {
 	t.Helper()
 
-	events := writableEvents(n)
-	if err := store.AppendStream(t.Context(), streamID, events, opts); err != nil {
+	if err := store.AppendStream(t.Context(), streamID, writableEvents(n), opts); err != nil {
 		t.Fatalf("appending %d events: %v", n, err)
 	}
-
-	return events
 }
 
 func readStream(t *testing.T, store eventstore.Store, streamID typeid.ID, opts eventstore.ReadStreamOptions) []*eventstore.Event {

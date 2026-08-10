@@ -138,6 +138,7 @@ func (s *Store) ReadSnapshot(ctx context.Context, aggregateID typeid.ID, opts sn
 			AggregateVersion: version,
 			Timestamp:        timestamp,
 			Data:             event.Data,
+			DataContentType:  event.DataContentType,
 		}, nil
 	}
 }
@@ -155,7 +156,8 @@ func (s *Store) WriteSnapshot(ctx context.Context, snap *snapshotstore.Aggregate
 
 	// The state payload is the event body as-is; the aggregate version — and the
 	// writer's timestamp, when one was supplied — ride in metadata. Nothing
-	// re-encodes bytes it was handed.
+	// re-encodes bytes it was handed, so the writer's content-type declaration
+	// passes through untouched as well.
 	metadata := map[string]string{
 		SnapshotVersionMetadataKey: strconv.FormatInt(snap.AggregateVersion, 10),
 	}
@@ -165,9 +167,10 @@ func (s *Store) WriteSnapshot(ctx context.Context, snap *snapshotstore.Aggregate
 
 	if err := s.eventWriter.AppendStream(ctx, snapshotStreamID, []*eventstore.WritableEvent{
 		{
-			Type:     snapshotStreamPrefix,
-			Data:     snap.Data,
-			Metadata: metadata,
+			Type:            snapshotStreamPrefix,
+			Data:            snap.Data,
+			DataContentType: snap.DataContentType,
+			Metadata:        metadata,
 		},
 	}, eventstore.AppendStreamOptions{}); err != nil {
 		return fmt.Errorf("appending snapshot stream: %w", err)

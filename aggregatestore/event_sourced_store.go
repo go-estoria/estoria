@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"reflect"
 	"strings"
 
@@ -225,14 +226,28 @@ func (s *EventSourcedStore[S]) Save(ctx context.Context, aggregate *Aggregate[S]
 	events := make([]*eventstore.WritableEvent, len(unsavedEvents))
 
 	for i, unsavedEvent := range unsavedEvents {
+		for key := range unsavedEvent.Metadata {
+			if strings.HasPrefix(key, eventstore.ReservedMetadataPrefix) {
+				return SaveError{
+					AggregateID: aggregate.ID(),
+					Operation:   "validating event metadata",
+					Err:         fmt.Errorf("metadata key %q uses the reserved %q prefix", key, eventstore.ReservedMetadataPrefix),
+				}
+			}
+		}
+
 		data, err := s.domainEventCodec.MarshalDomainEvent(unsavedEvent.DomainEvent)
 		if err != nil {
 			return SaveError{AggregateID: aggregate.ID(), Operation: "marshaling event data", Err: err}
 		}
 
 		events[i] = &eventstore.WritableEvent{
-			Type: unsavedEvent.ID.Type,
-			Data: data,
+			Type:            unsavedEvent.ID.Type,
+			Data:            data,
+			DataContentType: s.domainEventCodec.ContentType(),
+			// A copy, so a backend that holds onto the map cannot alias metadata
+			// the aggregate still owns while a failed save awaits its retry.
+			Metadata: maps.Clone(unsavedEvent.Metadata),
 		}
 	}
 
@@ -365,6 +380,7 @@ func (s *EventSourcedStore[S]) eventHandlerForAggregate(aggregate *Aggregate[S])
 			Version:     event.StreamVersion,
 			Timestamp:   event.Timestamp,
 			DomainEvent: domainEvent,
+			Metadata:    event.Metadata,
 		})
 		if err := aggregate.applyNext(); err != nil {
 			return NewHydrateError(aggregate.ID(), "applying aggregate event",

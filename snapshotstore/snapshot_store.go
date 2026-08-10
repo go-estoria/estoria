@@ -14,6 +14,13 @@ type AggregateSnapshot struct {
 	AggregateVersion int64
 	Timestamp        time.Time
 	Data             []byte
+
+	// DataContentType is the MIME content type of Data, declared by the codec
+	// that produced the bytes. Stores round-trip it verbatim, including an
+	// empty one: the default lives with the codec layer, never with storage.
+	// An empty value on a read snapshot means the snapshot was written before
+	// its writer declared content types.
+	DataContentType string
 }
 
 // A SnapshotReader reads snapshots.
