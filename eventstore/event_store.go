@@ -115,6 +115,10 @@ func VersionPtr(v int64) *int64 {
 	return &v
 }
 
+// ReservedMetadataPrefix is the event metadata key prefix reserved for estoria
+// itself. Callers and backends must not write keys carrying it.
+const ReservedMetadataPrefix = "estoria."
+
 // An Event is an event that has been read from an event store.
 type Event struct {
 	ID             typeid.ID
@@ -123,6 +127,12 @@ type Event struct {
 	GlobalPosition *int64
 	Timestamp      time.Time
 	Data           []byte
+
+	// DataContentType is the MIME content type of Data, declared by the codec
+	// that produced the bytes. Stores return it exactly as it was written; an
+	// empty value means the event was written before its writer declared
+	// content types, and carries whatever encoding that writer's codec produced.
+	DataContentType string
 
 	// Metadata is optional key-value metadata associated with the event.
 	// Keys prefixed "estoria." are reserved for estoria itself.
@@ -135,6 +145,13 @@ type WritableEvent struct {
 
 	// Data is the serialized event data.
 	Data []byte
+
+	// DataContentType is the MIME content type of Data, declared by the codec
+	// that produced the bytes. A backend that recognizes the type may store the
+	// payload natively; one that does not treats the payload as opaque bytes.
+	// Backends must round-trip the declaration verbatim, including an empty one:
+	// the default lives with the codec layer, never with storage.
+	DataContentType string
 
 	// Metadata is optional key-value metadata associated with the event.
 	// Keys prefixed "estoria." are reserved for estoria itself; callers and

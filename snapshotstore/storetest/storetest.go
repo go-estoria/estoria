@@ -73,6 +73,8 @@ func clauseRoundTripsSnapshot(t *testing.T, store snapshotstore.SnapshotStore) {
 
 	const wantVersion = int64(7)
 
+	const wantContentType = "application/x-storetest"
+
 	wantTimestamp := time.Date(2026, time.August, 5, 12, 0, 0, 0, time.UTC)
 	wantData := []byte(`{"owner":"alice","balance":42}`)
 
@@ -84,6 +86,7 @@ func clauseRoundTripsSnapshot(t *testing.T, store snapshotstore.SnapshotStore) {
 		AggregateVersion: wantVersion,
 		Timestamp:        wantTimestamp,
 		Data:             slices.Clone(wantData),
+		DataContentType:  wantContentType,
 	}); err != nil {
 		t.Fatalf("writing snapshot: %v", err)
 	}
@@ -108,6 +111,31 @@ func clauseRoundTripsSnapshot(t *testing.T, store snapshotstore.SnapshotStore) {
 	if !reflect.DeepEqual(got.Data, wantData) {
 		t.Errorf("want data %s, got %s", wantData, got.Data)
 	}
+
+	// Verbatim, including empty: a store that rewrites the declaration — or fills
+	// in a default for the undeclared write below — mislabels bytes it did not
+	// produce, and the reader's codec acts on the lie.
+	if got.DataContentType != wantContentType {
+		t.Errorf("want data content type %q, got %q", wantContentType, got.DataContentType)
+	}
+
+	undeclared := newAggregateID()
+	if err := store.WriteSnapshot(t.Context(), &snapshotstore.AggregateSnapshot{
+		AggregateID:      undeclared,
+		AggregateVersion: wantVersion,
+		Data:             slices.Clone(wantData),
+	}); err != nil {
+		t.Fatalf("writing undeclared snapshot: %v", err)
+	}
+
+	got, err = store.ReadSnapshot(t.Context(), undeclared, snapshotstore.ReadSnapshotOptions{})
+	if err != nil {
+		t.Fatalf("reading undeclared snapshot: %v", err)
+	}
+
+	if got.DataContentType != "" {
+		t.Errorf("want an empty data content type for an undeclared payload, got %q", got.DataContentType)
+	}
 }
 
 // clauseDoesNotMutateSnapshot pins that WriteSnapshot treats its argument as read-only.
@@ -119,6 +147,8 @@ func clauseDoesNotMutateSnapshot(t *testing.T, store snapshotstore.SnapshotStore
 
 	const wantVersion = int64(4)
 
+	const wantContentType = "application/x-storetest"
+
 	wantTimestamp := time.Date(2026, time.August, 5, 12, 0, 0, 0, time.UTC)
 	wantData := []byte(`{"owner":"bob","balance":7}`)
 
@@ -127,6 +157,7 @@ func clauseDoesNotMutateSnapshot(t *testing.T, store snapshotstore.SnapshotStore
 		AggregateVersion: wantVersion,
 		Timestamp:        wantTimestamp,
 		Data:             slices.Clone(wantData),
+		DataContentType:  wantContentType,
 	}
 
 	if err := store.WriteSnapshot(t.Context(), snap); err != nil {
@@ -147,6 +178,10 @@ func clauseDoesNotMutateSnapshot(t *testing.T, store snapshotstore.SnapshotStore
 
 	if !reflect.DeepEqual(snap.Data, wantData) {
 		t.Errorf("store modified Data: want %s, got %s", wantData, snap.Data)
+	}
+
+	if snap.DataContentType != wantContentType {
+		t.Errorf("store modified DataContentType: want %q, got %q", wantContentType, snap.DataContentType)
 	}
 }
 

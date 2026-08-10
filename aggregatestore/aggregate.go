@@ -3,6 +3,7 @@ package aggregatestore
 import (
 	"errors"
 	"fmt"
+	"maps"
 	"time"
 
 	"github.com/go-estoria/estoria"
@@ -43,12 +44,40 @@ func newAggregate[S any](id typeid.ID, state S, version int64) *Aggregate[S] {
 // Append appends events to the aggregate's unsaved events, to be persisted and
 // applied on the next save.
 func (a *Aggregate[S]) Append(events ...estoria.DomainEvent[S]) {
+	a.AppendWithMetadata(nil, events...)
+}
+
+// AppendWithMetadata appends events to the aggregate's unsaved events, each
+// carrying its own copy of the given metadata. Keys prefixed "estoria." are
+// reserved for estoria itself; an event carrying one fails the save before
+// anything is appended to the event store.
+func (a *Aggregate[S]) AppendWithMetadata(metadata map[string]string, events ...estoria.DomainEvent[S]) {
 	estoria.GetLogger().Debug("appending events to aggregate", "aggregate_id", a.ID(), "aggregate_version", a.Version(), "events", len(events))
 	for _, event := range events {
 		a.unsavedEvents = append(a.unsavedEvents, &Event[S]{
 			ID:          typeid.NewV4(event.EventType()),
 			DomainEvent: event,
+			Metadata:    maps.Clone(metadata),
 		})
+	}
+}
+
+// MergeEventMetadata merges the given metadata into each of the aggregate's
+// unsaved events. A key already present on an event is overwritten: the latest
+// write wins. This is how ambient context — correlation and causation IDs,
+// actor, trace — is attached to a save as a whole, typically from a BeforeSave
+// hook.
+func (a *Aggregate[S]) MergeEventMetadata(metadata map[string]string) {
+	if len(metadata) == 0 {
+		return
+	}
+
+	for _, event := range a.unsavedEvents {
+		if event.Metadata == nil {
+			event.Metadata = make(map[string]string, len(metadata))
+		}
+
+		maps.Copy(event.Metadata, metadata)
 	}
 }
 
@@ -112,6 +141,12 @@ type Event[S any] struct {
 	Version     int64
 	Timestamp   time.Time
 	DomainEvent estoria.DomainEvent[S]
+
+	// Metadata is optional key-value metadata attached to the event, persisted
+	// alongside it on save. Keys prefixed "estoria." are reserved for estoria
+	// itself; an event carrying one fails the save before anything is appended
+	// to the event store.
+	Metadata map[string]string
 }
 
 // ErrNoUnappliedEvents indicates that there are no unapplied events for the aggregate.

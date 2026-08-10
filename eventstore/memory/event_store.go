@@ -84,13 +84,14 @@ func (s *EventStore) AppendStream(_ context.Context, streamID typeid.ID, events 
 		globalPos := s.globalCounter
 
 		event := &eventstore.Event{
-			ID:             typeid.NewV4(writableEvent.Type),
-			StreamID:       streamID,
-			StreamVersion:  int64(len(stream) + i + 1),
-			GlobalPosition: &globalPos,
-			Timestamp:      time.Now(),
-			Data:           writableEvent.Data,
-			Metadata:       writableEvent.Metadata,
+			ID:              typeid.NewV4(writableEvent.Type),
+			StreamID:        streamID,
+			StreamVersion:   int64(len(stream) + i + 1),
+			GlobalPosition:  &globalPos,
+			Timestamp:       time.Now(),
+			Data:            writableEvent.Data,
+			DataContentType: writableEvent.DataContentType,
+			Metadata:        writableEvent.Metadata,
 		}
 
 		data, err := json.Marshal(event)
