@@ -29,15 +29,51 @@ const SnapshotTimestampMetadataKey = "estoria.snapshot_timestamp"
 // A Store is a snapshot store that persists snapshots as events in a parallel
 // stream of the event store it wraps, one stream per aggregate.
 type Store struct {
-	eventReader eventstore.StreamReader
-	eventWriter eventstore.StreamWriter
+	eventReader   eventstore.StreamReader
+	eventWriter   eventstore.StreamWriter
+	streamDeleter eventstore.StreamDeleter
+	maxSnapshots  int64
 }
 
 // New creates a new event-stream-backed snapshot store on top of the given event store.
-func New(eventStore eventstore.Store) *Store {
-	return &Store{
+func New(eventStore eventstore.Store, opts ...StoreOption) (*Store, error) {
+	store := &Store{
 		eventReader: eventStore,
 		eventWriter: eventStore,
+	}
+
+	for _, opt := range opts {
+		if err := opt(store); err != nil {
+			return nil, fmt.Errorf("applying option: %w", err)
+		}
+	}
+
+	return store, nil
+}
+
+// A StoreOption configures a Store.
+type StoreOption func(*Store) error
+
+// WithMaxSnapshots retains only the newest n snapshots per aggregate: each
+// write prunes older snapshot events from the aggregate's snapshot stream.
+// It requires an event store that implements eventstore.StreamDeleter.
+// Pruning is best-effort housekeeping — a pruning failure is logged, never
+// surfaced as a write failure.
+func WithMaxSnapshots(n int64) StoreOption {
+	return func(s *Store) error {
+		if n < 1 {
+			return errors.New("max snapshots must be at least 1")
+		}
+
+		deleter, ok := s.eventWriter.(eventstore.StreamDeleter)
+		if !ok {
+			return errors.New("the event store does not support stream deletion")
+		}
+
+		s.streamDeleter = deleter
+		s.maxSnapshots = n
+
+		return nil
 	}
 }
 
@@ -165,15 +201,29 @@ func (s *Store) WriteSnapshot(ctx context.Context, snap *snapshotstore.Aggregate
 		metadata[SnapshotTimestampMetadataKey] = snap.Timestamp.Format(time.RFC3339Nano)
 	}
 
-	if _, err := s.eventWriter.AppendStream(ctx, snapshotStreamID, []*eventstore.WritableEvent{
+	written, err := s.eventWriter.AppendStream(ctx, snapshotStreamID, []*eventstore.WritableEvent{
 		{
 			Type:            snapshotStreamPrefix,
 			Data:            snap.Data,
 			DataContentType: snap.DataContentType,
 			Metadata:        metadata,
 		},
-	}, eventstore.AppendStreamOptions{}); err != nil {
+	}, eventstore.AppendStreamOptions{})
+	if err != nil {
 		return fmt.Errorf("appending snapshot stream: %w", err)
+	}
+
+	if s.streamDeleter != nil && len(written) == 1 {
+		if toVersion := written[0].StreamVersion - s.maxSnapshots; toVersion > 0 {
+			if err := s.streamDeleter.DeleteStream(ctx, snapshotStreamID, eventstore.DeleteStreamOptions{
+				ToVersion: toVersion,
+			}); err != nil {
+				estoria.GetLogger().Warn("failed to prune old snapshots",
+					"stream_id", snapshotStreamID,
+					"to_version", toVersion,
+					"error", err)
+			}
+		}
 	}
 
 	estoria.GetLogger().Debug("wrote snapshot", "aggregate_id", snap.AggregateID, "prefix", snapshotStreamPrefix)

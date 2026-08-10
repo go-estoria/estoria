@@ -26,6 +26,11 @@ func TestStore_AcceptanceTest(t *testing.T) {
 			t.Fatalf("creating backing event store: %v", err)
 		}
 
-		return eventstream.New(eventStore)
+		store, err := eventstream.New(eventStore)
+		if err != nil {
+			t.Fatalf("creating snapshot store: %v", err)
+		}
+
+		return store
 	})
 }
