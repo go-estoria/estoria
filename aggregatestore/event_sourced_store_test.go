@@ -40,6 +40,24 @@ func (e mockEntityEventA) ApplyTo(m mockEntity) mockEntity {
 	return m
 }
 
+// namedEvent is a prototype whose event type is chosen by the test, for
+// exercising event type name validation at registration.
+type namedEvent struct {
+	typeName string
+}
+
+func (e namedEvent) EventType() string {
+	return e.typeName
+}
+
+func (e namedEvent) New() estoria.DomainEvent[mockEntity] {
+	return namedEvent{typeName: e.typeName}
+}
+
+func (e namedEvent) ApplyTo(m mockEntity) mockEntity {
+	return m
+}
+
 type mockEntityEventB struct {
 	B string `json:"b"`
 }
@@ -313,6 +331,54 @@ func TestNewEventSourcedStore(t *testing.T) {
 			}),
 		},
 		{
+			// Interior underscores are legal in the "type_uuid" grammar; the
+			// tail-anchored split keeps them unambiguous.
+			name: "registers an event prototype whose event type contains an interior underscore",
+			haveEventStore: func() eventstore.Store {
+				store, _ := memory.NewEventStore()
+				return store
+			},
+			haveOpts: []aggregatestore.EventSourcedStoreOption[mockEntity]{
+				aggregatestore.WithEventTypes[mockEntity](
+					namedEvent{typeName: "funds_deposited"},
+				),
+			},
+		},
+		{
+			name: "returns an error when an event prototype has an empty event type",
+			haveEventStore: func() eventstore.Store {
+				store, _ := memory.NewEventStore()
+				return store
+			},
+			haveOpts: []aggregatestore.EventSourcedStoreOption[mockEntity]{
+				aggregatestore.WithEventTypes[mockEntity](
+					namedEvent{},
+				),
+			},
+			wantErr: fmt.Errorf("applying option: %w", aggregatestore.InitializeError{
+				Operation: "registering domain event prototype",
+				Err:       errors.New(`invalid event type "": type name is required`),
+			}),
+		},
+		{
+			// The same grammar New enforces on the aggregate type: event types
+			// become the type half of store-minted event IDs.
+			name: "returns an error when an event prototype's event type starts with an underscore",
+			haveEventStore: func() eventstore.Store {
+				store, _ := memory.NewEventStore()
+				return store
+			},
+			haveOpts: []aggregatestore.EventSourcedStoreOption[mockEntity]{
+				aggregatestore.WithEventTypes[mockEntity](
+					namedEvent{typeName: "_funds"},
+				),
+			},
+			wantErr: fmt.Errorf("applying option: %w", aggregatestore.InitializeError{
+				Operation: "registering domain event prototype",
+				Err:       errors.New(`invalid event type "_funds": type name must not start or end with '_'`),
+			}),
+		},
+		{
 			name: "returns an error when applying an option fails",
 			haveEventStore: func() eventstore.Store {
 				store, _ := memory.NewEventStore()
@@ -345,6 +411,52 @@ func TestNewEventSourcedStore(t *testing.T) {
 				t.Errorf("unexpected error %v", err)
 			} else if gotStore == nil {
 				t.Errorf("unexpected nil store")
+			}
+		})
+	}
+}
+
+// TestNewEventSourcedStore_ValidatesAggregateType pins the "type_uuid" grammar
+// on the aggregate type name at the one door it enters through. The type is
+// half of every aggregate ID the store composes, so a name the grammar cannot
+// address is rejected before any stream can be written under it.
+func TestNewEventSourcedStore_ValidatesAggregateType(t *testing.T) {
+	t.Parallel()
+
+	newStore := func(aggregateType string) error {
+		eventStore, _ := memory.NewEventStore()
+		_, err := aggregatestore.New(eventStore, aggregateType, newMockEntity)
+		return err
+	}
+
+	t.Run("accepts a type with an interior underscore", func(t *testing.T) {
+		t.Parallel()
+
+		if err := newStore("user_account"); err != nil {
+			t.Errorf("want no error for an interior underscore, got %v", err)
+		}
+	})
+
+	for _, tt := range []struct {
+		name          string
+		aggregateType string
+		wantErr       string
+	}{
+		{"empty type", "", `invalid aggregate type: type name is required`},
+		{"leading underscore", "_user", `invalid aggregate type: type name must not start or end with '_'`},
+		{"trailing underscore", "user_", `invalid aggregate type: type name must not start or end with '_'`},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			err := newStore(tt.aggregateType)
+			if err == nil {
+				t.Fatalf("want an error for aggregate type %q, got nil", tt.aggregateType)
+			}
+
+			want := aggregatestore.InitializeError{Err: errors.New(tt.wantErr)}
+			if err.Error() != want.Error() {
+				t.Errorf("want error %q, got %q", want, err)
 			}
 		})
 	}

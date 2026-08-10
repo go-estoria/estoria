@@ -43,13 +43,11 @@ func New[S any](
 	stateFactory estoria.StateFactory[S],
 	opts ...EventSourcedStoreOption[S],
 ) (*EventSourcedStore[S], error) {
-	switch {
-	case aggregateType == "":
-		return nil, InitializeError{Err: errors.New("aggregate type is required")}
-	case strings.Contains(aggregateType, "_"):
-		// An underscore separates the type from the UUID in the "type_uuid" string
-		// form, so a type containing one produces ambiguous IDs.
-		return nil, InitializeError{Err: errors.New("aggregate type must not contain '_'")}
+	// The type is half of every aggregate ID the store composes, so it must
+	// satisfy the "type_uuid" grammar; interior underscores are fine, since the
+	// UUID half's fixed shape keeps the form unambiguous.
+	if err := typeid.ValidateTypeName(aggregateType); err != nil {
+		return nil, InitializeError{Err: fmt.Errorf("invalid aggregate type: %w", err)}
 	}
 
 	store := &EventSourcedStore[S]{
@@ -320,15 +318,28 @@ func (s *EventSourcedStore[S]) Save(ctx context.Context, aggregate *Aggregate[S]
 // calls allocate an addressable pointer instance; this lets the codec
 // unmarshal into the event without per-hydrate reflection.
 func (s *EventSourcedStore[S]) Use(eventPrototypes ...estoria.DomainEvent[S]) error {
+	const op = "registering domain event prototype"
+
 	for _, prototype := range eventPrototypes {
-		if _, registered := s.domainEventPrototypes[prototype.EventType()]; registered {
+		eventType := prototype.EventType()
+
+		// The same grammar New enforces on the aggregate type: event types
+		// become the type half of store-minted event IDs.
+		if err := typeid.ValidateTypeName(eventType); err != nil {
 			return InitializeError{
-				Operation: "registering domain event prototype",
-				Err:       errors.New("duplicate event type " + prototype.EventType()),
+				Operation: op,
+				Err:       fmt.Errorf("invalid event type %q: %w", eventType, err),
 			}
 		}
 
-		s.domainEventPrototypes[prototype.EventType()] = pointerConstructor(prototype.New)
+		if _, registered := s.domainEventPrototypes[eventType]; registered {
+			return InitializeError{
+				Operation: op,
+				Err:       errors.New("duplicate event type " + eventType),
+			}
+		}
+
+		s.domainEventPrototypes[eventType] = pointerConstructor(prototype.New)
 	}
 
 	return nil
