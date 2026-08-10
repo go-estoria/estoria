@@ -6,14 +6,6 @@ import (
 	"github.com/gofrs/uuid/v5"
 )
 
-// Entity constrained aggregate state to types that could report their own typed ID.
-// estoria no longer requires that: the aggregate carries its identity, and the store
-// composes it from the aggregate type name and the UUID it is given.
-//
-// Deprecated: Entity is an alias for any so that existing constraints keep compiling.
-// It will be removed in v0.8.0; use a plain [S any] constraint instead.
-type Entity = any
-
 // A StateFactory creates a new instance of an aggregate's state type S.
 // The UUID identifies the aggregate the state belongs to; the state may record it,
 // but is not required to.

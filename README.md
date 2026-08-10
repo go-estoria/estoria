@@ -1,10 +1,11 @@
 # estoria
 
+![GitHub Release](https://img.shields.io/github/v/release/go-estoria/estoria?color=0000FF00)
 ![GitHub Tag](https://img.shields.io/github/v/tag/go-estoria/estoria)
-![GitHub Actions Workflow Status](https://img.shields.io/github/actions/workflow/status/go-estoria/estoria/go-tests.yaml)
-[![Go Report Card](https://goreportcard.com/badge/github.com/go-estoria/estoria)](https://goreportcard.com/report/github.com/go-estoria/estoria)
-[![godoc](https://camo.githubusercontent.com/eaf508ed0d0cafd481fcfae3c2c8177f42df213191153a1963a221d13f80aa21/68747470733a2f2f706b672e676f2e6465762f62616467652f6769746875622e636f6d2f5468726565446f74734c6162732f77617465726d696c6c2e737667)](https://pkg.go.dev/github.com/go-estoria/estoria)
-![Documentation](https://img.shields.io/badge/-Documentation-navy)
+![GitHub go.mod Go version](https://img.shields.io/github/go-mod/go-version/go-estoria/estoria)
+![GitHub Actions Workflow Status](https://img.shields.io/github/actions/workflow/status/go-estoria/estoria/ci.yml)
+[![godoc](https://pkg.go.dev/badge/github.com/go-estoria/estoria.svg)](https://pkg.go.dev/github.com/go-estoria/estoria)
+[![Documentation](https://img.shields.io/badge/-Documentation-navy)](https://estoria.dev)
 
 Estoria is an event sourcing toolkit for Go.
 
@@ -14,17 +15,22 @@ Estoria provides composable components for implementing event sourcing in a Go a
 
 - Event-based aggregate state management
 - Flexible event store implementations
-- Aggregate snapshotting
-- Aggregate caching
+- Per-event metadata and declared payload content types
+- Aggregate snapshotting and caching
+- Global event reads for building read models and projections
+- Stream deletion and snapshot retention
 - Lifecycle hooks
+- Acceptance test suites for third-party backend implementations
 
 ## Getting Started
+
+Estoria requires Go 1.26 or later.
 
 ```shell
 go get github.com/go-estoria/estoria
 ```
 
-See the [Getting Started](https://go-estoria.github.io) guide for an introduction to the core concepts and components.
+See the [Getting Started](https://estoria.dev) guide for an introduction to the core concepts and components.
 
 See [estoria-examples](https://github.com/go-estoria/estoria-examples) for runnable examples using various backends.
 
