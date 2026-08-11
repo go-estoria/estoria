@@ -1,10 +1,10 @@
 // Package storetest provides an acceptance suite that every
-// projection.CheckpointStore implementation is expected to pass.
+// checkpointstore.Store implementation is expected to pass.
 //
 // A backend wires it up with a single test:
 //
 //	func TestCheckpointStore_AcceptanceTest(t *testing.T) {
-//		storetest.RunCheckpointStoreSuite(t, func(t *testing.T) projection.CheckpointStore {
+//		storetest.RunCheckpointStoreSuite(t, func(t *testing.T) checkpointstore.Store {
 //			return newStoreForTest(t)
 //		})
 //	}
@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/go-estoria/estoria/projection"
+	"github.com/go-estoria/estoria/projection/checkpointstore"
 	"github.com/gofrs/uuid/v5"
 )
 
@@ -25,7 +26,7 @@ import (
 // Implementations may return the same store on every call. Every clause uses freshly
 // generated projection IDs and asserts only on those IDs, so sharing one store across
 // clauses is safe and avoids standing up a backend per clause.
-type NewStoreFunc func(t *testing.T) projection.CheckpointStore
+type NewStoreFunc func(t *testing.T) checkpointstore.Store
 
 // RunCheckpointStoreSuite runs the checkpoint store acceptance suite against stores
 // returned by newStore, reporting each clause as its own named subtest.
@@ -36,7 +37,7 @@ func RunCheckpointStoreSuite(t *testing.T, newStore NewStoreFunc) {
 
 	for _, clause := range []struct {
 		name string
-		run  func(t *testing.T, store projection.CheckpointStore)
+		run  func(t *testing.T, store checkpointstore.Store)
 	}{
 		{"reports ErrCheckpointNotFound for a projection that was never checkpointed", clauseNeverCheckpointed},
 		{"round-trips a checkpoint and assigns UpdatedAt", clauseRoundTripsCheckpoint},
@@ -55,15 +56,15 @@ func RunCheckpointStoreSuite(t *testing.T, newStore NewStoreFunc) {
 // clauseNeverCheckpointed pins the sentinel a processor checks on cold start: a
 // projection with no history reports ErrCheckpointNotFound, which means "replay from
 // the beginning", not "fail".
-func clauseNeverCheckpointed(t *testing.T, store projection.CheckpointStore) {
-	if _, err := store.Load(t.Context(), newProjectionID()); !errors.Is(err, projection.ErrCheckpointNotFound) {
+func clauseNeverCheckpointed(t *testing.T, store checkpointstore.Store) {
+	if _, err := store.Load(t.Context(), newProjectionID()); !errors.Is(err, checkpointstore.ErrCheckpointNotFound) {
 		t.Errorf("want ErrCheckpointNotFound loading a checkpoint that was never saved, got %v", err)
 	}
 }
 
 // clauseRoundTripsCheckpoint pins the base guarantee: the ID and position read back
 // exactly as saved, and the store assigned UpdatedAt.
-func clauseRoundTripsCheckpoint(t *testing.T, store projection.CheckpointStore) {
+func clauseRoundTripsCheckpoint(t *testing.T, store checkpointstore.Store) {
 	id := newProjectionID()
 	saveCheckpoint(t, store, id, 42)
 
@@ -85,7 +86,7 @@ func clauseRoundTripsCheckpoint(t *testing.T, store projection.CheckpointStore) 
 // clauseSeparatesIDs pins that checkpoints are keyed by the full ID. Independence
 // between versions of one name is what lets an old and a new version of a projection
 // tail the same stream concurrently during a rebuild.
-func clauseSeparatesIDs(t *testing.T, store projection.CheckpointStore) {
+func clauseSeparatesIDs(t *testing.T, store checkpointstore.Store) {
 	v1 := newProjectionID()
 	v2 := projection.ID{Name: v1.Name, Version: v1.Version + 1}
 	other := newProjectionID()
@@ -112,7 +113,7 @@ func clauseSeparatesIDs(t *testing.T, store projection.CheckpointStore) {
 // of the same version legitimately rewinds, and a stale writer only widens the
 // at-least-once redelivery window that projection handlers tolerate anyway. A store
 // that "helpfully" rejects lower positions breaks the restart path.
-func clauseLastSaveWins(t *testing.T, store projection.CheckpointStore) {
+func clauseLastSaveWins(t *testing.T, store checkpointstore.Store) {
 	id := newProjectionID()
 
 	saveCheckpoint(t, store, id, 10)
@@ -127,7 +128,7 @@ func clauseLastSaveWins(t *testing.T, store projection.CheckpointStore) {
 // stream head re-saves its unchanged position so UpdatedAt doubles as a heartbeat.
 // A store that skips the write when nothing changed makes a healthy idle processor
 // indistinguishable from a dead one.
-func clauseRefreshesUpdatedAt(t *testing.T, store projection.CheckpointStore) {
+func clauseRefreshesUpdatedAt(t *testing.T, store checkpointstore.Store) {
 	id := newProjectionID()
 
 	saveCheckpoint(t, store, id, 7)
@@ -147,7 +148,7 @@ func clauseRefreshesUpdatedAt(t *testing.T, store projection.CheckpointStore) {
 
 // clauseDeletesCheckpoint pins removal: after a delete, the projection reads as never
 // checkpointed.
-func clauseDeletesCheckpoint(t *testing.T, store projection.CheckpointStore) {
+func clauseDeletesCheckpoint(t *testing.T, store checkpointstore.Store) {
 	id := newProjectionID()
 	saveCheckpoint(t, store, id, 12)
 
@@ -155,7 +156,7 @@ func clauseDeletesCheckpoint(t *testing.T, store projection.CheckpointStore) {
 		t.Fatalf("deleting checkpoint: %v", err)
 	}
 
-	if _, err := store.Load(t.Context(), id); !errors.Is(err, projection.ErrCheckpointNotFound) {
+	if _, err := store.Load(t.Context(), id); !errors.Is(err, checkpointstore.ErrCheckpointNotFound) {
 		t.Errorf("want ErrCheckpointNotFound loading a deleted checkpoint, got %v", err)
 	}
 }
@@ -164,8 +165,8 @@ func clauseDeletesCheckpoint(t *testing.T, store projection.CheckpointStore) {
 // how stream deletion reports ErrStreamNotFound. A caller cleaning up a retired
 // projection can distinguish "cleaned" from "was already gone", or errors.Is past
 // the difference when it does not care.
-func clauseDeleteAbsent(t *testing.T, store projection.CheckpointStore) {
-	if err := store.Delete(t.Context(), newProjectionID()); !errors.Is(err, projection.ErrCheckpointNotFound) {
+func clauseDeleteAbsent(t *testing.T, store checkpointstore.Store) {
+	if err := store.Delete(t.Context(), newProjectionID()); !errors.Is(err, checkpointstore.ErrCheckpointNotFound) {
 		t.Errorf("want ErrCheckpointNotFound deleting a checkpoint that does not exist, got %v", err)
 	}
 }
@@ -179,7 +180,7 @@ func newProjectionID() projection.ID {
 	return projection.ID{Name: "storetest_" + suffix, Version: 1}
 }
 
-func saveCheckpoint(t *testing.T, store projection.CheckpointStore, id projection.ID, position int64) {
+func saveCheckpoint(t *testing.T, store checkpointstore.Store, id projection.ID, position int64) {
 	t.Helper()
 
 	if err := store.Save(t.Context(), id, position); err != nil {
@@ -187,7 +188,7 @@ func saveCheckpoint(t *testing.T, store projection.CheckpointStore, id projectio
 	}
 }
 
-func loadCheckpoint(t *testing.T, store projection.CheckpointStore, id projection.ID) projection.Checkpoint {
+func loadCheckpoint(t *testing.T, store checkpointstore.Store, id projection.ID) checkpointstore.Checkpoint {
 	t.Helper()
 
 	checkpoint, err := store.Load(t.Context(), id)

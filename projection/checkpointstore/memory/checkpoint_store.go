@@ -7,31 +7,32 @@ import (
 	"time"
 
 	"github.com/go-estoria/estoria/projection"
+	"github.com/go-estoria/estoria/projection/checkpointstore"
 )
 
 // A CheckpointStore is an in-memory checkpoint store. It should not be used in
 // production applications.
 type CheckpointStore struct {
-	checkpoints map[projection.ID]projection.Checkpoint
+	checkpoints map[projection.ID]checkpointstore.Checkpoint
 	mu          sync.RWMutex
 }
 
 // NewCheckpointStore creates a new in-memory checkpoint store.
 func NewCheckpointStore() *CheckpointStore {
 	return &CheckpointStore{
-		checkpoints: map[projection.ID]projection.Checkpoint{},
+		checkpoints: map[projection.ID]checkpointstore.Checkpoint{},
 	}
 }
 
 // Load returns the projection's checkpoint.
 // ctx is accepted for interface compatibility but is not used by this implementation.
-func (s *CheckpointStore) Load(_ context.Context, id projection.ID) (projection.Checkpoint, error) {
+func (s *CheckpointStore) Load(_ context.Context, id projection.ID) (checkpointstore.Checkpoint, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
 	checkpoint, ok := s.checkpoints[id]
 	if !ok {
-		return projection.Checkpoint{}, projection.ErrCheckpointNotFound
+		return checkpointstore.Checkpoint{}, checkpointstore.ErrCheckpointNotFound
 	}
 
 	return checkpoint, nil
@@ -43,7 +44,7 @@ func (s *CheckpointStore) Save(_ context.Context, id projection.ID, position int
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	s.checkpoints[id] = projection.Checkpoint{
+	s.checkpoints[id] = checkpointstore.Checkpoint{
 		ProjectionID: id,
 		Position:     position,
 		UpdatedAt:    time.Now(),
@@ -59,7 +60,7 @@ func (s *CheckpointStore) Delete(_ context.Context, id projection.ID) error {
 	defer s.mu.Unlock()
 
 	if _, ok := s.checkpoints[id]; !ok {
-		return projection.ErrCheckpointNotFound
+		return checkpointstore.ErrCheckpointNotFound
 	}
 
 	delete(s.checkpoints, id)
@@ -67,4 +68,4 @@ func (s *CheckpointStore) Delete(_ context.Context, id projection.ID) error {
 	return nil
 }
 
-var _ projection.CheckpointStore = (*CheckpointStore)(nil)
+var _ checkpointstore.Store = (*CheckpointStore)(nil)

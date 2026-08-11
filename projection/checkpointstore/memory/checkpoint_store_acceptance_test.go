@@ -3,9 +3,9 @@ package memory_test
 import (
 	"testing"
 
-	"github.com/go-estoria/estoria/projection"
-	"github.com/go-estoria/estoria/projection/memory"
-	"github.com/go-estoria/estoria/projection/storetest"
+	"github.com/go-estoria/estoria/projection/checkpointstore"
+	"github.com/go-estoria/estoria/projection/checkpointstore/memory"
+	"github.com/go-estoria/estoria/projection/checkpointstore/storetest"
 )
 
 // The in-memory store is the reference implementation: it defines what the acceptance
@@ -15,7 +15,7 @@ func TestCheckpointStore_AcceptanceTest(t *testing.T) {
 
 	store := memory.NewCheckpointStore()
 
-	storetest.RunCheckpointStoreSuite(t, func(*testing.T) projection.CheckpointStore {
+	storetest.RunCheckpointStoreSuite(t, func(*testing.T) checkpointstore.Store {
 		return store
 	})
 }
