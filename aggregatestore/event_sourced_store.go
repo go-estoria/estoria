@@ -177,7 +177,7 @@ func (s *EventSourcedStore[S]) Hydrate(ctx context.Context, aggregate *Aggregate
 	defer iter.Close(ctx)
 
 	// create a stream projection for the aggregate
-	projector, err := projection.NewStreamProjection(iter, projection.WithLogger(s.log.WithGroup("projection")))
+	projector, err := projection.NewFold(iter, projection.WithLogger(s.log.WithGroup("projection")))
 	if err != nil {
 		return HydrateError{AggregateID: aggregate.ID(), Operation: "creating event stream projection", Err: err}
 	}

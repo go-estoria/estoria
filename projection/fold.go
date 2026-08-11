@@ -9,30 +9,30 @@ import (
 	"github.com/go-estoria/estoria/eventstore"
 )
 
-// A StreamProjection reads events from an event stream and executes a projection function for each event.
-type StreamProjection struct {
+// A Fold reads events from an event stream and executes a projection function for each event.
+type Fold struct {
 	iter                   eventstore.StreamIterator
 	continueOnHandlerError bool
 
 	log estoria.Logger
 }
 
-// NewStreamProjection creates a new StreamProjection.
-func NewStreamProjection(iter eventstore.StreamIterator, opts ...StreamProjectionOption) (*StreamProjection, error) {
+// NewFold creates a new Fold.
+func NewFold(iter eventstore.StreamIterator, opts ...FoldOption) (*Fold, error) {
 	if iter == nil {
 		return nil, errors.New("event stream iterator is required")
 	}
 
-	projection := &StreamProjection{
+	fold := &Fold{
 		iter: iter,
 		log:  estoria.GetLogger().WithGroup("projection"),
 	}
 
 	for _, opt := range opts {
-		opt(projection)
+		opt(fold)
 	}
 
-	return projection, nil
+	return fold, nil
 }
 
 // Result contains the result of a projection.
@@ -44,7 +44,7 @@ type Result struct {
 	NumFailedEvents int64
 }
 
-func (p *StreamProjection) Project(ctx context.Context, eventHandler EventHandler) (*Result, error) {
+func (p *Fold) Project(ctx context.Context, eventHandler EventHandler) (*Result, error) {
 	if eventHandler == nil {
 		return nil, errors.New("event handler is required")
 	}
@@ -76,22 +76,22 @@ func (p *StreamProjection) Project(ctx context.Context, eventHandler EventHandle
 	return result, nil
 }
 
-// A StreamProjectionOption is an option for configuring a StreamProjection.
-type StreamProjectionOption func(*StreamProjection)
+// A FoldOption is an option for configuring a Fold.
+type FoldOption func(*Fold)
 
 // WithContinueOnHandlerError sets whether to continue projecting events
 // if an error occurs while handling any individual event.
 //
 // The default behavior is to stop projecting events if an error occurs.
-func WithContinueOnHandlerError(shouldContinue bool) StreamProjectionOption {
-	return func(p *StreamProjection) {
+func WithContinueOnHandlerError(shouldContinue bool) FoldOption {
+	return func(p *Fold) {
 		p.continueOnHandlerError = shouldContinue
 	}
 }
 
-// WithLogger sets the logger for the StreamProjection.
-func WithLogger(log estoria.Logger) StreamProjectionOption {
-	return func(p *StreamProjection) {
+// WithLogger sets the logger for the Fold.
+func WithLogger(log estoria.Logger) FoldOption {
+	return func(p *Fold) {
 		p.log = log
 	}
 }
