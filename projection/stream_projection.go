@@ -35,19 +35,6 @@ func NewStreamProjection(iter eventstore.StreamIterator, opts ...StreamProjectio
 	return projection, nil
 }
 
-// An EventHandler handles an individual event.
-type EventHandler interface {
-	Handle(ctx context.Context, event *eventstore.Event) error
-}
-
-// An EventHandlerFunc is a function that handles an event during projection.
-type EventHandlerFunc func(ctx context.Context, event *eventstore.Event) error
-
-// Handle implements the EventHandler interface, allowing an EventHandlerFunc to be used as an EventHandler.
-func (f EventHandlerFunc) Handle(ctx context.Context, event *eventstore.Event) error {
-	return f(ctx, event)
-}
-
 // Result contains the result of a projection.
 type Result struct {
 	// NumProjectedEvents is the number of events that were successfully projected.
