@@ -10,7 +10,7 @@ import (
 
 	"github.com/go-estoria/estoria"
 	"github.com/go-estoria/estoria/eventstore"
-	"github.com/go-estoria/estoria/eventstore/projection"
+	"github.com/go-estoria/estoria/projection"
 	"github.com/go-estoria/estoria/typeid"
 	"github.com/gofrs/uuid/v5"
 )
@@ -177,7 +177,7 @@ func (s *EventSourcedStore[S]) Hydrate(ctx context.Context, aggregate *Aggregate
 	defer iter.Close(ctx)
 
 	// create a stream projection for the aggregate
-	projector, err := projection.New(iter, projection.WithLogger(s.log.WithGroup("projection")))
+	projector, err := projection.NewStreamProjection(iter, projection.WithLogger(s.log.WithGroup("projection")))
 	if err != nil {
 		return HydrateError{AggregateID: aggregate.ID(), Operation: "creating event stream projection", Err: err}
 	}

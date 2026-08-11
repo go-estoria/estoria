@@ -7,17 +7,17 @@ import (
 
 	"github.com/go-estoria/estoria"
 	"github.com/go-estoria/estoria/eventstore"
-	"github.com/go-estoria/estoria/eventstore/projection"
+	"github.com/go-estoria/estoria/projection"
 	"github.com/go-estoria/estoria/typeid"
 )
 
-func TestNew(t *testing.T) {
+func TestNewStreamProjection(t *testing.T) {
 	t.Parallel()
 
 	t.Run("rejects a nil iterator", func(t *testing.T) {
 		t.Parallel()
 
-		if _, err := projection.New(nil); err == nil {
+		if _, err := projection.NewStreamProjection(nil); err == nil {
 			t.Error("want an error for a nil iterator, got nil")
 		}
 	})
@@ -25,7 +25,7 @@ func TestNew(t *testing.T) {
 	t.Run("accepts an iterator", func(t *testing.T) {
 		t.Parallel()
 
-		p, err := projection.New(newIterator(1))
+		p, err := projection.NewStreamProjection(newIterator(1))
 		if err != nil {
 			t.Fatalf("creating projection: %v", err)
 		}
@@ -129,7 +129,7 @@ func TestStreamProjection_Project(t *testing.T) {
 	t.Run("continues past handler errors when configured to", func(t *testing.T) {
 		t.Parallel()
 
-		p, err := projection.New(newIterator(5),
+		p, err := projection.NewStreamProjection(newIterator(5),
 			projection.WithContinueOnHandlerError(true),
 			projection.WithLogger(discardLogger{}),
 		)
@@ -205,7 +205,7 @@ func TestEventHandlerFunc_Handle(t *testing.T) {
 func newProjection(t *testing.T, iter eventstore.StreamIterator) *projection.StreamProjection {
 	t.Helper()
 
-	p, err := projection.New(iter, projection.WithLogger(discardLogger{}))
+	p, err := projection.NewStreamProjection(iter, projection.WithLogger(discardLogger{}))
 	if err != nil {
 		t.Fatalf("creating projection: %v", err)
 	}

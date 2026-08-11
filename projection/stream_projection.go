@@ -17,8 +17,8 @@ type StreamProjection struct {
 	log estoria.Logger
 }
 
-// New creates a new StreamProjection.
-func New(iter eventstore.StreamIterator, opts ...StreamProjectionOption) (*StreamProjection, error) {
+// NewStreamProjection creates a new StreamProjection.
+func NewStreamProjection(iter eventstore.StreamIterator, opts ...StreamProjectionOption) (*StreamProjection, error) {
 	if iter == nil {
 		return nil, errors.New("event stream iterator is required")
 	}
