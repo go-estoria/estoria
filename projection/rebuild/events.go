@@ -7,10 +7,6 @@ import (
 	"github.com/go-estoria/estoria/projection"
 )
 
-// Each event's ApplyTo is total: a persisted event is a fact, and applying one
-// cannot fail. Whether a transition was legal to append is validated on the
-// command side, before the event exists.
-
 // Created records the decision to build Next alongside the live
 // Previous. The initiator and correlation ride in event metadata, not the
 // payload.
