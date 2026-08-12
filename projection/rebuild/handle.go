@@ -26,7 +26,15 @@ type Rebuild struct {
 	mu            sync.Mutex
 	aggregate     *aggregatestore.Aggregate[State]
 	stopProcessor context.CancelFunc
-	abandoned     bool
+
+	// processorExited is closed when Run's processor goroutine has fully
+	// exited; commands that clean up after stopping the processor wait on it
+	// so cleanup cannot race a final checkpoint save.
+	processorExited chan struct{}
+
+	// stopped records that a command (Abandon, Rollback) deliberately stopped
+	// the processor, so Run reports nil rather than the cancellation.
+	stopped bool
 }
 
 // ID returns the rebuild aggregate's typed ID; its UUID is what Resume takes.
@@ -119,15 +127,19 @@ func (r *Rebuild) Run(ctx context.Context) error {
 	processorCtx, stop := context.WithCancel(ctx)
 	defer stop()
 
+	done := make(chan error, 1)
+	exited := make(chan struct{})
+
 	r.stopProcessor = stop
+	r.processorExited = exited
 	catchingUp := state.Phase == PhaseCreated || state.Phase == PhaseBuilding
 	r.mu.Unlock()
 
 	started := time.Now()
-	done := make(chan error, 1)
 
 	go func() {
 		done <- proc.Run(processorCtx)
+		close(exited)
 	}()
 
 	if catchingUp {
@@ -159,7 +171,6 @@ func (r *Rebuild) runToCaughtUp(ctx context.Context, proc *processor.Processor, 
 		Duration: time.Since(started),
 		At:       time.Now(),
 	})
-	abandoned := r.abandoned
 	r.mu.Unlock()
 
 	if err != nil {
@@ -168,7 +179,7 @@ func (r *Rebuild) runToCaughtUp(ctx context.Context, proc *processor.Processor, 
 
 		// An Abandon can win the race against the catch-up transition; the
 		// abandonment is recorded, so the lost append is not an error.
-		if abandoned {
+		if r.isStopped() {
 			return false, nil
 		}
 
@@ -176,15 +187,40 @@ func (r *Rebuild) runToCaughtUp(ctx context.Context, proc *processor.Processor, 
 	}
 
 	if r.orchestrator.autoPromote {
-		if err := r.Promote(ctx); err != nil {
-			stop()
-			<-done
-
-			return false, err
-		}
+		return r.promoteAfterCatchUp(ctx, stop, done)
 	}
 
 	return true, nil
+}
+
+// promoteAfterCatchUp auto-promotes, mapping the outcome to runToCaughtUp's
+// contract: it reports whether Run should keep tailing.
+func (r *Rebuild) promoteAfterCatchUp(ctx context.Context, stop context.CancelFunc, done <-chan error) (bool, error) {
+	err := r.Promote(ctx)
+	if err == nil {
+		return true, nil
+	}
+
+	// A hook failure after the promotion was recorded marks a stale cache,
+	// not a failed cutover: the version is live and must keep tailing.
+	var hookErr CutoverHookError
+	if errors.As(err, &hookErr) {
+		r.orchestrator.log.Error("cutover hook failed after promotion",
+			"rebuild_id", r.ID(), "live", hookErr.Live, "error", hookErr.Err)
+
+		return true, nil
+	}
+
+	stop()
+	<-done
+
+	// An Abandon can win the race against auto-promotion; the abandonment is
+	// recorded, so the refused promotion is not an error.
+	if r.isStopped() {
+		return false, nil
+	}
+
+	return false, err
 }
 
 // Promote cuts reads over to the next version. It records Promoted first —
@@ -217,7 +253,9 @@ func (r *Rebuild) Promote(ctx context.Context) error {
 
 // Rollback reverts reads to the previous version. It records RolledBack first
 // and then runs the cutover hooks with the reverted-to version. The rebuild
-// is terminal afterwards; a subsequent attempt is a new rebuild.
+// is terminal afterwards — its processor is stopped, and a subsequent attempt
+// is a new rebuild. The rolled-back version's storage is deliberately left in
+// place for inspection; Begin cleans it up when the version number is reused.
 func (r *Rebuild) Rollback(ctx context.Context) error {
 	r.mu.Lock()
 
@@ -232,15 +270,43 @@ func (r *Rebuild) Rollback(ctx context.Context) error {
 		return errors.New("rebuild has no previous version to roll back to")
 	}
 
-	err := r.appendLocked(ctx, RolledBack{RevertedTo: state.Previous})
-
-	r.mu.Unlock()
-
-	if err != nil {
+	if err := r.appendLocked(ctx, RolledBack{RevertedTo: state.Previous}); err != nil {
+		r.mu.Unlock()
 		return err
 	}
 
-	return r.orchestrator.cutover(ctx, state.Previous)
+	r.stopped = true
+	r.mu.Unlock()
+
+	cutoverErr := r.orchestrator.cutover(ctx, state.Previous)
+
+	if err := r.awaitProcessorStop(ctx); err != nil {
+		return err
+	}
+
+	return cutoverErr
+}
+
+// awaitProcessorStop cancels the processor, if one is running, and waits for
+// its goroutine to fully exit.
+func (r *Rebuild) awaitProcessorStop(ctx context.Context) error {
+	r.mu.Lock()
+	stop := r.stopProcessor
+	exited := r.processorExited
+	r.mu.Unlock()
+
+	if stop == nil {
+		return nil
+	}
+
+	stop()
+
+	select {
+	case <-exited:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 // Abandon gives up on the rebuild before promotion: it records Abandoned,
@@ -265,20 +331,22 @@ func (r *Rebuild) Abandon(ctx context.Context, cause string) error {
 		return err
 	}
 
-	r.abandoned = true
-	if r.stopProcessor != nil {
-		r.stopProcessor()
-	}
-
+	r.stopped = true
 	r.mu.Unlock()
+
+	// Cleanup must not race the exiting processor: a final checkpoint save
+	// landing after the delete would resurrect the checkpoint.
+	if err := r.awaitProcessorStop(ctx); err != nil {
+		return err
+	}
 
 	return r.orchestrator.cleanup(ctx, state.Next)
 }
 
 // Retire tears down the previous version and records PreviousRetired,
 // completing a successful rebuild. Act-then-append: teardown happens first,
-// and the fact is recorded only once it is one. When the handler does not
-// implement projection.Teardowner, removing the storage is the caller's
+// and retirement is recorded only after it succeeds. When the handler does
+// not implement projection.Teardowner, removing the storage is the caller's
 // responsibility and Retire records retirement after deleting the previous
 // version's checkpoint.
 func (r *Rebuild) Retire(ctx context.Context) error {
@@ -328,15 +396,19 @@ func (r *Rebuild) appendLocked(ctx context.Context, event estoria.DomainEvent[St
 	return nil
 }
 
-// processorExit maps the processor's exit to Run's result: an abandoned
-// rebuild's processor is stopped deliberately, which is not an error.
+// processorExit maps the processor's exit to Run's result: a processor
+// stopped deliberately by a command (Abandon, Rollback) is not an error.
 func (r *Rebuild) processorExit(err error) error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	if r.abandoned {
+	if r.isStopped() {
 		return nil
 	}
 
 	return err
+}
+
+func (r *Rebuild) isStopped() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	return r.stopped
 }

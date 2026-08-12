@@ -156,7 +156,7 @@ func (e Abandoned) ApplyTo(s State) State {
 }
 
 // PreviousRetired records that the previous version's storage was torn down,
-// after the teardown succeeded: the fact is recorded only once it is one.
+// recorded only after the teardown succeeded.
 type PreviousRetired struct {
 	Retired projection.ID
 }

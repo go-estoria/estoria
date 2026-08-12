@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"sync"
 	"time"
 
@@ -143,7 +144,10 @@ func (r *StreamRouter) Refresh(ctx context.Context) error {
 }
 
 // advance folds cutover events recorded after the last folded position into
-// the cached live map. The caller must hold r.mu.
+// the cached live map. The fold commits only on success: a read or decode
+// failure leaves the cache and cursor untouched, so the next call retries
+// from the same position instead of serving a partial fold or silently
+// skipping past a malformed event. The caller must hold r.mu.
 func (r *StreamRouter) advance(ctx context.Context) error {
 	iter, err := r.events.ReadAll(ctx, eventstore.ReadAllOptions{AfterPosition: r.position})
 	if err != nil {
@@ -154,9 +158,12 @@ func (r *StreamRouter) advance(ctx context.Context) error {
 		_ = iter.Close(context.WithoutCancel(ctx))
 	}()
 
-	if r.live == nil {
-		r.live = map[string]projection.ID{}
+	live := maps.Clone(r.live)
+	if live == nil {
+		live = map[string]projection.ID{}
 	}
+
+	position := r.position
 
 	for {
 		event, err := iter.Next(ctx)
@@ -166,32 +173,32 @@ func (r *StreamRouter) advance(ctx context.Context) error {
 			return fmt.Errorf("reading event: %w", err)
 		}
 
+		if event.StreamID.Type == StreamType {
+			switch event.ID.Type {
+			case Promoted{}.EventType():
+				var promoted Promoted
+				if err := json.Unmarshal(event.Data, &promoted); err != nil {
+					return fmt.Errorf("decoding %s event: %w", event.ID.Type, err)
+				}
+
+				live[promoted.Next.Name] = promoted.Next
+			case RolledBack{}.EventType():
+				var rolledBack RolledBack
+				if err := json.Unmarshal(event.Data, &rolledBack); err != nil {
+					return fmt.Errorf("decoding %s event: %w", event.ID.Type, err)
+				}
+
+				live[rolledBack.RevertedTo.Name] = rolledBack.RevertedTo
+			}
+		}
+
 		if event.GlobalPosition != nil {
-			r.position = *event.GlobalPosition
-		}
-
-		if event.StreamID.Type != StreamType {
-			continue
-		}
-
-		switch event.ID.Type {
-		case Promoted{}.EventType():
-			var promoted Promoted
-			if err := json.Unmarshal(event.Data, &promoted); err != nil {
-				return fmt.Errorf("decoding %s event: %w", event.ID.Type, err)
-			}
-
-			r.live[promoted.Next.Name] = promoted.Next
-		case RolledBack{}.EventType():
-			var rolledBack RolledBack
-			if err := json.Unmarshal(event.Data, &rolledBack); err != nil {
-				return fmt.Errorf("decoding %s event: %w", event.ID.Type, err)
-			}
-
-			r.live[rolledBack.RevertedTo.Name] = rolledBack.RevertedTo
+			position = *event.GlobalPosition
 		}
 	}
 
+	r.live = live
+	r.position = position
 	r.refreshedAt = time.Now()
 
 	return nil

@@ -1,7 +1,9 @@
 package rebuild_test
 
 import (
+	"context"
 	"errors"
+	"sync"
 	"testing"
 
 	"github.com/go-estoria/estoria/aggregatestore"
@@ -114,6 +116,88 @@ func TestNewStreamRouter_RequiresReader(t *testing.T) {
 
 	if _, err := rebuild.NewStreamRouter(nil); err == nil {
 		t.Error("want an error for a nil reader, got nil")
+	}
+}
+
+// flakyReader fails ReadAll a fixed number of times before delegating.
+type flakyReader struct {
+	inner eventstore.GlobalReader
+	mu    sync.Mutex
+	fails int
+}
+
+func (f *flakyReader) ReadAll(ctx context.Context, opts eventstore.ReadAllOptions) (eventstore.StreamIterator, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	if f.fails > 0 {
+		f.fails--
+		return nil, errors.New("transient read failure")
+	}
+
+	return f.inner.ReadAll(ctx, opts)
+}
+
+// TestStreamRouter_RetriesFailedInitialFold pins that a failed fold commits
+// nothing: the next call retries instead of serving a partial cache forever.
+func TestStreamRouter_RetriesFailedInitialFold(t *testing.T) {
+	t.Parallel()
+
+	events, err := esmemory.NewEventStore()
+	if err != nil {
+		t.Fatalf("creating event store: %v", err)
+	}
+
+	rebuilds, err := rebuild.NewStore(events)
+	if err != nil {
+		t.Fatalf("creating rebuild store: %v", err)
+	}
+
+	ordersV1 := projection.ID{Name: "orders", Version: 1}
+	recordRebuild(t, rebuilds, ordersV1, projection.ID{}, false)
+
+	router, err := rebuild.NewStreamRouter(&flakyReader{inner: events, fails: 1})
+	if err != nil {
+		t.Fatalf("creating stream router: %v", err)
+	}
+
+	if _, err := router.Live(t.Context(), "orders"); err == nil {
+		t.Fatal("want the failed fold reported, got nil")
+	}
+
+	if got, err := router.Live(t.Context(), "orders"); err != nil || got != ordersV1 {
+		t.Errorf("want the fold retried and %s live, got %s (%v)", ordersV1, got, err)
+	}
+}
+
+// TestStreamRouter_ReportsCorruptCutoverEvent pins that a cutover event that
+// cannot be decoded is reported on every fold attempt rather than silently
+// skipped past.
+func TestStreamRouter_ReportsCorruptCutoverEvent(t *testing.T) {
+	t.Parallel()
+
+	events, err := esmemory.NewEventStore()
+	if err != nil {
+		t.Fatalf("creating event store: %v", err)
+	}
+
+	if _, err := events.AppendStream(t.Context(), typeid.NewV4(rebuild.StreamType),
+		[]*eventstore.WritableEvent{{Type: "promoted", Data: []byte("not json")}},
+		eventstore.AppendStreamOptions{}); err != nil {
+		t.Fatalf("appending corrupt event: %v", err)
+	}
+
+	router, err := rebuild.NewStreamRouter(events)
+	if err != nil {
+		t.Fatalf("creating stream router: %v", err)
+	}
+
+	if _, err := router.Live(t.Context(), "orders"); err == nil {
+		t.Fatal("want the corrupt event reported, got nil")
+	}
+
+	if _, err := router.Live(t.Context(), "orders"); err == nil {
+		t.Error("want the corrupt event reported again, not skipped, got nil")
 	}
 }
 

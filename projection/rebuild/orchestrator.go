@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/go-estoria/estoria"
 	"github.com/go-estoria/estoria/aggregatestore"
 	"github.com/go-estoria/estoria/eventstore"
 	"github.com/go-estoria/estoria/projection"
@@ -50,6 +51,7 @@ type Orchestrator struct {
 	autoPromote      bool
 	hooks            []CutoverHook
 	processorOptions []processor.Option
+	log              estoria.Logger
 }
 
 // A CutoverHook runs after a promotion or rollback is recorded, receiving the
@@ -74,7 +76,10 @@ func NewOrchestrator(config Config, opts ...OrchestratorOption) (*Orchestrator, 
 		return nil, errors.New("router is required")
 	}
 
-	orchestrator := &Orchestrator{config: config}
+	orchestrator := &Orchestrator{
+		config: config,
+		log:    estoria.GetLogger().WithGroup("rebuild"),
+	}
 
 	for _, opt := range opts {
 		opt(orchestrator)
@@ -95,6 +100,18 @@ func (o *Orchestrator) Begin(ctx context.Context, name, reason string) (*Rebuild
 	next := projection.ID{Name: name, Version: previous.Version + 1}
 	if err := next.Validate(); err != nil {
 		return nil, fmt.Errorf("invalid projection ID: %w", err)
+	}
+
+	// A checkpoint for the target version is evidence of a prior build of it —
+	// rolled back, abandoned uncleanly, or crashed. Its storage and progress
+	// must not leak into this build: resuming a dirty checkpoint would skip
+	// the replay entirely, so clean up before recording the new rebuild.
+	if _, err := o.config.Checkpoints.Load(ctx, next); err == nil {
+		if err := o.cleanup(ctx, next); err != nil {
+			return nil, fmt.Errorf("cleaning up a prior build of %s: %w", next, err)
+		}
+	} else if !errors.Is(err, checkpointstore.ErrCheckpointNotFound) {
+		return nil, fmt.Errorf("checking for a prior build of %s: %w", next, err)
 	}
 
 	aggregate := o.config.Rebuilds.New(uuid.Must(uuid.NewV4()))
@@ -125,19 +142,43 @@ func (o *Orchestrator) Resume(ctx context.Context, id uuid.UUID) (*Rebuild, erro
 	return &Rebuild{orchestrator: o, aggregate: aggregate}, nil
 }
 
-// cutover applies the now-live version to every registered hook, joining
-// errors: the cutover is already recorded, so each failure identifies a cache
-// or storage object that still needs the flip applied.
+// A CutoverHookError reports hooks that failed after a promotion or rollback
+// was recorded. The cutover itself stands — the event is authoritative — so
+// each wrapped failure identifies a cache or storage object that still needs
+// the flip applied: retry the hook's effect, or refresh the cache.
+type CutoverHookError struct {
+	// Live is the version the recorded cutover made live.
+	Live projection.ID
+
+	// Err joins the individual hook failures.
+	Err error
+}
+
+func (e CutoverHookError) Error() string {
+	return "cutover hooks failed for live version " + e.Live.String() + ": " + e.Err.Error()
+}
+
+func (e CutoverHookError) Unwrap() error {
+	return e.Err
+}
+
+// cutover applies the now-live version to every registered hook. Failures are
+// reported as a CutoverHookError: the cutover is already recorded, so a hook
+// failure marks a stale cache, never an unrecorded cutover.
 func (o *Orchestrator) cutover(ctx context.Context, live projection.ID) error {
 	var errs []error
 
 	for _, hook := range o.hooks {
 		if err := hook(ctx, live); err != nil {
-			errs = append(errs, fmt.Errorf("cutover hook: %w", err))
+			errs = append(errs, err)
 		}
 	}
 
-	return errors.Join(errs...)
+	if len(errs) == 0 {
+		return nil
+	}
+
+	return CutoverHookError{Live: live, Err: errors.Join(errs...)}
 }
 
 // cleanup best-effort removes a version's storage (when the handler
@@ -195,5 +236,12 @@ func WithLiveSetter(setter LiveSetter) OrchestratorOption {
 func WithProcessorOptions(opts ...processor.Option) OrchestratorOption {
 	return func(o *Orchestrator) {
 		o.processorOptions = append(o.processorOptions, opts...)
+	}
+}
+
+// WithLogger sets the logger for the Orchestrator.
+func WithLogger(log estoria.Logger) OrchestratorOption {
+	return func(o *Orchestrator) {
+		o.log = log
 	}
 }

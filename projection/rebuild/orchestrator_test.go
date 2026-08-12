@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-estoria/estoria"
 	"github.com/go-estoria/estoria/aggregatestore"
 	"github.com/go-estoria/estoria/eventstore"
 	esmemory "github.com/go-estoria/estoria/eventstore/memory"
@@ -297,11 +298,17 @@ func TestRollback(t *testing.T) {
 	_ = waitDone(t, done1)
 
 	r2 := h.begin("bad mapping")
-	_, _ = runAsync(t, r2)
+	_, done2 := runAsync(t, r2)
 	waitPhase(t, r2, rebuild.PhasePromoted)
 
 	if err := r2.Rollback(t.Context()); err != nil {
 		t.Fatalf("rolling back: %v", err)
+	}
+
+	// Rollback is terminal: the losing version's processor is stopped, and
+	// its Run reports the deliberate stop as nil.
+	if err := waitDone(t, done2); err != nil {
+		t.Errorf("want Run to return nil after Rollback, got %v", err)
 	}
 
 	if live, _ := h.router.Live(t.Context(), "orders"); live != v1 {
@@ -354,9 +361,141 @@ func TestAbandon(t *testing.T) {
 		t.Errorf("want %s torn down, got %v", v1, dropped)
 	}
 
+	// Cleanup ran only after the processor fully exited, so no late
+	// checkpoint save can resurrect the deleted checkpoint.
+	time.Sleep(20 * time.Millisecond)
+
+	if _, err := h.checkpoints.Load(t.Context(), v1); !errors.Is(err, checkpointstore.ErrCheckpointNotFound) {
+		t.Errorf("want the abandoned version's checkpoint to stay deleted, got %v", err)
+	}
+
 	if err := r.Abandon(t.Context(), "again"); err == nil {
 		t.Error("want an error abandoning twice, got nil")
 	}
+}
+
+// TestPromote_HookFailure pins that a hook failing after the promotion is
+// recorded marks a stale cache, not a failed cutover.
+func TestPromote_HookFailure(t *testing.T) {
+	t.Parallel()
+
+	hookErr := errors.New("alias swap failed")
+	failingHook := func(context.Context, projection.ID) error { return hookErr }
+
+	t.Run("auto-promotion keeps the live version tailing", func(t *testing.T) {
+		t.Parallel()
+
+		h := newHarness(t,
+			rebuild.WithAutoPromote(true),
+			rebuild.WithCutoverHook(failingHook),
+			rebuild.WithLogger(discardLogger{}),
+		)
+		h.appendDomain(5)
+
+		r := h.begin("hook failure")
+		_, _ = runAsync(t, r)
+		waitPhase(t, r, rebuild.PhasePromoted)
+
+		v1 := projection.ID{Name: "orders", Version: 1}
+		waitFor(t, func() bool { return len(h.model.table(v1)) == 5 })
+
+		// The live version must still be tailing: later appends reach it.
+		h.appendDomain(3)
+		waitFor(t, func() bool { return len(h.model.table(v1)) == 8 })
+	})
+
+	t.Run("manual promotion reports the failed hooks", func(t *testing.T) {
+		t.Parallel()
+
+		h := newHarness(t, rebuild.WithCutoverHook(failingHook))
+		h.appendDomain(3)
+
+		r := h.begin("hook failure")
+		_, _ = runAsync(t, r)
+		waitPhase(t, r, rebuild.PhaseCaughtUp)
+
+		err := r.Promote(t.Context())
+
+		var cutoverErr rebuild.CutoverHookError
+		if !errors.As(err, &cutoverErr) {
+			t.Fatalf("want a CutoverHookError, got %v", err)
+		}
+
+		if !errors.Is(err, hookErr) {
+			t.Errorf("want the hook's error wrapped, got %v", err)
+		}
+
+		v1 := projection.ID{Name: "orders", Version: 1}
+		if cutoverErr.Live != v1 {
+			t.Errorf("want the error to carry live version %s, got %s", v1, cutoverErr.Live)
+		}
+
+		// The promotion stands despite the hook failure: the event is
+		// authoritative.
+		if got := r.State().Phase; got != rebuild.PhasePromoted {
+			t.Errorf("want phase %s, got %s", rebuild.PhasePromoted, got)
+		}
+	})
+}
+
+// TestBeginAfterRollback_CleansPriorBuild pins that reusing a version number
+// starts from scratch: Begin tears down the prior build's storage and deletes
+// its checkpoint, so the new build replays history instead of resuming a
+// dirty checkpoint parked at the head.
+func TestBeginAfterRollback_CleansPriorBuild(t *testing.T) {
+	t.Parallel()
+
+	h := newHarness(t, rebuild.WithAutoPromote(true))
+	h.appendDomain(5)
+
+	v2 := projection.ID{Name: "orders", Version: 2}
+
+	r1 := h.begin("initial build")
+	cancel1, done1 := runAsync(t, r1)
+	waitPhase(t, r1, rebuild.PhasePromoted)
+	cancel1()
+	_ = waitDone(t, done1)
+
+	r2 := h.begin("first attempt at v2")
+	_, done2 := runAsync(t, r2)
+	waitPhase(t, r2, rebuild.PhasePromoted)
+
+	if err := r2.Rollback(t.Context()); err != nil {
+		t.Fatalf("rolling back: %v", err)
+	}
+
+	if err := waitDone(t, done2); err != nil {
+		t.Errorf("want Run to return nil after Rollback, got %v", err)
+	}
+
+	// The rolled-back build's data and checkpoint stay in place for
+	// inspection...
+	if _, err := h.checkpoints.Load(t.Context(), v2); err != nil {
+		t.Fatalf("want the rolled-back checkpoint retained until reuse, got %v", err)
+	}
+
+	h.appendDomain(2)
+
+	// ...until the version number is reused: Begin cleans up the prior build.
+	r3 := h.begin("second attempt at v2")
+
+	if got := r3.State().Next; got != v2 {
+		t.Fatalf("want the rebuild to target %s again, got %s", v2, got)
+	}
+
+	if dropped := h.model.droppedTables(); len(dropped) != 1 || dropped[0] != v2 {
+		t.Fatalf("want the prior %s build torn down at Begin, got %v", v2, dropped)
+	}
+
+	if _, err := h.checkpoints.Load(t.Context(), v2); !errors.Is(err, checkpointstore.ErrCheckpointNotFound) {
+		t.Fatalf("want the prior %s checkpoint deleted at Begin, got %v", v2, err)
+	}
+
+	_, _ = runAsync(t, r3)
+	waitPhase(t, r3, rebuild.PhasePromoted)
+
+	// A full replay: all 7 events, not just the 2 appended after rollback.
+	waitFor(t, func() bool { return len(h.model.table(v2)) == 7 })
 }
 
 // TestResumeAfterCrash pins crash recovery: a new handle loaded via Resume
@@ -665,3 +804,16 @@ func (h *readModelHandler) Teardown(_ context.Context, id projection.ID) error {
 }
 
 var _ projection.Teardowner = (*readModelHandler)(nil)
+
+// discardLogger keeps deliberate hook-failure logging out of the test output,
+// where it reads as a real failure.
+type discardLogger struct{}
+
+var _ estoria.Logger = discardLogger{}
+
+func (discardLogger) Debug(string, ...any)              {}
+func (discardLogger) Info(string, ...any)               {}
+func (discardLogger) Warn(string, ...any)               {}
+func (discardLogger) Error(string, ...any)              {}
+func (l discardLogger) With(...any) estoria.Logger      { return l }
+func (l discardLogger) WithGroup(string) estoria.Logger { return l }
