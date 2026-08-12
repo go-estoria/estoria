@@ -10,6 +10,7 @@ import (
 
 	"github.com/go-estoria/estoria"
 	"github.com/go-estoria/estoria/eventstore"
+	"github.com/go-estoria/estoria/internal/reservedstream"
 	"github.com/go-estoria/estoria/projection"
 	"github.com/go-estoria/estoria/typeid"
 	"github.com/gofrs/uuid/v5"
@@ -45,6 +46,11 @@ func New[S any](
 ) (*EventSourcedStore[S], error) {
 	if err := typeid.ValidateTypeName(aggregateType); err != nil {
 		return nil, InitializeError{Err: fmt.Errorf("invalid aggregate type: %w", err)}
+	}
+
+	if strings.HasPrefix(aggregateType, eventstore.ReservedStreamTypePrefix) && !reservedstream.Allowed(aggregateType) {
+		return nil, InitializeError{Err: fmt.Errorf("aggregate type %q uses the reserved %q prefix",
+			aggregateType, eventstore.ReservedStreamTypePrefix)}
 	}
 
 	store := &EventSourcedStore[S]{

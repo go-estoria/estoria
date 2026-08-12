@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/go-estoria/estoria/internal/reservedstream"
 	"github.com/go-estoria/estoria/projection"
 	"github.com/go-estoria/estoria/typeid"
 	"github.com/gofrs/uuid/v5"
@@ -22,7 +23,7 @@ import (
 // StreamType is the stream type under which rebuild aggregates are stored. It
 // uses the reserved "estoria." namespace, identifying rebuild streams as
 // library infrastructure wherever they interleave with domain streams.
-const StreamType = "estoria.rebuild"
+const StreamType = reservedstream.RebuildStreamType
 
 // A Phase is a rebuild's position in its lifecycle. Transitions are recorded
 // by the domain events in this package; which transitions are legal is the
