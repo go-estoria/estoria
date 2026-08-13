@@ -27,6 +27,10 @@ import (
 // at the head of the event sequence, absent WithPollInterval.
 const DefaultPollInterval = time.Second
 
+// iteratorCloseTimeout bounds iterator cleanup: it must survive the caller's
+// cancellation without inheriting an unbounded wait from a Close that blocks.
+const iteratorCloseTimeout = 5 * time.Second
+
 // A Processor drives one projection version against the global event
 // sequence. It resumes from the projection's checkpoint, applies each event
 // to the handler, and checkpoints its progress; once it reaches the head it
@@ -100,6 +104,8 @@ func New(
 		return nil, errors.New("batch size must not be negative")
 	case processor.checkpointEvery < 1:
 		return nil, errors.New("checkpoint interval must be positive")
+	case processor.log == nil:
+		return nil, errors.New("logger must not be nil")
 	}
 
 	return processor, nil
@@ -198,7 +204,10 @@ func (p *Processor) drain(ctx context.Context) (bool, error) {
 	}
 
 	defer func() {
-		if err := iter.Close(context.WithoutCancel(ctx)); err != nil {
+		closeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), iteratorCloseTimeout)
+		defer cancel()
+
+		if err := iter.Close(closeCtx); err != nil {
 			p.log.Error("closing event iterator", "projection_id", p.id, "error", err)
 		}
 	}()

@@ -59,6 +59,9 @@ func TestNew(t *testing.T) {
 		{"rejects a non-positive checkpoint interval", func() (*processor.Processor, error) {
 			return processor.New(events, checkpoints, id, handler, processor.WithCheckpointEvery(0))
 		}},
+		{"rejects a nil logger", func() (*processor.Processor, error) {
+			return processor.New(events, checkpoints, id, handler, processor.WithLogger(nil))
+		}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
