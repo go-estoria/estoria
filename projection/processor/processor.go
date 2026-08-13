@@ -44,10 +44,11 @@ type Processor struct {
 	continueOnHandlerError bool
 	log                    estoria.Logger
 
-	position     atomic.Int64
-	caughtUp     chan struct{}
-	caughtUpOnce sync.Once
-	running      atomic.Bool
+	position         atomic.Int64
+	caughtUpPosition atomic.Int64
+	caughtUp         chan struct{}
+	caughtUpOnce     sync.Once
+	running          atomic.Bool
 }
 
 // New creates a new Processor for the given projection ID, which must be
@@ -134,13 +135,18 @@ func (p *Processor) Run(ctx context.Context) error {
 			continue
 		}
 
-		p.caughtUpOnce.Do(func() { close(p.caughtUp) })
-
 		// The idle touch: re-save an unchanged position so UpdatedAt stays
-		// fresh, making checkpoint recency a liveness signal.
+		// fresh, making checkpoint recency a liveness signal. It precedes the
+		// caught-up signal because the signal gates promotion decisions: the
+		// head position must be durable before anyone acts on being caught up.
 		if err := p.saveCheckpoint(ctx); err != nil {
 			return err
 		}
+
+		p.caughtUpOnce.Do(func() {
+			p.caughtUpPosition.Store(p.position.Load())
+			close(p.caughtUp)
+		})
 
 		timer := time.NewTimer(p.pollInterval)
 		select {
@@ -153,9 +159,18 @@ func (p *Processor) Run(ctx context.Context) error {
 }
 
 // CaughtUp returns a channel that is closed the first time a drain cycle
-// reaches the head of the event sequence.
+// reaches the head of the event sequence with the head position durably
+// checkpointed.
 func (p *Processor) CaughtUp() <-chan struct{} {
 	return p.caughtUp
+}
+
+// CaughtUpPosition reports the global position at which the processor first
+// caught up — the position the CaughtUp closure certified as durably
+// checkpointed. It is 0 until CaughtUp is closed and never changes afterward,
+// unlike Position, which keeps advancing as the processor tails.
+func (p *Processor) CaughtUpPosition() int64 {
+	return p.caughtUpPosition.Load()
 }
 
 // Position reports the global position of the last event the processor

@@ -262,12 +262,10 @@ func TestProcessor_CheckpointEvery(t *testing.T) {
 	_, _ = start(t, p)
 	waitCaughtUp(t, p)
 
-	// The end-of-cycle save lands just after the caught-up signal.
-	waitFor(t, func() bool { return len(recorder.snapshot()) >= 2 })
-
+	// Both the cadence save and the head save precede the caught-up signal.
 	saves := recorder.snapshot()
-	if saves[0] != 3 || saves[1] != 5 {
-		t.Errorf("want saves at positions [3 5], got %v", saves[:2])
+	if len(saves) < 2 || saves[0] != 3 || saves[1] != 5 {
+		t.Errorf("want saves at positions [3 5], got %v", saves)
 	}
 }
 
@@ -369,17 +367,77 @@ func TestProcessor_EmptyStore(t *testing.T) {
 	cancel, done := start(t, p)
 	waitCaughtUp(t, p)
 
-	// The caught-up signal precedes the first idle touch, so the checkpoint
-	// may not exist yet at this point; wait for it rather than loading it.
-	waitFor(t, func() bool {
-		checkpoint, err := checkpoints.Load(t.Context(), testID())
-		return err == nil && checkpoint.Position == 0
-	})
+	// The head save precedes the caught-up signal, so the position-0
+	// checkpoint is guaranteed to exist by now.
+	if got := loadPosition(t, checkpoints); got != 0 {
+		t.Errorf("want a checkpoint at position 0, got %d", got)
+	}
 
 	cancel()
 
 	if err := waitDone(t, done); !errors.Is(err, context.Canceled) {
 		t.Errorf("want Run to return the context's error on cancellation, got %v", err)
+	}
+}
+
+// TestProcessor_CaughtUpRequiresDurableCheckpoint pins the promotion-gating
+// order: the head checkpoint save precedes the caught-up signal, so a failed
+// head save leaves the processor not caught up and Run reports the failure.
+func TestProcessor_CaughtUpRequiresDurableCheckpoint(t *testing.T) {
+	t.Parallel()
+
+	events, checkpoints := newStores(t)
+
+	failing := &failingSaveStore{Store: checkpoints, failAt: 0}
+	handler := &collector{}
+	p := newProcessor(t, events, failing, handler)
+
+	_, done := start(t, p)
+
+	err := waitDone(t, done)
+	if err == nil || errors.Is(err, context.Canceled) {
+		t.Fatalf("want Run to return the head checkpoint save failure, got %v", err)
+	}
+
+	select {
+	case <-p.CaughtUp():
+		t.Error("want the processor not caught up after a failed head checkpoint save")
+	default:
+	}
+}
+
+// TestProcessor_CaughtUpPosition pins that the first caught-up position is
+// captured immutably: Position keeps advancing as the processor tails, while
+// CaughtUpPosition stays at the position the caught-up signal certified.
+func TestProcessor_CaughtUpPosition(t *testing.T) {
+	t.Parallel()
+
+	events, checkpoints := newStores(t)
+	appendEvents(t, events, 3)
+
+	handler := &collector{}
+	p := newProcessor(t, events, checkpoints, handler)
+
+	if got := p.CaughtUpPosition(); got != 0 {
+		t.Errorf("want CaughtUpPosition 0 before catch-up, got %d", got)
+	}
+
+	_, _ = start(t, p)
+	waitCaughtUp(t, p)
+
+	if got := p.CaughtUpPosition(); got != 3 {
+		t.Errorf("want CaughtUpPosition 3, got %d", got)
+	}
+
+	appendEvents(t, events, 2)
+	waitForHandled(t, handler, 5)
+
+	if got := p.Position(); got != 5 {
+		t.Errorf("want Position 5 after tailing, got %d", got)
+	}
+
+	if got := p.CaughtUpPosition(); got != 3 {
+		t.Errorf("want CaughtUpPosition to stay 3 after tailing, got %d", got)
 	}
 }
 
