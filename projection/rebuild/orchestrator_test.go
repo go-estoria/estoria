@@ -614,6 +614,54 @@ func TestPromote_RecordedDespiteSaveFailure(t *testing.T) {
 	}
 }
 
+// TestCleanup_TeardownFailurePreservesResidueMarker pins the ordering inside
+// cleanup: the checkpoint is the durable marker Begin uses to detect residue
+// from a prior build, so a failed teardown must leave it in place — deleting
+// it anyway would make the next Begin skip cleanup and build over the stale
+// storage.
+func TestCleanup_TeardownFailurePreservesResidueMarker(t *testing.T) {
+	t.Parallel()
+
+	h := newHarness(t)
+	h.appendDomain(3)
+
+	v1 := projection.ID{Name: "orders", Version: 1}
+
+	r := h.begin("teardown will fail")
+	_, done := runAsync(t, r)
+	waitPhase(t, r, rebuild.PhaseCaughtUp)
+
+	h.model.setTeardownFailure(true)
+
+	if err := r.Abandon(t.Context(), "cleanup failure drill"); err == nil {
+		t.Fatal("want the teardown failure reported, got nil")
+	}
+
+	if err := waitDone(t, done); err != nil {
+		t.Fatalf("want Run to return nil after Abandon, got %v", err)
+	}
+
+	// The storage was not removed, so the marker must survive.
+	if _, err := h.checkpoints.Load(t.Context(), v1); err != nil {
+		t.Fatalf("want the checkpoint retained after a failed teardown, got %v", err)
+	}
+
+	// With teardown working again, reusing the version cleans the residue
+	// and the build replays the full history.
+	h.model.setTeardownFailure(false)
+
+	r2 := h.begin("retry after failed cleanup")
+
+	if dropped := h.model.droppedTables(); len(dropped) != 1 || dropped[0] != v1 {
+		t.Fatalf("want the residue torn down at Begin, got %v", dropped)
+	}
+
+	_, _ = runAsync(t, r2)
+	waitPhase(t, r2, rebuild.PhaseCaughtUp)
+
+	waitFor(t, func() bool { return len(h.model.table(v1)) == 3 })
+}
+
 // TestBeginAfterRollback_CleansPriorBuild pins that reusing a version number
 // starts from scratch: Begin tears down the prior build's storage and deletes
 // its checkpoint, so the new build replays history instead of resuming a
@@ -890,10 +938,11 @@ func TestNewOrchestrator_Validation(t *testing.T) {
 // readModel is the versioned read-side: one "table" of handled global
 // positions per projection version, with Teardown dropping a version's table.
 type readModel struct {
-	mu      sync.Mutex
-	tables  map[projection.ID][]int64
-	dropped []projection.ID
-	gate    chan struct{}
+	mu           sync.Mutex
+	tables       map[projection.ID][]int64
+	dropped      []projection.ID
+	gate         chan struct{}
+	failTeardown bool
 }
 
 func newReadModel() *readModel {
@@ -968,10 +1017,22 @@ func (h *readModelHandler) Handle(ctx context.Context, event *eventstore.Event) 
 	return nil
 }
 
+// setTeardownFailure arms or disarms teardown failures.
+func (m *readModel) setTeardownFailure(fail bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	m.failTeardown = fail
+}
+
 // Teardown implements projection.Teardowner: it drops the version's table.
 func (h *readModelHandler) Teardown(_ context.Context, id projection.ID) error {
 	h.model.mu.Lock()
 	defer h.model.mu.Unlock()
+
+	if h.model.failTeardown {
+		return errors.New("teardown failed")
+	}
 
 	delete(h.model.tables, id)
 	h.model.dropped = append(h.model.dropped, id)

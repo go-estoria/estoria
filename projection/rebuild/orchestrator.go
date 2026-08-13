@@ -181,25 +181,28 @@ func (o *Orchestrator) cutover(ctx context.Context, live projection.ID) error {
 	return CutoverHookError{Live: live, Err: errors.Join(errs...)}
 }
 
-// cleanup best-effort removes a version's storage (when the handler
-// implements projection.Teardowner) and its checkpoint.
+// cleanup removes a version's storage (when the handler implements
+// projection.Teardowner) and then its checkpoint. The checkpoint goes last,
+// and only after the storage cleanup succeeded: its existence is the durable
+// marker Begin uses to detect residue from a prior build, so it must outlive
+// any failure to remove the storage it marks.
 func (o *Orchestrator) cleanup(ctx context.Context, id projection.ID) error {
-	var errs []error
-
 	handler, err := o.config.Handler(id)
 	if err != nil {
-		errs = append(errs, fmt.Errorf("creating handler for %s: %w", id, err))
-	} else if teardowner, ok := handler.(projection.Teardowner); ok {
+		return fmt.Errorf("creating handler for %s: %w", id, err)
+	}
+
+	if teardowner, ok := handler.(projection.Teardowner); ok {
 		if err := teardowner.Teardown(ctx, id); err != nil {
-			errs = append(errs, fmt.Errorf("tearing down %s: %w", id, err))
+			return fmt.Errorf("tearing down %s: %w", id, err)
 		}
 	}
 
 	if err := o.config.Checkpoints.Delete(ctx, id); err != nil && !errors.Is(err, checkpointstore.ErrCheckpointNotFound) {
-		errs = append(errs, fmt.Errorf("deleting checkpoint for %s: %w", id, err))
+		return fmt.Errorf("deleting checkpoint for %s: %w", id, err)
 	}
 
-	return errors.Join(errs...)
+	return nil
 }
 
 // An OrchestratorOption configures an Orchestrator.
