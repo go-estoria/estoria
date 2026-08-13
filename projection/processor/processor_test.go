@@ -269,6 +269,33 @@ func TestProcessor_CheckpointEvery(t *testing.T) {
 	}
 }
 
+// TestProcessor_CheckpointEveryAcrossBatches pins that the checkpoint cadence
+// counts handled events across batch-limited reads rather than resetting at
+// each read: batches of 2 with a cadence of 3 must still save at position 3.
+func TestProcessor_CheckpointEveryAcrossBatches(t *testing.T) {
+	t.Parallel()
+
+	events, _ := newStores(t)
+	appendEvents(t, events, 6)
+
+	recorder := &saveRecorder{Store: cpmemory.NewCheckpointStore()}
+	handler := &collector{}
+	p := newProcessor(t, events, recorder, handler,
+		processor.WithBatchSize(2),
+		processor.WithCheckpointEvery(3),
+	)
+
+	_, _ = start(t, p)
+	waitCaughtUp(t, p)
+
+	// Cadence saves at 3 and 6, then the head save re-saves 6; idle touches
+	// may follow, so assert the prefix.
+	saves := recorder.snapshot()
+	if len(saves) < 3 || saves[0] != 3 || saves[1] != 6 || saves[2] != 6 {
+		t.Errorf("want saves at positions [3 6 6], got %v", saves)
+	}
+}
+
 // TestProcessor_StopsOnHandlerError pins the default error behavior: the
 // failed event stays ahead of the checkpoint, so a restart redelivers it.
 func TestProcessor_StopsOnHandlerError(t *testing.T) {

@@ -49,6 +49,11 @@ type Processor struct {
 	caughtUp         chan struct{}
 	caughtUpOnce     sync.Once
 	running          atomic.Bool
+
+	// sinceCheckpoint counts handled events since the last checkpoint save.
+	// It lives on the Processor rather than in drain so the cadence carries
+	// across batch-limited reads; only Run's goroutine touches it.
+	sinceCheckpoint int
 }
 
 // New creates a new Processor for the given projection ID, which must be
@@ -200,8 +205,6 @@ func (p *Processor) drain(ctx context.Context) (bool, error) {
 
 	var yielded int64
 
-	sinceCheckpoint := 0
-
 	for {
 		event, err := iter.Next(ctx)
 		if errors.Is(err, eventstore.ErrEndOfEventStream) {
@@ -228,13 +231,11 @@ func (p *Processor) drain(ctx context.Context) (bool, error) {
 
 		p.position.Store(*event.GlobalPosition)
 
-		sinceCheckpoint++
-		if sinceCheckpoint >= p.checkpointEvery {
+		p.sinceCheckpoint++
+		if p.sinceCheckpoint >= p.checkpointEvery {
 			if err := p.saveCheckpoint(ctx); err != nil {
 				return false, err
 			}
-
-			sinceCheckpoint = 0
 		}
 	}
 
@@ -254,10 +255,14 @@ func (p *Processor) loadPosition(ctx context.Context) (int64, error) {
 	return checkpoint.Position, nil
 }
 
+// saveCheckpoint saves the current position and, on success, resets the
+// cadence counter: any save means zero events are pending checkpointing.
 func (p *Processor) saveCheckpoint(ctx context.Context) error {
 	if err := p.checkpoints.Save(ctx, p.id, p.position.Load()); err != nil {
 		return fmt.Errorf("saving checkpoint: %w", err)
 	}
+
+	p.sinceCheckpoint = 0
 
 	return nil
 }
@@ -276,7 +281,8 @@ func WithBatchSize(size int64) Option {
 
 // WithCheckpointEvery saves the checkpoint every n handled events instead of
 // after every event. Raising it trades checkpoint write volume against a wider
-// at-least-once redelivery window on crash. The end of every drain cycle still
+// at-least-once redelivery window on crash. The cadence counts across
+// batch-limited reads, and reaching the head of the event sequence always
 // saves regardless of n.
 func WithCheckpointEvery(n int) Option {
 	return func(p *Processor) {
