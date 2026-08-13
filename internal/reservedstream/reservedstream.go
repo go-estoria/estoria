@@ -2,6 +2,11 @@
 // for its own infrastructure. aggregatestore consults it when enforcing the
 // reserved namespace, so the library's own aggregates pass validation that
 // user aggregates do not.
+//
+// The registry guards against accidental collision with user aggregate
+// types; it is not a security boundary. Callers own their event store and
+// can write to any stream in it — consumers of infrastructure streams must
+// treat undecodable data there as an error, not an impossibility.
 package reservedstream
 
 // RebuildStreamType is the stream type under which projection rebuild

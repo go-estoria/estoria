@@ -70,6 +70,16 @@ func (r *Rebuild) Checkpoint(ctx context.Context) (checkpointstore.Checkpoint, e
 func (r *Rebuild) Run(ctx context.Context) error {
 	r.mu.Lock()
 
+	// Refresh before deciding: entering at a caught-up or promoted phase
+	// appends nothing, so a stale handle would otherwise start a processor
+	// for a rebuild that was since rolled back, abandoned, or retired — and
+	// a tailing processor appends nothing that would ever surface the
+	// conflict.
+	if err := r.orchestrator.config.Rebuilds.Hydrate(ctx, r.aggregate, nil); err != nil {
+		r.mu.Unlock()
+		return fmt.Errorf("refreshing rebuild state: %w", err)
+	}
+
 	state := r.aggregate.State()
 
 	var transition estoria.DomainEvent[State]

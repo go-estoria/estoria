@@ -557,6 +557,39 @@ func TestRetire_RefusesAfterStaleRollback(t *testing.T) {
 	}
 }
 
+// TestRun_RefusesStaleTerminalRebuild pins that Run decides from a fresh
+// view: entering at a caught-up phase appends nothing, so without the
+// refresh a handle loaded before an Abandon would start a processor that
+// tails forever without ever surfacing the conflict.
+func TestRun_RefusesStaleTerminalRebuild(t *testing.T) {
+	t.Parallel()
+
+	h := newHarness(t)
+	h.appendDomain(3)
+
+	r := h.begin("will be abandoned under a stale handle")
+	_, done := runAsync(t, r)
+	waitPhase(t, r, rebuild.PhaseCaughtUp)
+
+	// Loaded while the rebuild is still caught up; goes stale at the abandon.
+	stale, err := h.orchestrator.Resume(t.Context(), r.ID().UUID)
+	if err != nil {
+		t.Fatalf("resuming: %v", err)
+	}
+
+	if err := r.Abandon(t.Context(), "abandoned before the stale run"); err != nil {
+		t.Fatalf("abandoning: %v", err)
+	}
+
+	if err := waitDone(t, done); err != nil {
+		t.Fatalf("want Run to return nil after Abandon, got %v", err)
+	}
+
+	if err := stale.Run(t.Context()); err == nil {
+		t.Fatal("want the stale handle's Run refused after the abandon, got nil")
+	}
+}
+
 // TestPromote_RecordedDespiteSaveFailure pins the ErrEventsAppended contract:
 // when the save fails after the event is durable, the flip happened — the
 // cutover hooks still run, and the returned error says the transition is
