@@ -166,6 +166,18 @@ func (r *Rebuild) runToCaughtUp(ctx context.Context, proc *processor.Processor, 
 	}
 
 	r.mu.Lock()
+
+	// Recheck under the lock: a same-handle Abandon between the caught-up
+	// signal and this append shares the aggregate, so it would not surface
+	// as a version conflict — CaughtUp would land cleanly on top of the
+	// Abandoned event.
+	if r.stopped {
+		r.mu.Unlock()
+		<-done
+
+		return false, nil
+	}
+
 	err := r.appendLocked(ctx, CaughtUp{
 		Position: proc.Position(),
 		Duration: time.Since(started),
@@ -211,6 +223,16 @@ func (r *Rebuild) promoteAfterCatchUp(ctx context.Context, stop context.CancelFu
 		return true, nil
 	}
 
+	// The promotion can be durable even when the save could not observe it;
+	// the hooks have run and the version is live, so keep tailing. Only this
+	// handle is stale.
+	if errors.Is(err, aggregatestore.ErrEventsAppended) {
+		r.orchestrator.log.Error("promotion recorded, but the rebuild handle is stale",
+			"rebuild_id", r.ID(), "error", err)
+
+		return true, nil
+	}
+
 	stop()
 	<-done
 
@@ -236,7 +258,7 @@ func (r *Rebuild) Promote(ctx context.Context) error {
 		return fmt.Errorf("cannot promote a rebuild that is %s", state.Phase)
 	}
 
-	err := r.appendLocked(ctx, Promoted{
+	appendErr := r.appendLocked(ctx, Promoted{
 		Previous: state.Previous,
 		Next:     state.Next,
 		At:       time.Now(),
@@ -244,11 +266,20 @@ func (r *Rebuild) Promote(ctx context.Context) error {
 
 	r.mu.Unlock()
 
-	if err != nil {
-		return err
+	// An error carrying ErrEventsAppended means the event is durable and the
+	// aggregate could not observe it: the flip happened, so the hooks must
+	// still run — only this handle is stale.
+	if appendErr != nil && !errors.Is(appendErr, aggregatestore.ErrEventsAppended) {
+		return appendErr
 	}
 
-	return r.orchestrator.cutover(ctx, state.Next)
+	cutoverErr := r.orchestrator.cutover(ctx, state.Next)
+
+	if appendErr != nil {
+		return errors.Join(staleHandleError("promotion", appendErr), cutoverErr)
+	}
+
+	return cutoverErr
 }
 
 // Rollback reverts reads to the previous version. It records RolledBack first
@@ -270,21 +301,23 @@ func (r *Rebuild) Rollback(ctx context.Context) error {
 		return errors.New("rebuild has no previous version to roll back to")
 	}
 
-	if err := r.appendLocked(ctx, RolledBack{RevertedTo: state.Previous}); err != nil {
+	appendErr := r.appendLocked(ctx, RolledBack{RevertedTo: state.Previous})
+	if appendErr != nil && !errors.Is(appendErr, aggregatestore.ErrEventsAppended) {
 		r.mu.Unlock()
-		return err
+		return appendErr
 	}
 
 	r.stopped = true
 	r.mu.Unlock()
 
 	cutoverErr := r.orchestrator.cutover(ctx, state.Previous)
+	stopErr := r.awaitProcessorStop(ctx)
 
-	if err := r.awaitProcessorStop(ctx); err != nil {
-		return err
+	if appendErr != nil {
+		return errors.Join(staleHandleError("rollback", appendErr), cutoverErr, stopErr)
 	}
 
-	return cutoverErr
+	return errors.Join(cutoverErr, stopErr)
 }
 
 // awaitProcessorStop cancels the processor, if one is running, and waits for
@@ -313,7 +346,10 @@ func (r *Rebuild) awaitProcessorStop(ctx context.Context) error {
 // stops the processor, and then cleans up the next version — tearing down its
 // storage when the handler implements projection.Teardowner, and deleting its
 // checkpoint. Cleanup errors are returned, but the abandonment is already
-// recorded.
+// recorded. Cleanup runs only when this handle ran the build's processor:
+// abandoning through a handle that did not leaves the residue in place — a
+// builder elsewhere may still be running, and Begin cleans residue up when
+// the version number is reused.
 func (r *Rebuild) Abandon(ctx context.Context, cause string) error {
 	r.mu.Lock()
 
@@ -326,21 +362,37 @@ func (r *Rebuild) Abandon(ctx context.Context, cause string) error {
 		return fmt.Errorf("cannot abandon a rebuild that is %s", state.Phase)
 	}
 
-	if err := r.appendLocked(ctx, Abandoned{Cause: cause}); err != nil {
+	appendErr := r.appendLocked(ctx, Abandoned{Cause: cause})
+	if appendErr != nil && !errors.Is(appendErr, aggregatestore.ErrEventsAppended) {
 		r.mu.Unlock()
-		return err
+		return appendErr
 	}
 
 	r.stopped = true
+	ownsProcessor := r.stopProcessor != nil
 	r.mu.Unlock()
+
+	if appendErr != nil {
+		appendErr = staleHandleError("abandonment", appendErr)
+	}
+
+	// Clean up only when this handle owned the processor: a missing local
+	// processor is no proof that none is running elsewhere — another process
+	// may still be building this version, and tearing down beneath it races
+	// its writes. Residue from a processor-less abandonment is cleaned up by
+	// Begin when the version number is reused; a remote builder stops when
+	// its next transition append conflicts with the Abandoned event.
+	if !ownsProcessor {
+		return appendErr
+	}
 
 	// Cleanup must not race the exiting processor: a final checkpoint save
 	// landing after the delete would resurrect the checkpoint.
 	if err := r.awaitProcessorStop(ctx); err != nil {
-		return err
+		return errors.Join(appendErr, err)
 	}
 
-	return r.orchestrator.cleanup(ctx, state.Next)
+	return errors.Join(appendErr, r.orchestrator.cleanup(ctx, state.Next))
 }
 
 // Retire tears down the previous version and records PreviousRetired,
@@ -352,6 +404,14 @@ func (r *Rebuild) Abandon(ctx context.Context, cause string) error {
 func (r *Rebuild) Retire(ctx context.Context) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+
+	// Refresh before acting: retirement destroys storage, so it must not
+	// proceed from an arbitrarily stale view of the rebuild. A transition
+	// landing after this refresh is still arbitrated at the final append,
+	// but the destructive act deserves the narrowest possible window.
+	if err := r.orchestrator.config.Rebuilds.Hydrate(ctx, r.aggregate, nil); err != nil {
+		return fmt.Errorf("refreshing rebuild state: %w", err)
+	}
 
 	state := r.aggregate.State()
 
@@ -394,6 +454,14 @@ func (r *Rebuild) appendLocked(ctx context.Context, event estoria.DomainEvent[St
 	}
 
 	return nil
+}
+
+// staleHandleError describes a transition that is durably recorded even
+// though the aggregate could not observe it (aggregatestore.ErrEventsAppended):
+// the action's effects have been applied, but the handle must be discarded
+// and the rebuild resumed before further commands.
+func staleHandleError(action string, err error) error {
+	return fmt.Errorf("%s recorded, but the rebuild handle is stale; resume the rebuild before issuing further commands: %w", action, err)
 }
 
 // processorExit maps the processor's exit to Run's result: a processor

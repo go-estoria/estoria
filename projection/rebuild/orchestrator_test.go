@@ -3,6 +3,7 @@ package rebuild_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -438,6 +439,181 @@ func TestPromote_HookFailure(t *testing.T) {
 	})
 }
 
+// TestAbandon_NeverEndsCaughtUp stresses the same-handle race between the
+// caught-up transition and Abandon: because both share one aggregate, a lost
+// race would let CaughtUp land on top of Abandoned without a version
+// conflict. Whatever the interleaving, an abandoned rebuild's recorded phase
+// must be Abandoned.
+func TestAbandon_NeverEndsCaughtUp(t *testing.T) {
+	t.Parallel()
+
+	for range 25 {
+		h := newHarness(t)
+
+		r := h.begin("raced abandon")
+		_, done := runAsync(t, r)
+
+		if err := r.Abandon(t.Context(), "raced"); err != nil {
+			t.Fatalf("abandoning: %v", err)
+		}
+
+		_ = waitDone(t, done)
+
+		loaded, err := h.rebuilds.Load(t.Context(), r.ID().UUID, nil)
+		if err != nil {
+			t.Fatalf("loading rebuild aggregate: %v", err)
+		}
+
+		if got := loaded.State().Phase; got != rebuild.PhaseAbandoned {
+			t.Fatalf("want the recorded phase %s regardless of interleaving, got %s",
+				rebuild.PhaseAbandoned, got)
+		}
+	}
+}
+
+// TestAbandon_FromResumedHandleSkipsCleanup pins the ownership guard: a
+// handle that never ran the processor cannot know whether one is running
+// elsewhere, so it records the abandonment but leaves cleanup alone. The
+// remote builder stops when its next transition conflicts with Abandoned.
+func TestAbandon_FromResumedHandleSkipsCleanup(t *testing.T) {
+	t.Parallel()
+
+	h := newHarness(t)
+	h.appendDomain(3)
+	h.model.armGate()
+
+	r := h.begin("abandoned remotely")
+	_, done := runAsync(t, r)
+	waitPhase(t, r, rebuild.PhaseBuilding)
+
+	remote, err := h.orchestrator.Resume(t.Context(), r.ID().UUID)
+	if err != nil {
+		t.Fatalf("resuming: %v", err)
+	}
+
+	if err := remote.Abandon(t.Context(), "remote abandon"); err != nil {
+		t.Fatalf("abandoning from the resumed handle: %v", err)
+	}
+
+	if dropped := h.model.droppedTables(); len(dropped) != 0 {
+		t.Errorf("want no teardown from a processor-less abandonment, got %v", dropped)
+	}
+
+	// The original builder proceeds, and its caught-up transition conflicts
+	// with the recorded abandonment: it stops with a version mismatch.
+	h.model.releaseGate()
+
+	if err := waitDone(t, done); !errors.Is(err, eventstore.StreamVersionMismatchError{}) {
+		t.Errorf("want the remote builder refused with a version mismatch, got %v", err)
+	}
+
+	reloaded, err := h.orchestrator.Resume(t.Context(), r.ID().UUID)
+	if err != nil {
+		t.Fatalf("reloading: %v", err)
+	}
+
+	if got := reloaded.State().Phase; got != rebuild.PhaseAbandoned {
+		t.Errorf("want phase %s, got %s", rebuild.PhaseAbandoned, got)
+	}
+}
+
+// TestRetire_RefusesAfterStaleRollback pins that retirement acts on a fresh
+// view: a handle that still believes the rebuild is promoted refreshes at
+// Retire and observes the rollback instead of tearing down the now-live
+// previous version.
+func TestRetire_RefusesAfterStaleRollback(t *testing.T) {
+	t.Parallel()
+
+	h := newHarness(t, rebuild.WithAutoPromote(true))
+	h.appendDomain(3)
+
+	r1 := h.begin("initial build")
+	cancel1, done1 := runAsync(t, r1)
+	waitPhase(t, r1, rebuild.PhasePromoted)
+	cancel1()
+	_ = waitDone(t, done1)
+
+	r2 := h.begin("to be rolled back")
+	_, _ = runAsync(t, r2)
+	waitPhase(t, r2, rebuild.PhasePromoted)
+
+	// A stale handle loaded while the rebuild is still promoted.
+	stale, err := h.orchestrator.Resume(t.Context(), r2.ID().UUID)
+	if err != nil {
+		t.Fatalf("resuming: %v", err)
+	}
+
+	if err := r2.Rollback(t.Context()); err != nil {
+		t.Fatalf("rolling back: %v", err)
+	}
+
+	if err := stale.Retire(t.Context()); err == nil {
+		t.Fatal("want retirement refused after the rollback, got nil")
+	}
+
+	// The now-live previous version's storage must be untouched.
+	if dropped := h.model.droppedTables(); len(dropped) != 0 {
+		t.Errorf("want no teardown from the refused retirement, got %v", dropped)
+	}
+}
+
+// TestPromote_RecordedDespiteSaveFailure pins the ErrEventsAppended contract:
+// when the save fails after the event is durable, the flip happened — the
+// cutover hooks still run, and the returned error says the transition is
+// recorded and the handle is stale.
+func TestPromote_RecordedDespiteSaveFailure(t *testing.T) {
+	t.Parallel()
+
+	events, err := esmemory.NewEventStore()
+	if err != nil {
+		t.Fatalf("creating event store: %v", err)
+	}
+
+	inner, err := rebuild.NewStore(events)
+	if err != nil {
+		t.Fatalf("creating rebuild store: %v", err)
+	}
+
+	rebuilds := &eventsAppendedStore{Store: inner}
+	router := rebuild.NewMemoryRouter()
+	model := newReadModel()
+
+	orchestrator, err := rebuild.NewOrchestrator(rebuild.Config{
+		Events:      events,
+		Checkpoints: cpmemory.NewCheckpointStore(),
+		Handler:     model.handler,
+		Rebuilds:    rebuilds,
+		Router:      router,
+	},
+		rebuild.WithLiveSetter(router),
+		rebuild.WithProcessorOptions(processor.WithPollInterval(2*time.Millisecond)),
+	)
+	if err != nil {
+		t.Fatalf("creating orchestrator: %v", err)
+	}
+
+	r, err := orchestrator.Begin(t.Context(), "orders", "events-appended failure")
+	if err != nil {
+		t.Fatalf("beginning rebuild: %v", err)
+	}
+
+	_, _ = runAsync(t, r)
+	waitPhase(t, r, rebuild.PhaseCaughtUp)
+
+	rebuilds.armFailure()
+
+	err = r.Promote(t.Context())
+	if !errors.Is(err, aggregatestore.ErrEventsAppended) {
+		t.Fatalf("want an error carrying ErrEventsAppended, got %v", err)
+	}
+
+	// The flip is durable, so the hooks must have run despite the error.
+	v1 := projection.ID{Name: "orders", Version: 1}
+	if live, liveErr := router.Live(t.Context(), "orders"); liveErr != nil || live != v1 {
+		t.Errorf("want the cutover hooks to have run (live %s), got %s (%v)", v1, live, liveErr)
+	}
+}
+
 // TestBeginAfterRollback_CleansPriorBuild pins that reusing a version number
 // starts from scratch: Begin tears down the prior build's storage and deletes
 // its checkpoint, so the new build replays history instead of resuming a
@@ -804,6 +980,39 @@ func (h *readModelHandler) Teardown(_ context.Context, id projection.ID) error {
 }
 
 var _ projection.Teardowner = (*readModelHandler)(nil)
+
+// eventsAppendedStore delegates saves and, when armed, reports the next save
+// as failed-after-append: the events are durable in the store, but the error
+// carries aggregatestore.ErrEventsAppended.
+type eventsAppendedStore struct {
+	aggregatestore.Store[rebuild.State]
+	mu    sync.Mutex
+	armed bool
+}
+
+func (s *eventsAppendedStore) armFailure() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.armed = true
+}
+
+func (s *eventsAppendedStore) Save(ctx context.Context, aggregate *aggregatestore.Aggregate[rebuild.State], opts *aggregatestore.SaveOptions) error {
+	s.mu.Lock()
+	armed := s.armed
+	s.armed = false
+	s.mu.Unlock()
+
+	if err := s.Store.Save(ctx, aggregate, opts); err != nil {
+		return err
+	}
+
+	if armed {
+		return fmt.Errorf("%w: simulated read-back failure", aggregatestore.ErrEventsAppended)
+	}
+
+	return nil
+}
 
 // discardLogger keeps deliberate hook-failure logging out of the test output,
 // where it reads as a real failure.
