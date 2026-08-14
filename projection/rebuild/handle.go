@@ -214,7 +214,7 @@ func (r *Rebuild) runToCaughtUp(ctx context.Context, proc *processor.Processor, 
 	}
 
 	err := r.appendLocked(ctx, CaughtUp{
-		Position: proc.Position(),
+		Position: proc.CaughtUpPosition(),
 		Duration: time.Since(started),
 		At:       time.Now(),
 	})
