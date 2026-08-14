@@ -27,6 +27,10 @@ import (
 // at the head of the event sequence, absent WithPollInterval.
 const DefaultPollInterval = time.Second
 
+// iteratorCloseTimeout bounds iterator cleanup: it must survive the caller's
+// cancellation without inheriting an unbounded wait from a Close that blocks.
+const iteratorCloseTimeout = 5 * time.Second
+
 // A Processor drives one projection version against the global event
 // sequence. It resumes from the projection's checkpoint, applies each event
 // to the handler, and checkpoints its progress; once it reaches the head it
@@ -44,10 +48,16 @@ type Processor struct {
 	continueOnHandlerError bool
 	log                    estoria.Logger
 
-	position     atomic.Int64
-	caughtUp     chan struct{}
-	caughtUpOnce sync.Once
-	running      atomic.Bool
+	position         atomic.Int64
+	caughtUpPosition atomic.Int64
+	caughtUp         chan struct{}
+	caughtUpOnce     sync.Once
+	running          atomic.Bool
+
+	// sinceCheckpoint counts handled events since the last checkpoint save.
+	// It lives on the Processor rather than in drain so the cadence carries
+	// across batch-limited reads; only Run's goroutine touches it.
+	sinceCheckpoint int
 }
 
 // New creates a new Processor for the given projection ID, which must be
@@ -94,6 +104,8 @@ func New(
 		return nil, errors.New("batch size must not be negative")
 	case processor.checkpointEvery < 1:
 		return nil, errors.New("checkpoint interval must be positive")
+	case processor.log == nil:
+		return nil, errors.New("logger must not be nil")
 	}
 
 	return processor, nil
@@ -134,13 +146,18 @@ func (p *Processor) Run(ctx context.Context) error {
 			continue
 		}
 
-		p.caughtUpOnce.Do(func() { close(p.caughtUp) })
-
 		// The idle touch: re-save an unchanged position so UpdatedAt stays
-		// fresh, making checkpoint recency a liveness signal.
+		// fresh, making checkpoint recency a liveness signal. It precedes the
+		// caught-up signal because the signal gates promotion decisions: the
+		// head position must be durable before anyone acts on being caught up.
 		if err := p.saveCheckpoint(ctx); err != nil {
 			return err
 		}
+
+		p.caughtUpOnce.Do(func() {
+			p.caughtUpPosition.Store(p.position.Load())
+			close(p.caughtUp)
+		})
 
 		timer := time.NewTimer(p.pollInterval)
 		select {
@@ -153,9 +170,18 @@ func (p *Processor) Run(ctx context.Context) error {
 }
 
 // CaughtUp returns a channel that is closed the first time a drain cycle
-// reaches the head of the event sequence.
+// reaches the head of the event sequence with the head position durably
+// checkpointed.
 func (p *Processor) CaughtUp() <-chan struct{} {
 	return p.caughtUp
+}
+
+// CaughtUpPosition reports the global position at which the processor first
+// caught up — the position the CaughtUp closure certified as durably
+// checkpointed. It is 0 until CaughtUp is closed and never changes afterward,
+// unlike Position, which keeps advancing as the processor tails.
+func (p *Processor) CaughtUpPosition() int64 {
+	return p.caughtUpPosition.Load()
 }
 
 // Position reports the global position of the last event the processor
@@ -178,14 +204,15 @@ func (p *Processor) drain(ctx context.Context) (bool, error) {
 	}
 
 	defer func() {
-		if err := iter.Close(context.WithoutCancel(ctx)); err != nil {
+		closeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), iteratorCloseTimeout)
+		defer cancel()
+
+		if err := iter.Close(closeCtx); err != nil {
 			p.log.Error("closing event iterator", "projection_id", p.id, "error", err)
 		}
 	}()
 
 	var yielded int64
-
-	sinceCheckpoint := 0
 
 	for {
 		event, err := iter.Next(ctx)
@@ -213,13 +240,11 @@ func (p *Processor) drain(ctx context.Context) (bool, error) {
 
 		p.position.Store(*event.GlobalPosition)
 
-		sinceCheckpoint++
-		if sinceCheckpoint >= p.checkpointEvery {
+		p.sinceCheckpoint++
+		if p.sinceCheckpoint >= p.checkpointEvery {
 			if err := p.saveCheckpoint(ctx); err != nil {
 				return false, err
 			}
-
-			sinceCheckpoint = 0
 		}
 	}
 
@@ -239,10 +264,14 @@ func (p *Processor) loadPosition(ctx context.Context) (int64, error) {
 	return checkpoint.Position, nil
 }
 
+// saveCheckpoint saves the current position and, on success, resets the
+// cadence counter: any save means zero events are pending checkpointing.
 func (p *Processor) saveCheckpoint(ctx context.Context) error {
 	if err := p.checkpoints.Save(ctx, p.id, p.position.Load()); err != nil {
 		return fmt.Errorf("saving checkpoint: %w", err)
 	}
+
+	p.sinceCheckpoint = 0
 
 	return nil
 }
@@ -261,7 +290,8 @@ func WithBatchSize(size int64) Option {
 
 // WithCheckpointEvery saves the checkpoint every n handled events instead of
 // after every event. Raising it trades checkpoint write volume against a wider
-// at-least-once redelivery window on crash. The end of every drain cycle still
+// at-least-once redelivery window on crash. The cadence counts across
+// batch-limited reads, and reaching the head of the event sequence always
 // saves regardless of n.
 func WithCheckpointEvery(n int) Option {
 	return func(p *Processor) {
