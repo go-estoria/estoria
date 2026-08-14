@@ -72,6 +72,17 @@ type EventHandler interface {
 	Handle(ctx context.Context, event *eventstore.Event) error
 }
 
+// A Teardowner is implemented by event handlers that can remove the versioned
+// storage they own (drop a table, delete an index). The rebuild orchestrator
+// discovers it by type assertion when retiring a version or cleaning up an
+// abandoned build; without it, removing storage is the caller's
+// responsibility. Teardown must be idempotent — tearing down storage that is
+// already absent must succeed — because cleanup and retirement retry it after
+// partial failures.
+type Teardowner interface {
+	Teardown(ctx context.Context, id ID) error
+}
+
 // An EventHandlerFunc is a function that handles an event during projection.
 type EventHandlerFunc func(ctx context.Context, event *eventstore.Event) error
 
