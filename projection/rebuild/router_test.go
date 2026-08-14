@@ -5,6 +5,7 @@ import (
 	"errors"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/go-estoria/estoria/aggregatestore"
 	"github.com/go-estoria/estoria/eventstore"
@@ -116,6 +117,19 @@ func TestNewStreamRouter_RequiresReader(t *testing.T) {
 
 	if _, err := rebuild.NewStreamRouter(nil); err == nil {
 		t.Error("want an error for a nil reader, got nil")
+	}
+}
+
+func TestNewStreamRouter_RejectsNegativeRefreshInterval(t *testing.T) {
+	t.Parallel()
+
+	events, err := esmemory.NewEventStore()
+	if err != nil {
+		t.Fatalf("creating event store: %v", err)
+	}
+
+	if _, err := rebuild.NewStreamRouter(events, rebuild.WithRefreshInterval(-time.Second)); err == nil {
+		t.Error("want an error for a negative refresh interval, got nil")
 	}
 }
 

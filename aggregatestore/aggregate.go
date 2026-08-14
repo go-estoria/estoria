@@ -64,6 +64,16 @@ func (a *Aggregate[S]) AppendWithMetadata(metadata map[string]string, events ...
 	}
 }
 
+// DiscardUnsavedEvents discards the aggregate's queued unsaved events,
+// restoring it to its last loaded or saved shape. Callers use it after a
+// failed Save so the failed events cannot ride along with a later save. When
+// the failure carried ErrEventsAppended the events are durable despite the
+// error; discarding them does not undo that, and hydrating the aggregate is
+// how they are observed.
+func (a *Aggregate[S]) DiscardUnsavedEvents() {
+	a.clearUnsavedEvents()
+}
+
 // MergeEventMetadata merges the given metadata into each of the aggregate's
 // unsaved events. A key already present on an event is overwritten: the latest
 // write wins. This is how ambient context — correlation and causation IDs,

@@ -52,6 +52,10 @@ type Orchestrator struct {
 	hooks            []CutoverHook
 	processorOptions []processor.Option
 	log              estoria.Logger
+
+	// optionErr collects invalid options for NewOrchestrator to report, so a
+	// nil hook or logger fails construction instead of panicking at use.
+	optionErr error
 }
 
 // A CutoverHook runs after a promotion or rollback is recorded, receiving the
@@ -85,6 +89,10 @@ func NewOrchestrator(config Config, opts ...OrchestratorOption) (*Orchestrator, 
 		opt(orchestrator)
 	}
 
+	if orchestrator.optionErr != nil {
+		return nil, orchestrator.optionErr
+	}
+
 	return orchestrator, nil
 }
 
@@ -95,6 +103,10 @@ func (o *Orchestrator) Begin(ctx context.Context, name, reason string) (*Rebuild
 	previous, err := o.config.Router.Live(ctx, name)
 	if err != nil && !errors.Is(err, ErrNoLiveVersion) {
 		return nil, fmt.Errorf("determining live version: %w", err)
+	}
+
+	if err == nil && previous.Name != name {
+		return nil, fmt.Errorf("router reports %s live for projection %q; refusing to derive a next version from it", previous, name)
 	}
 
 	next := projection.ID{Name: name, Version: previous.Version + 1}
@@ -115,6 +127,10 @@ func (o *Orchestrator) Begin(ctx context.Context, name, reason string) (*Rebuild
 	}
 
 	aggregate := o.config.Rebuilds.New(uuid.Must(uuid.NewV4()))
+	if streamType := aggregate.ID().Type; streamType != StreamType {
+		return nil, fmt.Errorf("rebuild store manages %q streams, want %q; wire it with rebuild.NewStore", streamType, StreamType)
+	}
+
 	aggregate.Append(Created{
 		Name:     name,
 		Next:     next,
@@ -124,6 +140,12 @@ func (o *Orchestrator) Begin(ctx context.Context, name, reason string) (*Rebuild
 	})
 
 	if err := o.config.Rebuilds.Save(ctx, aggregate, nil); err != nil {
+		// The rebuild can exist despite the error; without its internally
+		// assigned ID it would be unreachable, so the error carries it.
+		if errors.Is(err, aggregatestore.ErrEventsAppended) {
+			return nil, OrphanedRebuildError{RebuildID: aggregate.ID().UUID, Err: err}
+		}
+
 		return nil, fmt.Errorf("recording %s: %w", Created{}.EventType(), err)
 	}
 
@@ -139,7 +161,31 @@ func (o *Orchestrator) Resume(ctx context.Context, id uuid.UUID) (*Rebuild, erro
 		return nil, fmt.Errorf("loading rebuild: %w", err)
 	}
 
+	if streamType := aggregate.ID().Type; streamType != StreamType {
+		return nil, fmt.Errorf("rebuild store manages %q streams, want %q; wire it with rebuild.NewStore", streamType, StreamType)
+	}
+
 	return &Rebuild{orchestrator: o, aggregate: aggregate}, nil
+}
+
+// An OrphanedRebuildError reports a rebuild whose Created event was durably
+// recorded even though Begin could not observe the save's result. Rebuild IDs
+// are assigned internally, so without the carried ID the rebuild would be
+// unreachable; Resume it to obtain a usable handle.
+type OrphanedRebuildError struct {
+	// RebuildID identifies the created rebuild, for Resume.
+	RebuildID uuid.UUID
+
+	// Err is the underlying save error, carrying aggregatestore.ErrEventsAppended.
+	Err error
+}
+
+func (e OrphanedRebuildError) Error() string {
+	return "rebuild " + e.RebuildID.String() + " was created, but the result could not be observed; resume it by ID: " + e.Err.Error()
+}
+
+func (e OrphanedRebuildError) Unwrap() error {
+	return e.Err
 }
 
 // A CutoverHookError reports hooks that failed after a promotion or rollback
@@ -222,6 +268,11 @@ func WithAutoPromote(auto bool) OrchestratorOption {
 // Repeatable; hooks run in registration order.
 func WithCutoverHook(hook CutoverHook) OrchestratorOption {
 	return func(o *Orchestrator) {
+		if hook == nil {
+			o.optionErr = errors.Join(o.optionErr, errors.New("cutover hook must not be nil"))
+			return
+		}
+
 		o.hooks = append(o.hooks, hook)
 	}
 }
@@ -230,6 +281,11 @@ func WithCutoverHook(hook CutoverHook) OrchestratorOption {
 // rollback. Repeatable. Equivalent to WithCutoverHook(setter.SetLive).
 func WithLiveSetter(setter LiveSetter) OrchestratorOption {
 	return func(o *Orchestrator) {
+		if setter == nil {
+			o.optionErr = errors.Join(o.optionErr, errors.New("live setter must not be nil"))
+			return
+		}
+
 		o.hooks = append(o.hooks, setter.SetLive)
 	}
 }
@@ -238,6 +294,13 @@ func WithLiveSetter(setter LiveSetter) OrchestratorOption {
 // orchestrator runs for versions being built.
 func WithProcessorOptions(opts ...processor.Option) OrchestratorOption {
 	return func(o *Orchestrator) {
+		for _, opt := range opts {
+			if opt == nil {
+				o.optionErr = errors.Join(o.optionErr, errors.New("processor option must not be nil"))
+				return
+			}
+		}
+
 		o.processorOptions = append(o.processorOptions, opts...)
 	}
 }
@@ -245,6 +308,11 @@ func WithProcessorOptions(opts ...processor.Option) OrchestratorOption {
 // WithLogger sets the logger for the Orchestrator.
 func WithLogger(log estoria.Logger) OrchestratorOption {
 	return func(o *Orchestrator) {
+		if log == nil {
+			o.optionErr = errors.Join(o.optionErr, errors.New("logger must not be nil"))
+			return
+		}
+
 		o.log = log
 	}
 }

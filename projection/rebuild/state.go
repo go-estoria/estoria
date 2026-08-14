@@ -53,8 +53,9 @@ const (
 	// PhaseAbandoned: the rebuild was given up before promotion. Terminal.
 	PhaseAbandoned
 
-	// PhaseRetired: the previous version has been torn down. Terminal for a
-	// successful rebuild.
+	// PhaseRetired: the previous version was retired — its checkpoint
+	// deleted, and its storage torn down when the handler supports teardown.
+	// Terminal for a successful rebuild.
 	PhaseRetired
 )
 

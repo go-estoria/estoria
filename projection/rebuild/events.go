@@ -155,8 +155,11 @@ func (e Abandoned) ApplyTo(s State) State {
 	return s
 }
 
-// PreviousRetired records that the previous version's storage was torn down,
-// recorded only after the teardown succeeded.
+// PreviousRetired records that the previous version was retired: its
+// checkpoint was deleted and, when the handler implements
+// projection.Teardowner, its storage was torn down first — the event is
+// recorded only after those acts succeed. Without a Teardowner, removing the
+// storage remains the caller's responsibility.
 type PreviousRetired struct {
 	Retired projection.ID
 }

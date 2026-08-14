@@ -38,15 +38,31 @@ type harness struct {
 func newHarness(t *testing.T, opts ...rebuild.OrchestratorOption) *harness {
 	t.Helper()
 
-	events, err := esmemory.NewEventStore()
-	if err != nil {
-		t.Fatalf("creating event store: %v", err)
-	}
+	events := newEventStore(t)
 
 	rebuilds, err := rebuild.NewStore(events)
 	if err != nil {
 		t.Fatalf("creating rebuild store: %v", err)
 	}
+
+	return buildHarness(t, events, rebuilds, opts...)
+}
+
+func newEventStore(t *testing.T) *esmemory.EventStore {
+	t.Helper()
+
+	events, err := esmemory.NewEventStore()
+	if err != nil {
+		t.Fatalf("creating event store: %v", err)
+	}
+
+	return events
+}
+
+// buildHarness wires the standard harness around the given stores, so tests
+// can interpose failure-injecting wrappers at either layer.
+func buildHarness(t *testing.T, events *esmemory.EventStore, rebuilds aggregatestore.Store[rebuild.State], opts ...rebuild.OrchestratorOption) *harness {
+	t.Helper()
 
 	checkpoints := cpmemory.NewCheckpointStore()
 	router := rebuild.NewMemoryRouter()
@@ -199,7 +215,7 @@ func TestBlueGreen_AutoPromote(t *testing.T) {
 		t.Fatalf("want a rebuild of %s to %s, got %+v", v1, v2, state)
 	}
 
-	_, done2 := runAsync(t, r2)
+	cancel2, done2 := runAsync(t, r2)
 	waitPhase(t, r2, rebuild.PhasePromoted)
 
 	if live, _ := h.router.Live(t.Context(), "orders"); live != v2 {
@@ -243,7 +259,11 @@ func TestBlueGreen_AutoPromote(t *testing.T) {
 		t.Errorf("want the retired version's checkpoint deleted, got %v", err)
 	}
 
-	_ = done2
+	cancel2()
+
+	if err := waitDone(t, done2); !errors.Is(err, context.Canceled) {
+		t.Fatalf("stopping v2 projector: %v", err)
+	}
 }
 
 // TestBlueGreen_ManualPromote pins the default gate: caught-up does not flip
@@ -644,6 +664,358 @@ func TestPromote_RecordedDespiteSaveFailure(t *testing.T) {
 	v1 := projection.ID{Name: "orders", Version: 1}
 	if live, liveErr := router.Live(t.Context(), "orders"); liveErr != nil || live != v1 {
 		t.Errorf("want the cutover hooks to have run (live %s), got %s (%v)", v1, live, liveErr)
+	}
+}
+
+// TestPromoteFailure_DoesNotLeakIntoAbandon pins that a failed command save
+// leaves nothing queued on the handle: without the discard, the failed
+// Promote's event would ride along with a later Abandon's save, durably
+// promoting the version and then tearing down the now-live model.
+func TestPromoteFailure_DoesNotLeakIntoAbandon(t *testing.T) {
+	t.Parallel()
+
+	events := newEventStore(t)
+
+	inner, err := rebuild.NewStore(events)
+	if err != nil {
+		t.Fatalf("creating rebuild store: %v", err)
+	}
+
+	rebuilds := &refusingStore{Store: inner}
+	h := buildHarness(t, events, rebuilds)
+	h.appendDomain(3)
+
+	r := h.begin("save will fail")
+	_, done := runAsync(t, r)
+	waitPhase(t, r, rebuild.PhaseCaughtUp)
+
+	rebuilds.armFailure()
+
+	if err := r.Promote(t.Context()); err == nil {
+		t.Fatal("want the armed save failure, got nil")
+	}
+
+	if err := r.Abandon(t.Context(), "giving up after failed promote"); err != nil {
+		t.Fatalf("abandoning after a failed promote: %v", err)
+	}
+
+	if err := waitDone(t, done); err != nil {
+		t.Fatalf("want Run to return nil after Abandon, got %v", err)
+	}
+
+	// The failed promotion must not have become durable alongside the
+	// abandonment: no Promoted in the history, and reads never flipped.
+	if got := countEventsOfType(t, events, rebuild.Promoted{}.EventType()); got != 0 {
+		t.Errorf("want no Promoted events recorded, got %d", got)
+	}
+
+	if _, err := h.router.Live(t.Context(), "orders"); !errors.Is(err, rebuild.ErrNoLiveVersion) {
+		t.Errorf("want no live version after the abandoned rebuild, got %v", err)
+	}
+
+	if got := r.State().Phase; got != rebuild.PhaseAbandoned {
+		t.Errorf("want phase %s, got %s", rebuild.PhaseAbandoned, got)
+	}
+}
+
+// TestStaleHandle_DoesNotReplayDurableTransition pins the durable-append
+// variant of the same defect: after a save fails with the event already
+// durable, a later command on the same handle must not re-append that event.
+// Retire rehydrates before acting, which restores version freshness — without
+// the discard, the leftover queued Promoted would append cleanly as a
+// duplicate ahead of PreviousRetired.
+func TestStaleHandle_DoesNotReplayDurableTransition(t *testing.T) {
+	t.Parallel()
+
+	events := newEventStore(t)
+	writer := &truncatingWriter{Store: events}
+
+	rebuilds, err := rebuild.NewStore(writer)
+	if err != nil {
+		t.Fatalf("creating rebuild store: %v", err)
+	}
+
+	h := buildHarness(t, events, rebuilds)
+	h.appendDomain(3)
+
+	// Build and promote v1 so the second rebuild has a previous to retire.
+	r1 := h.begin("initial build")
+	cancel1, done1 := runAsync(t, r1)
+	waitPhase(t, r1, rebuild.PhaseCaughtUp)
+
+	if err := r1.Promote(t.Context()); err != nil {
+		t.Fatalf("promoting v1: %v", err)
+	}
+
+	cancel1()
+
+	if err := waitDone(t, done1); !errors.Is(err, context.Canceled) {
+		t.Fatalf("stopping the v1 build: %v", err)
+	}
+
+	r2 := h.begin("second build")
+	cancel2, done2 := runAsync(t, r2)
+	waitPhase(t, r2, rebuild.PhaseCaughtUp)
+
+	writer.armFailure()
+
+	err = r2.Promote(t.Context())
+	if !errors.Is(err, aggregatestore.ErrEventsAppended) {
+		t.Fatalf("want an error carrying ErrEventsAppended, got %v", err)
+	}
+
+	// The promotion is durable despite the failed save; Retire rehydrates,
+	// observes it, and must record exactly one retirement — not a replayed
+	// Promoted.
+	if err := r2.Retire(t.Context()); err != nil {
+		t.Fatalf("retiring after a stale promote: %v", err)
+	}
+
+	if got := countEventsOfType(t, events, rebuild.Promoted{}.EventType()); got != 2 {
+		t.Errorf("want one Promoted per rebuild (2 total), got %d", got)
+	}
+
+	if got := countEventsOfType(t, events, rebuild.PreviousRetired{}.EventType()); got != 1 {
+		t.Errorf("want exactly one PreviousRetired, got %d", got)
+	}
+
+	cancel2()
+
+	if err := waitDone(t, done2); !errors.Is(err, context.Canceled) {
+		t.Fatalf("stopping the v2 build: %v", err)
+	}
+}
+
+// TestBegin_OrphanedCreateReturnsRebuildID pins Begin's durable-append error:
+// the rebuild exists under an internally assigned ID, so the error must carry
+// that ID and Resume must reach the rebuild.
+func TestBegin_OrphanedCreateReturnsRebuildID(t *testing.T) {
+	t.Parallel()
+
+	events := newEventStore(t)
+	writer := &truncatingWriter{Store: events}
+
+	rebuilds, err := rebuild.NewStore(writer)
+	if err != nil {
+		t.Fatalf("creating rebuild store: %v", err)
+	}
+
+	h := buildHarness(t, events, rebuilds)
+
+	writer.armFailure()
+
+	_, err = h.orchestrator.Begin(t.Context(), "orders", "orphaned create")
+
+	var orphaned rebuild.OrphanedRebuildError
+	if !errors.As(err, &orphaned) {
+		t.Fatalf("want an OrphanedRebuildError, got %v", err)
+	}
+
+	if !errors.Is(err, aggregatestore.ErrEventsAppended) {
+		t.Errorf("want the error to carry ErrEventsAppended, got %v", err)
+	}
+
+	r, err := h.orchestrator.Resume(t.Context(), orphaned.RebuildID)
+	if err != nil {
+		t.Fatalf("resuming the orphaned rebuild: %v", err)
+	}
+
+	v1 := projection.ID{Name: "orders", Version: 1}
+	if state := r.State(); state.Phase != rebuild.PhaseCreated || state.Next != v1 {
+		t.Errorf("want the orphaned rebuild resumable at %s targeting %s, got %+v", rebuild.PhaseCreated, v1, state)
+	}
+}
+
+// TestRun_SingleUse pins the handle contract: Run may be called at most once
+// per handle, so a second call cannot start a competing processor whose
+// ownership silently overwrites the first's.
+func TestRun_SingleUse(t *testing.T) {
+	t.Parallel()
+
+	h := newHarness(t)
+	h.appendDomain(3)
+
+	r := h.begin("single use")
+
+	cancel, done := runAsync(t, r)
+	waitPhase(t, r, rebuild.PhaseCaughtUp)
+
+	// The deadline bounds the failure mode: without the guard, a repeated
+	// call starts a second processor and blocks tailing until its context
+	// dies, so a deadline expiry means the call was not refused.
+	secondCtx, cancelSecond := context.WithTimeout(t.Context(), 250*time.Millisecond)
+	defer cancelSecond()
+
+	if err := r.Run(secondCtx); err == nil || errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("want a second Run refused immediately, got %v", err)
+	}
+
+	cancel()
+
+	if err := waitDone(t, done); !errors.Is(err, context.Canceled) {
+		t.Fatalf("stopping the first Run: %v", err)
+	}
+
+	thirdCtx, cancelThird := context.WithTimeout(t.Context(), 250*time.Millisecond)
+	defer cancelThird()
+
+	if err := r.Run(thirdCtx); err == nil || errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("want Run refused after the handle already ran, got %v", err)
+	}
+}
+
+// TestRun_ResumesAutoPromotion pins append-then-act reconciliation for the
+// caught-up window: a rebuild that recorded CaughtUp but stopped before its
+// auto-promotion is promoted when Run resumes it, rather than tailing
+// unpromoted forever.
+func TestRun_ResumesAutoPromotion(t *testing.T) {
+	t.Parallel()
+
+	h := newHarness(t)
+	h.appendDomain(3)
+
+	r := h.begin("will stop at caught-up")
+	cancel, done := runAsync(t, r)
+	waitPhase(t, r, rebuild.PhaseCaughtUp)
+	cancel()
+
+	if err := waitDone(t, done); !errors.Is(err, context.Canceled) {
+		t.Fatalf("stopping the build: %v", err)
+	}
+
+	// An auto-promoting orchestrator over the same stores resumes the
+	// rebuild; entering at caught-up must retry the promotion.
+	auto, err := rebuild.NewOrchestrator(rebuild.Config{
+		Events:      h.events,
+		Checkpoints: h.checkpoints,
+		Handler:     h.model.handler,
+		Rebuilds:    h.rebuilds,
+		Router:      h.router,
+	},
+		rebuild.WithAutoPromote(true),
+		rebuild.WithLiveSetter(h.router),
+		rebuild.WithProcessorOptions(processor.WithPollInterval(2*time.Millisecond)),
+	)
+	if err != nil {
+		t.Fatalf("creating auto-promoting orchestrator: %v", err)
+	}
+
+	resumed, err := auto.Resume(t.Context(), r.ID().UUID)
+	if err != nil {
+		t.Fatalf("resuming: %v", err)
+	}
+
+	cancel2, done2 := runAsync(t, resumed)
+	waitPhase(t, resumed, rebuild.PhasePromoted)
+
+	v1 := projection.ID{Name: "orders", Version: 1}
+	if live, liveErr := h.router.Live(t.Context(), "orders"); liveErr != nil || live != v1 {
+		t.Fatalf("want %s live after resumed auto-promotion, got %s (%v)", v1, live, liveErr)
+	}
+
+	cancel2()
+
+	if err := waitDone(t, done2); !errors.Is(err, context.Canceled) {
+		t.Fatalf("stopping the resumed run: %v", err)
+	}
+}
+
+// TestNewOrchestrator_RejectsInvalidOptions pins that misconfiguration
+// surfaces at construction rather than as a panic at cutover time.
+func TestNewOrchestrator_RejectsInvalidOptions(t *testing.T) {
+	t.Parallel()
+
+	events := newEventStore(t)
+
+	rebuilds, err := rebuild.NewStore(events)
+	if err != nil {
+		t.Fatalf("creating rebuild store: %v", err)
+	}
+
+	model := newReadModel()
+	config := rebuild.Config{
+		Events:      events,
+		Checkpoints: cpmemory.NewCheckpointStore(),
+		Handler:     model.handler,
+		Rebuilds:    rebuilds,
+		Router:      rebuild.NewMemoryRouter(),
+	}
+
+	for _, tt := range []struct {
+		name string
+		opt  rebuild.OrchestratorOption
+	}{
+		{"rejects a nil cutover hook", rebuild.WithCutoverHook(nil)},
+		{"rejects a nil live setter", rebuild.WithLiveSetter(nil)},
+		{"rejects a nil processor option", rebuild.WithProcessorOptions(nil)},
+		{"rejects a nil logger", rebuild.WithLogger(nil)},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			if _, err := rebuild.NewOrchestrator(config, tt.opt); err == nil {
+				t.Error("want an error, got nil")
+			}
+		})
+	}
+}
+
+// TestBegin_RejectsForeignStoreType pins that a rebuild store not managing
+// estoria.rebuild streams is refused before anything is recorded: its cutover
+// events would be invisible to StreamRouter's fold.
+func TestBegin_RejectsForeignStoreType(t *testing.T) {
+	t.Parallel()
+
+	events := newEventStore(t)
+
+	foreign, err := aggregatestore.New(events, "ordertest", rebuild.NewState)
+	if err != nil {
+		t.Fatalf("creating foreign-typed store: %v", err)
+	}
+
+	h := buildHarness(t, events, foreign)
+
+	if _, err := h.orchestrator.Begin(t.Context(), "orders", "wrong store"); err == nil {
+		t.Error("want Begin to reject a store with a foreign stream type, got nil")
+	}
+}
+
+// mismatchedRouter answers every Live query with a version of a different
+// projection.
+type mismatchedRouter struct{}
+
+func (mismatchedRouter) Live(context.Context, string) (projection.ID, error) {
+	return projection.ID{Name: "other", Version: 3}, nil
+}
+
+// TestBegin_RejectsMismatchedRouterAnswer pins that Begin refuses to derive a
+// target from a router answer for a different projection, instead of quietly
+// versioning against the wrong lineage.
+func TestBegin_RejectsMismatchedRouterAnswer(t *testing.T) {
+	t.Parallel()
+
+	events := newEventStore(t)
+
+	rebuilds, err := rebuild.NewStore(events)
+	if err != nil {
+		t.Fatalf("creating rebuild store: %v", err)
+	}
+
+	model := newReadModel()
+
+	orchestrator, err := rebuild.NewOrchestrator(rebuild.Config{
+		Events:      events,
+		Checkpoints: cpmemory.NewCheckpointStore(),
+		Handler:     model.handler,
+		Rebuilds:    rebuilds,
+		Router:      mismatchedRouter{},
+	})
+	if err != nil {
+		t.Fatalf("creating orchestrator: %v", err)
+	}
+
+	if _, err := orchestrator.Begin(t.Context(), "orders", "mismatched router"); err == nil {
+		t.Error("want Begin to reject a router answer for a different projection, got nil")
 	}
 }
 
@@ -1106,6 +1478,93 @@ func (s *eventsAppendedStore) Save(ctx context.Context, aggregate *aggregatestor
 	}
 
 	return nil
+}
+
+// refusingStore delegates saves and, when armed, refuses the next save
+// outright, before anything reaches the event store — the pre-append failure
+// shape, which leaves the command's event queued on the aggregate.
+type refusingStore struct {
+	aggregatestore.Store[rebuild.State]
+	mu    sync.Mutex
+	armed bool
+}
+
+func (s *refusingStore) armFailure() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.armed = true
+}
+
+func (s *refusingStore) Save(ctx context.Context, aggregate *aggregatestore.Aggregate[rebuild.State], opts *aggregatestore.SaveOptions) error {
+	s.mu.Lock()
+	armed := s.armed
+	s.armed = false
+	s.mu.Unlock()
+
+	if armed {
+		return errors.New("simulated save refusal")
+	}
+
+	return s.Store.Save(ctx, aggregate, opts)
+}
+
+// truncatingWriter delegates appends and, when armed, truncates the next
+// append's result: the events are durable in the store, but the caller cannot
+// observe them. Driving the real aggregate store over this writer produces
+// the faithful ErrEventsAppended shape — queue intact, state not advanced —
+// unlike eventsAppendedStore, whose inner save fully applies first.
+type truncatingWriter struct {
+	eventstore.Store
+	mu    sync.Mutex
+	armed bool
+}
+
+func (w *truncatingWriter) armFailure() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	w.armed = true
+}
+
+func (w *truncatingWriter) AppendStream(ctx context.Context, streamID typeid.ID, events []*eventstore.WritableEvent, opts eventstore.AppendStreamOptions) ([]*eventstore.Event, error) {
+	w.mu.Lock()
+	armed := w.armed
+	w.armed = false
+	w.mu.Unlock()
+
+	written, err := w.Store.AppendStream(ctx, streamID, events, opts)
+	if err != nil || !armed {
+		return written, err
+	}
+
+	return written[:0], nil
+}
+
+// countEventsOfType counts events of the given type across the entire store,
+// for asserting what a command sequence durably recorded.
+func countEventsOfType(t *testing.T, events *esmemory.EventStore, eventType string) int {
+	t.Helper()
+
+	iter, err := events.ReadAll(t.Context(), eventstore.ReadAllOptions{})
+	if err != nil {
+		t.Fatalf("reading events: %v", err)
+	}
+
+	all, err := eventstore.Collect(t.Context(), iter)
+	if err != nil {
+		t.Fatalf("collecting events: %v", err)
+	}
+
+	count := 0
+
+	for _, event := range all {
+		if event.ID.Type == eventType {
+			count++
+		}
+	}
+
+	return count
 }
 
 // discardLogger keeps deliberate hook-failure logging out of the test output,

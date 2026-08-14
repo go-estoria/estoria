@@ -35,6 +35,11 @@ type Rebuild struct {
 	// stopped records that a command (Abandon, Rollback) deliberately stopped
 	// the processor, so Run reports nil rather than the cancellation.
 	stopped bool
+
+	// ran records that Run was called, successfully or not: a second call
+	// would overwrite the processor ownership fields above, leaving commands
+	// able to stop only the newest of two running processors.
+	ran bool
 }
 
 // ID returns the rebuild aggregate's typed ID; its UUID is what Resume takes.
@@ -64,11 +69,21 @@ func (r *Rebuild) Checkpoint(ctx context.Context) (checkpointstore.Checkpoint, e
 // Run drives the build: it records the build starting (or resuming, when the
 // rebuild was already building), runs a processor for the next version,
 // records catch-up when the build first drains to the head, promotes if the
-// orchestrator auto-promotes, and keeps the processor tailing until ctx is
-// canceled. It returns nil after an Abandon stops the processor, and the
-// context's error on cancellation.
+// orchestrator auto-promotes — including when resuming a rebuild that
+// recorded catch-up but stopped before promoting — and keeps the processor
+// tailing until ctx is canceled. It returns nil after an Abandon stops the
+// processor, and the context's error on cancellation. Run may be called at
+// most once per handle, successful or not; resume the rebuild for a new
+// handle to run it again.
 func (r *Rebuild) Run(ctx context.Context) error {
 	r.mu.Lock()
+
+	if r.ran {
+		r.mu.Unlock()
+		return errors.New("rebuild handle has already run; resume the rebuild for a new handle")
+	}
+
+	r.ran = true
 
 	// Refresh before deciding: entering at a caught-up or promoted phase
 	// appends nothing, so a stale handle would otherwise start a processor
@@ -143,6 +158,7 @@ func (r *Rebuild) Run(ctx context.Context) error {
 	r.stopProcessor = stop
 	r.processorExited = exited
 	catchingUp := state.Phase == PhaseCreated || state.Phase == PhaseBuilding
+	promoteOnResume := state.Phase == PhaseCaughtUp && r.orchestrator.autoPromote
 	r.mu.Unlock()
 
 	started := time.Now()
@@ -152,8 +168,17 @@ func (r *Rebuild) Run(ctx context.Context) error {
 		close(exited)
 	}()
 
-	if catchingUp {
+	switch {
+	case catchingUp:
 		if keepTailing, err := r.runToCaughtUp(ctx, proc, stop, done, started); !keepTailing {
+			return err
+		}
+	case promoteOnResume:
+		// Append-then-act reconciliation: recording CaughtUp and promoting
+		// are separate appends, so a crash between them leaves an
+		// auto-promoting rebuild caught up but unpromoted. Resume repairs
+		// that by retrying the promotion.
+		if keepTailing, err := r.promoteAfterCatchUp(ctx, stop, done); !keepTailing {
 			return err
 		}
 	}
@@ -215,8 +240,10 @@ func (r *Rebuild) runToCaughtUp(ctx context.Context, proc *processor.Processor, 
 	return true, nil
 }
 
-// promoteAfterCatchUp auto-promotes, mapping the outcome to runToCaughtUp's
-// contract: it reports whether Run should keep tailing.
+// promoteAfterCatchUp auto-promotes a caught-up rebuild — directly after
+// catch-up, or on resume of one that recorded catch-up but never promoted —
+// mapping the outcome to the shared contract: it reports whether Run should
+// keep tailing.
 func (r *Rebuild) promoteAfterCatchUp(ctx context.Context, stop context.CancelFunc, done <-chan error) (bool, error) {
 	err := r.Promote(ctx)
 	if err == nil {
@@ -460,6 +487,12 @@ func (r *Rebuild) appendLocked(ctx context.Context, event estoria.DomainEvent[St
 	r.aggregate.Append(event)
 
 	if err := r.orchestrator.config.Rebuilds.Save(ctx, r.aggregate, nil); err != nil {
+		// Discard the failed append: left queued, it would ride along with a
+		// later command's save and durably record both transitions. When the
+		// error carries ErrEventsAppended the event is durable regardless, and
+		// the next hydration observes it.
+		r.aggregate.DiscardUnsavedEvents()
+
 		return fmt.Errorf("recording %s: %w", event.EventType(), err)
 	}
 

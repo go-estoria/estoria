@@ -17,6 +17,10 @@ import (
 // been promoted.
 var ErrNoLiveVersion = errors.New("no live version")
 
+// iteratorCloseTimeout bounds iterator cleanup: it must survive the caller's
+// cancellation without inheriting an unbounded wait from a Close that blocks.
+const iteratorCloseTimeout = 5 * time.Second
+
 // A Router answers which version of a named projection serves reads. The
 // orchestrator consults it to derive next-version numbers and rollback
 // targets; a read-model repository consults it only in logical-cutover
@@ -111,6 +115,10 @@ func NewStreamRouter(events eventstore.GlobalReader, opts ...StreamRouterOption)
 		opt(router)
 	}
 
+	if router.refreshInterval < 0 {
+		return nil, errors.New("refresh interval must not be negative")
+	}
+
 	return router, nil
 }
 
@@ -155,7 +163,10 @@ func (r *StreamRouter) advance(ctx context.Context) error {
 	}
 
 	defer func() {
-		_ = iter.Close(context.WithoutCancel(ctx))
+		closeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), iteratorCloseTimeout)
+		defer cancel()
+
+		_ = iter.Close(closeCtx)
 	}()
 
 	live := maps.Clone(r.live)

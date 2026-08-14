@@ -10,12 +10,11 @@ import (
 // store wired with StreamType, the state factory, and every rebuild event type.
 // Pass the domain event store to keep rebuild streams alongside domain streams
 // (handlers filter by stream type), or a store backed by separate storage to
-// keep them apart.
-func NewStore(events eventstore.Store, opts ...aggregatestore.EventSourcedStoreOption[State]) (aggregatestore.Store[State], error) {
+// keep them apart. The store uses the default JSON domain event codec, which
+// StreamRouter's cutover fold depends on; it is deliberately not configurable.
+func NewStore(events eventstore.Store) (aggregatestore.Store[State], error) {
 	return aggregatestore.New(events, StreamType, NewState,
-		append([]aggregatestore.EventSourcedStoreOption[State]{
-			aggregatestore.WithEventTypes(allDomainEvents()...),
-		}, opts...)...)
+		aggregatestore.WithEventTypes(allDomainEvents()...))
 }
 
 // allDomainEvents returns a prototype of every rebuild domain event, for
