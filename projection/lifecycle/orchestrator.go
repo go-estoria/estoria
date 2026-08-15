@@ -30,9 +30,9 @@ type Config struct {
 	Checkpoints checkpointstore.Store
 
 	// Handler returns the event handler for a projection version. The ID
-	// flows through so the handler targets versioned storage; a handler that
-	// also implements projection.Teardowner lets the orchestrator remove that
-	// storage when a version is retired or an abandoned build is cleaned up.
+	// flows through so the handler targets versioned storage. Retiring a
+	// version's predecessor requires the predecessor's handler to implement
+	// projection.Teardowner, which performs the storage removal.
 	Handler func(id projection.ID) (projection.EventHandler, error)
 
 	// Projections is the aggregate store holding projection lifecycle
@@ -81,6 +81,10 @@ func NewOrchestrator(config Config, opts ...OrchestratorOption) (*Orchestrator, 
 	}
 
 	for _, opt := range opts {
+		if opt == nil {
+			return nil, errors.New("orchestrator option must not be nil")
+		}
+
 		opt(orchestrator)
 	}
 
@@ -185,42 +189,23 @@ func (o *Orchestrator) loadAggregate(ctx context.Context, name string) (*aggrega
 	return aggregate, nil
 }
 
-// checkAggregate verifies that the aggregate is a lifecycle aggregate and
-// that its recorded name matches the name that addressed it. A mismatch
-// means the store is wired with the wrong stream type, or the stream holds
-// tampered data — either way, no command should act on it.
+// checkAggregate verifies that the aggregate is a lifecycle aggregate, that
+// its recorded name matches the name that addressed it, and that its folded
+// state is structurally sound. A failure means the store is wired with the
+// wrong stream type, or the stream holds tampered data — either way, no
+// command should act on it.
 func (o *Orchestrator) checkAggregate(aggregate *aggregatestore.Aggregate[State], name string) error {
 	if streamType := aggregate.ID().Type; streamType != StreamType {
 		return fmt.Errorf("projection store manages %q streams, want %q; wire it with lifecycle.NewStore", streamType, StreamType)
 	}
 
-	if got := aggregate.State().Name; got != "" && got != name {
-		return fmt.Errorf("lifecycle stream addressed by projection %q holds state for %q", name, got)
+	state := aggregate.State()
+	if state.Name != "" && state.Name != name {
+		return fmt.Errorf("lifecycle stream addressed by projection %q holds state for %q", name, state.Name)
 	}
 
-	return nil
-}
-
-// cleanup removes a version's storage (when the handler implements
-// projection.Teardowner) and then its checkpoint. The checkpoint goes last,
-// and only after the storage cleanup succeeded: it is the durable marker
-// that a build of this identity existed, so it must outlive any failure to
-// remove the storage it marks — residue stays enumerable rather than
-// becoming invisible while still present.
-func (o *Orchestrator) cleanup(ctx context.Context, id projection.ID) error {
-	handler, err := o.config.Handler(id)
-	if err != nil {
-		return fmt.Errorf("creating handler for %s: %w", id, err)
-	}
-
-	if teardowner, ok := handler.(projection.Teardowner); ok {
-		if err := teardowner.Teardown(ctx, id); err != nil {
-			return fmt.Errorf("tearing down %s: %w", id, err)
-		}
-	}
-
-	if err := o.config.Checkpoints.Delete(ctx, id); err != nil && !errors.Is(err, checkpointstore.ErrCheckpointNotFound) {
-		return fmt.Errorf("deleting checkpoint for %s: %w", id, err)
+	if err := state.validate(); err != nil {
+		return fmt.Errorf("lifecycle state for projection %q is invalid: %w", name, err)
 	}
 
 	return nil

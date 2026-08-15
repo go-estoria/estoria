@@ -13,18 +13,15 @@ import (
 )
 
 // DefaultWorkerCheckpointID is the checkpoint identity a Worker uses absent
-// WithCheckpointIdentity. Projection names cannot contain dots, so this
-// underscore-form name cannot collide with a user projection following the
-// same convention it does.
+// WithCheckpointIdentity. It is an ordinary projection checkpoint key: do not
+// run a projection under the same name, or the two would share progress.
 //
 //nolint:gochecknoglobals // A fixed default identity; Go cannot declare struct constants.
 var DefaultWorkerCheckpointID = projection.ID{Name: "estoria_cutover_effects", Version: 1}
 
 // An Effect applies one physical consequence of a cutover — repointing a
 // view, swapping an alias, updating a pointer cache — for the now-live
-// version. Effects must be idempotent: the worker delivers at least once,
-// and duplicate workers are harmless only because reapplying a flip that
-// already happened changes nothing.
+// version. Effects must be idempotent: the worker delivers at least once.
 type Effect func(ctx context.Context, live projection.ID) error
 
 // A Worker applies cutover effects. It is a checkpointed processor folding
@@ -36,9 +33,13 @@ type Effect func(ctx context.Context, live projection.ID) error
 // blocks later cutovers rather than being skipped, because silently skipping
 // a flip is how physical storage diverges from the recorded truth.
 //
+// Run at most one worker per checkpoint identity at a time: two workers
+// sharing an identity can interleave competing cutovers out of order and
+// rewind each other's progress, leaving physical state divergent from the
+// recorded truth.
+//
 // The worker assumes the lifecycle store's default JSON domain event codec.
-// It reads the same global sequence the lifecycle streams are appended to;
-// run one alongside the query side wherever cutover effects must be applied.
+// It reads the same global sequence the lifecycle streams are appended to.
 type Worker struct {
 	processor *processor.Processor
 }
@@ -50,6 +51,10 @@ func NewWorker(events eventstore.GlobalReader, checkpoints checkpointstore.Store
 	config := workerConfig{checkpoint: DefaultWorkerCheckpointID}
 
 	for _, opt := range opts {
+		if opt == nil {
+			return nil, errors.New("worker option must not be nil")
+		}
+
 		opt(&config)
 	}
 
@@ -59,6 +64,11 @@ func NewWorker(events eventstore.GlobalReader, checkpoints checkpointstore.Store
 	case len(config.effects) == 0:
 		return nil, errors.New("at least one effect is required")
 	}
+
+	// Stop-on-error is pinned after the forwarded options: a processor that
+	// logged and advanced past a failed effect would checkpoint beyond a
+	// cutover that was never applied, permanently skipping the flip.
+	config.processorOptions = append(config.processorOptions, processor.WithContinueOnHandlerError(false))
 
 	proc, err := processor.New(events, checkpoints, config.checkpoint,
 		effectHandler(config.effects), config.processorOptions...)
@@ -80,33 +90,16 @@ func (w *Worker) Run(ctx context.Context) error {
 }
 
 // effectHandler returns the event handler driving the worker's effects: it
-// decodes each cutover event from the lifecycle streams and applies every
-// effect, in registration order, with the now-live version.
+// decodes each cutover event from the lifecycle streams, validates it, and
+// applies every effect, in registration order, with the now-live version. A
+// cutover that decodes but is not a valid projection ID on its own name's
+// stream is an error, not a skip: the reserved namespace is a guardrail, and
+// effects must not act on infrastructure state that fails its own scheme.
 func effectHandler(effects []Effect) projection.EventHandlerFunc {
 	return func(ctx context.Context, event *eventstore.Event) error {
-		if event.StreamID.Type != StreamType {
-			return nil
-		}
-
-		var live projection.ID
-
-		switch event.ID.Type {
-		case Promoted{}.EventType():
-			var promoted Promoted
-			if err := json.Unmarshal(event.Data, &promoted); err != nil {
-				return fmt.Errorf("decoding %s event: %w", event.ID.Type, err)
-			}
-
-			live = promoted.Next
-		case RolledBack{}.EventType():
-			var rolledBack RolledBack
-			if err := json.Unmarshal(event.Data, &rolledBack); err != nil {
-				return fmt.Errorf("decoding %s event: %w", event.ID.Type, err)
-			}
-
-			live = rolledBack.RevertedTo
-		default:
-			return nil
+		live, ok, err := decodeCutover(event)
+		if err != nil || !ok {
+			return err
 		}
 
 		for _, effect := range effects {
@@ -117,6 +110,49 @@ func effectHandler(effects []Effect) projection.EventHandlerFunc {
 
 		return nil
 	}
+}
+
+// decodeCutover decodes a Promoted or RolledBack event into the now-live
+// version it records, reporting ok=false for events that are not cutovers. A
+// cutover must carry a valid projection ID, and it must live on the stream
+// the projection's name derives — the same address every lifecycle command
+// writes through.
+func decodeCutover(event *eventstore.Event) (projection.ID, bool, error) {
+	if event.StreamID.Type != StreamType {
+		return projection.ID{}, false, nil
+	}
+
+	var live projection.ID
+
+	switch event.ID.Type {
+	case Promoted{}.EventType():
+		var promoted Promoted
+		if err := json.Unmarshal(event.Data, &promoted); err != nil {
+			return projection.ID{}, false, fmt.Errorf("decoding %s event: %w", event.ID.Type, err)
+		}
+
+		live = promoted.Next
+	case RolledBack{}.EventType():
+		var rolledBack RolledBack
+		if err := json.Unmarshal(event.Data, &rolledBack); err != nil {
+			return projection.ID{}, false, fmt.Errorf("decoding %s event: %w", event.ID.Type, err)
+		}
+
+		live = rolledBack.RevertedTo
+	default:
+		return projection.ID{}, false, nil
+	}
+
+	if err := live.Validate(); err != nil {
+		return projection.ID{}, false, fmt.Errorf("%s event on stream %s records an invalid live version: %w", event.ID.Type, event.StreamID, err)
+	}
+
+	if want := StreamUUID(live.Name); event.StreamID.UUID != want {
+		return projection.ID{}, false, fmt.Errorf("%s event for projection %q on stream %s, want the name-derived stream %s",
+			event.ID.Type, live.Name, event.StreamID.UUID, want)
+	}
+
+	return live, true, nil
 }
 
 // workerConfig collects a Worker's options before construction.
@@ -157,9 +193,9 @@ func WithLiveSetter(setter LiveSetter) WorkerOption {
 }
 
 // WithCheckpointIdentity sets the projection ID under which the worker
-// checkpoints its progress, instead of DefaultWorkerCheckpointID. Two
-// workers sharing an identity share progress; give workers with different
-// effect sets different identities.
+// checkpoints its progress, instead of DefaultWorkerCheckpointID. Give
+// workers with different effect sets different identities, and never run two
+// workers under one identity at a time.
 func WithCheckpointIdentity(id projection.ID) WorkerOption {
 	return func(c *workerConfig) {
 		c.checkpoint = id
@@ -167,7 +203,8 @@ func WithCheckpointIdentity(id projection.ID) WorkerOption {
 }
 
 // WithWorkerProcessorOptions passes options through to the processor that
-// drives the worker.
+// drives the worker. The worker's stop-on-error delivery cannot be disabled:
+// WithContinueOnHandlerError is forced off after the forwarded options.
 func WithWorkerProcessorOptions(opts ...processor.Option) WorkerOption {
 	return func(c *workerConfig) {
 		for _, opt := range opts {

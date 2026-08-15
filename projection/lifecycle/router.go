@@ -2,7 +2,6 @@ package lifecycle
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"maps"
@@ -64,9 +63,14 @@ func (r *MemoryRouter) Live(_ context.Context, name string) (projection.ID, erro
 	return id, nil
 }
 
-// SetLive records id as the live version of its projection.
+// SetLive records id as the live version of its projection. The id must be
+// valid per projection.ID.Validate.
 // ctx is accepted for interface compatibility but is not used by this implementation.
 func (r *MemoryRouter) SetLive(_ context.Context, id projection.ID) error {
+	if err := id.Validate(); err != nil {
+		return fmt.Errorf("invalid live version: %w", err)
+	}
+
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -109,6 +113,10 @@ func NewStreamRouter(events eventstore.GlobalReader, opts ...StreamRouterOption)
 	router := &StreamRouter{events: events}
 
 	for _, opt := range opts {
+		if opt == nil {
+			return nil, errors.New("stream router option must not be nil")
+		}
+
 		opt(router)
 	}
 
@@ -149,7 +157,8 @@ func (r *StreamRouter) Refresh(ctx context.Context) error {
 }
 
 // advance folds cutover events recorded after the last folded position into
-// the cached live map. The fold commits only on success: a read or decode
+// the cached live map, through the same semantic decoder the effect worker
+// uses. The fold commits only on success: a read, decode, or validation
 // failure leaves the cache and cursor untouched, so the next call retries
 // from the same position instead of serving a partial fold or silently
 // skipping past a malformed event. The caller must hold r.mu.
@@ -181,23 +190,10 @@ func (r *StreamRouter) advance(ctx context.Context) error {
 			return fmt.Errorf("reading event: %w", err)
 		}
 
-		if event.StreamID.Type == StreamType {
-			switch event.ID.Type {
-			case Promoted{}.EventType():
-				var promoted Promoted
-				if err := json.Unmarshal(event.Data, &promoted); err != nil {
-					return fmt.Errorf("decoding %s event: %w", event.ID.Type, err)
-				}
-
-				live[promoted.Next.Name] = promoted.Next
-			case RolledBack{}.EventType():
-				var rolledBack RolledBack
-				if err := json.Unmarshal(event.Data, &rolledBack); err != nil {
-					return fmt.Errorf("decoding %s event: %w", event.ID.Type, err)
-				}
-
-				live[rolledBack.RevertedTo.Name] = rolledBack.RevertedTo
-			}
+		if id, ok, err := decodeCutover(event); err != nil {
+			return err
+		} else if ok {
+			live[id.Name] = id
 		}
 
 		if event.GlobalPosition != nil {

@@ -115,6 +115,11 @@ func (r *Rebuild) Run(ctx context.Context) error {
 	state := r.aggregate.State()
 	attempt := state.Attempt
 
+	if err := state.validate(); err != nil {
+		r.mu.Unlock()
+		return fmt.Errorf("lifecycle state for projection %q is invalid: %w", state.Name, err)
+	}
+
 	var transition estoria.DomainEvent[State]
 
 	switch attempt.Phase {
@@ -138,6 +143,9 @@ func (r *Rebuild) Run(ctx context.Context) error {
 	case PhaseCaughtUp, PhasePromoted, PhaseRetiring:
 		// No transition to record; run the processor so the version resumes
 		// tailing the event sequence.
+	default:
+		r.mu.Unlock()
+		return fmt.Errorf("cannot run a rebuild in unknown phase %s", attempt.Phase)
 	}
 
 	// Append-then-act: the intent is recorded before the processor starts. A
@@ -367,6 +375,11 @@ func (r *Rebuild) Promote(ctx context.Context) error {
 
 	state := r.aggregate.State()
 
+	if err := state.validate(); err != nil {
+		r.mu.Unlock()
+		return fmt.Errorf("lifecycle state for projection %q is invalid: %w", state.Name, err)
+	}
+
 	switch state.Attempt.Phase {
 	case PhaseNone:
 		r.mu.Unlock()
@@ -375,6 +388,9 @@ func (r *Rebuild) Promote(ctx context.Context) error {
 	case PhaseCreated, PhaseBuilding, PhasePromoted, PhaseRetiring:
 		r.mu.Unlock()
 		return fmt.Errorf("cannot promote a rebuild that is %s", state.Attempt.Phase)
+	default:
+		r.mu.Unlock()
+		return fmt.Errorf("cannot promote a rebuild in unknown phase %s", state.Attempt.Phase)
 	}
 
 	appendErr := r.appendLocked(ctx, Promoted{
@@ -407,6 +423,11 @@ func (r *Rebuild) Rollback(ctx context.Context) error {
 
 	state := r.aggregate.State()
 
+	if err := state.validate(); err != nil {
+		r.mu.Unlock()
+		return fmt.Errorf("lifecycle state for projection %q is invalid: %w", state.Name, err)
+	}
+
 	switch state.Attempt.Phase {
 	case PhaseNone:
 		r.mu.Unlock()
@@ -418,6 +439,9 @@ func (r *Rebuild) Rollback(ctx context.Context) error {
 	case PhaseCreated, PhaseBuilding, PhaseCaughtUp:
 		r.mu.Unlock()
 		return fmt.Errorf("cannot roll back a rebuild that is %s", state.Attempt.Phase)
+	default:
+		r.mu.Unlock()
+		return fmt.Errorf("cannot roll back a rebuild in unknown phase %s", state.Attempt.Phase)
 	}
 
 	if state.Attempt.Previous.Version == 0 {
@@ -447,20 +471,23 @@ func (r *Rebuild) Rollback(ctx context.Context) error {
 	return stopErr
 }
 
-// Abandon gives up on the rebuild before promotion: it records Abandoned,
-// stops the processor, and then cleans up the target version — tearing down
-// its storage when the handler implements projection.Teardowner, and
-// deleting its checkpoint. Cleanup errors are returned, but the abandonment
-// is already recorded. Cleanup runs only when this handle ran the build's
-// processor: a missing local processor is no proof that none is running
-// elsewhere, and tearing down beneath a remote builder races its writes. A
-// remote builder observes the abandonment through its reconcile loop and
-// stops itself; its residue is inert — the version number is never reused —
-// and remains until explicitly collected.
+// Abandon gives up on the rebuild before promotion: it records Abandoned and
+// stops this handle's processor. The target version's storage and checkpoint
+// are deliberately left in place — no handle can prove it owns the only
+// processor writing to the target, so no automatic cleanup runs beneath a
+// possible concurrent builder. The residue is inert: the version number is
+// never reused, and the lifecycle stream and checkpoint store enumerate it
+// until it is explicitly collected. A concurrent builder observes the
+// abandonment through its reconcile loop and stops itself.
 func (r *Rebuild) Abandon(ctx context.Context, cause string) error {
 	r.mu.Lock()
 
 	state := r.aggregate.State()
+
+	if err := state.validate(); err != nil {
+		r.mu.Unlock()
+		return fmt.Errorf("lifecycle state for projection %q is invalid: %w", state.Name, err)
+	}
 
 	switch state.Attempt.Phase {
 	case PhaseNone:
@@ -470,6 +497,9 @@ func (r *Rebuild) Abandon(ctx context.Context, cause string) error {
 	case PhasePromoted, PhaseRetiring:
 		r.mu.Unlock()
 		return fmt.Errorf("cannot abandon a rebuild that is %s", state.Attempt.Phase)
+	default:
+		r.mu.Unlock()
+		return fmt.Errorf("cannot abandon a rebuild in unknown phase %s", state.Attempt.Phase)
 	}
 
 	appendErr := r.appendLocked(ctx, Abandoned{Cause: cause})
@@ -479,24 +509,13 @@ func (r *Rebuild) Abandon(ctx context.Context, cause string) error {
 	}
 
 	r.stopped = true
-	ownsProcessor := r.stopProcessor != nil
 	r.mu.Unlock()
 
 	if appendErr != nil {
 		appendErr = staleHandleError("abandonment", appendErr)
 	}
 
-	if !ownsProcessor {
-		return appendErr
-	}
-
-	// Cleanup must not race the exiting processor: a final checkpoint save
-	// landing after the delete would resurrect the checkpoint.
-	if err := r.awaitProcessorStop(ctx); err != nil {
-		return errors.Join(appendErr, err)
-	}
-
-	return errors.Join(appendErr, r.orchestrator.cleanup(ctx, state.Attempt.Target))
+	return errors.Join(appendErr, r.awaitProcessorStop(ctx))
 }
 
 // Retire completes a successful rebuild by removing the previous version.
@@ -507,9 +526,14 @@ func (r *Rebuild) Abandon(ctx context.Context, cause string) error {
 // completion, vacating the attempt slot. A Retire interrupted between
 // reservation and completion is repaired by calling Retire again — from
 // PhaseRetiring it skips the reservation and re-runs the contractually
-// idempotent teardown. When the handler does not implement
-// projection.Teardowner, removing the storage is the caller's
-// responsibility.
+// idempotent teardown.
+//
+// Retiring a nonzero previous version requires its handler to implement
+// projection.Teardowner. The capability is resolved before anything is
+// reserved — a refused retirement leaves rollback available — and the same
+// resolved handler performs the teardown. The previous version's steady-state
+// processor must be stopped and joined before Retire: teardown does not fence
+// a running processor, and its writes would race the removal.
 //
 // A first rebuild has no previous version, so there is nothing to tear down
 // and — rollback being impossible without a rollback target — nothing to
@@ -528,24 +552,39 @@ func (r *Rebuild) Retire(ctx context.Context) error {
 
 	state := r.aggregate.State()
 
+	if err := state.validate(); err != nil {
+		return fmt.Errorf("lifecycle state for projection %q is invalid: %w", state.Name, err)
+	}
+
 	switch state.Attempt.Phase {
 	case PhaseNone:
 		return fmt.Errorf("projection %q has no rebuild in flight", state.Name)
 	case PhasePromoted, PhaseRetiring:
 	case PhaseCreated, PhaseBuilding, PhaseCaughtUp:
 		return fmt.Errorf("cannot retire the previous version of a rebuild that is %s", state.Attempt.Phase)
+	default:
+		return fmt.Errorf("cannot retire the previous version of a rebuild in unknown phase %s", state.Attempt.Phase)
 	}
 
 	previous := state.Attempt.Previous
 
 	if previous.Version == 0 {
-		if state.Attempt.Phase == PhaseRetiring {
-			return errors.New("rebuild is retiring but records no previous version; the ledger is inconsistent")
-		}
-
 		// A first rebuild: nothing to tear down, and nothing to reserve
 		// against. Record completion directly.
 		return r.recordRetirement(ctx, previous)
+	}
+
+	// Resolve the teardown capability before reserving: a retirement that
+	// will be refused must be refused while rollback is still possible, not
+	// after the reservation has forfeited the rollback target.
+	handler, err := r.orchestrator.config.Handler(previous)
+	if err != nil {
+		return fmt.Errorf("creating handler for %s: %w", previous, err)
+	}
+
+	teardowner, ok := handler.(projection.Teardowner)
+	if !ok {
+		return fmt.Errorf("cannot retire %s: its handler does not implement projection.Teardowner", previous)
 	}
 
 	if state.Attempt.Phase == PhasePromoted {
@@ -559,8 +598,15 @@ func (r *Rebuild) Retire(ctx context.Context) error {
 		}
 	}
 
-	if err := r.orchestrator.cleanup(ctx, previous); err != nil {
-		return err
+	if err := teardowner.Teardown(ctx, previous); err != nil {
+		return fmt.Errorf("tearing down %s: %w", previous, err)
+	}
+
+	// The checkpoint goes last, and only after the teardown succeeded: it is
+	// the durable marker that a build of this identity existed, so it must
+	// outlive any failure to remove the storage it marks.
+	if err := r.orchestrator.config.Checkpoints.Delete(ctx, previous); err != nil && !errors.Is(err, checkpointstore.ErrCheckpointNotFound) {
+		return fmt.Errorf("deleting checkpoint for %s: %w", previous, err)
 	}
 
 	return r.recordRetirement(ctx, previous)

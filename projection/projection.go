@@ -73,12 +73,11 @@ type EventHandler interface {
 }
 
 // A Teardowner is implemented by event handlers that can remove the versioned
-// storage they own (drop a table, delete an index). The rebuild orchestrator
-// discovers it by type assertion when retiring a version or cleaning up an
-// abandoned build; without it, removing storage is the caller's
-// responsibility. Teardown must be idempotent — tearing down storage that is
-// already absent must succeed — because cleanup and retirement retry it after
-// partial failures.
+// storage they own (drop a table, delete an index). Retiring a projection
+// version's predecessor requires the capability: the lifecycle orchestrator
+// discovers it by type assertion and refuses the retirement without it.
+// Teardown must be idempotent — tearing down storage that is already absent
+// must succeed — because retirement retries it after partial failures.
 type Teardowner interface {
 	Teardown(ctx context.Context, id ID) error
 }

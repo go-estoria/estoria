@@ -25,6 +25,8 @@
 package lifecycle
 
 import (
+	"errors"
+	"fmt"
 	"strconv"
 	"time"
 
@@ -171,3 +173,105 @@ type AttemptState struct {
 // State carries no copy of the stream UUID: the projection name, recorded by
 // the stream's first event, is the identity that matters.
 func NewState(uuid.UUID) State { return State{} }
+
+// validate reports whether the folded state satisfies the package's
+// structural invariants. The fold is total — a persisted event always applies
+// — so only tampering or a bug produces a state that violates them; commands
+// check before acting, because acting on such a state can destroy the wrong
+// version's storage. The reserved stream namespace is a guardrail, not a
+// trust boundary, so infrastructure state is rejected here rather than
+// assumed well-formed.
+func (s State) validate() error {
+	if s.Name == "" {
+		if s.Allocated != 0 || s.Live != (projection.ID{}) || s.Attempt != (AttemptState{}) {
+			return errors.New("state records no projection name but is not empty")
+		}
+
+		return nil
+	}
+
+	if err := (projection.ID{Name: s.Name, Version: 1}).Validate(); err != nil {
+		return fmt.Errorf("projection name %q: %w", s.Name, err)
+	}
+
+	if s.Live != (projection.ID{}) {
+		if err := s.Live.Validate(); err != nil {
+			return fmt.Errorf("live version %s: %w", s.Live, err)
+		}
+
+		switch {
+		case s.Live.Name != s.Name:
+			return fmt.Errorf("live version %s does not belong to projection %q", s.Live, s.Name)
+		case s.Live.Version > s.Allocated:
+			return fmt.Errorf("live version %s exceeds the allocation high-water mark %d", s.Live, s.Allocated)
+		}
+	}
+
+	return s.validateAttempt()
+}
+
+// validateAttempt checks the in-flight attempt against the projection-level
+// facts: identity, target/allocation relation, lineage, and phase-dependent
+// consistency between the live version and the attempt's versions.
+func (s State) validateAttempt() error {
+	a := s.Attempt
+
+	switch a.Phase {
+	case PhaseNone:
+		if a != (AttemptState{}) {
+			return errors.New("attempt slot records no phase but is not vacant")
+		}
+
+		return nil
+	case PhaseCreated, PhaseBuilding, PhaseCaughtUp, PhasePromoted, PhaseRetiring:
+	default:
+		return fmt.Errorf("unknown attempt phase %s", a.Phase)
+	}
+
+	if a.ID.IsNil() {
+		return errors.New("in-flight attempt has no ID")
+	}
+
+	if err := a.Target.Validate(); err != nil {
+		return fmt.Errorf("attempt target %s: %w", a.Target, err)
+	}
+
+	switch {
+	case a.Target.Name != s.Name:
+		return fmt.Errorf("attempt target %s does not belong to projection %q", a.Target, s.Name)
+	case a.Target.Version != s.Allocated:
+		return fmt.Errorf("attempt target %s is not the latest allocation %d", a.Target, s.Allocated)
+	}
+
+	if a.Previous != (projection.ID{}) {
+		if err := a.Previous.Validate(); err != nil {
+			return fmt.Errorf("attempt previous %s: %w", a.Previous, err)
+		}
+
+		switch {
+		case a.Previous.Name != s.Name:
+			return fmt.Errorf("attempt previous %s does not belong to projection %q", a.Previous, s.Name)
+		case a.Previous.Version >= a.Target.Version:
+			return fmt.Errorf("attempt previous %s is not older than the target %s", a.Previous, a.Target)
+		}
+	}
+
+	switch a.Phase {
+	case PhaseCreated, PhaseBuilding, PhaseCaughtUp:
+		if s.Live != a.Previous {
+			return fmt.Errorf("live version %s diverges from the attempt's previous version %s", s.Live, a.Previous)
+		}
+	case PhasePromoted, PhaseRetiring:
+		if s.Live != a.Target {
+			return fmt.Errorf("live version %s diverges from the promoted target %s", s.Live, a.Target)
+		}
+
+		if a.Phase == PhaseRetiring && a.Previous == (projection.ID{}) {
+			return errors.New("retiring with no previous version recorded")
+		}
+	case PhaseNone:
+		// Vacant slots returned above; enumerated for exhaustiveness.
+	}
+
+	return nil
+}

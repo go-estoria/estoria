@@ -94,6 +94,10 @@ func New(
 	}
 
 	for _, opt := range opts {
+		if opt == nil {
+			return nil, errors.New("processor option must not be nil")
+		}
+
 		opt(processor)
 	}
 
