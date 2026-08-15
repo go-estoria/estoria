@@ -30,6 +30,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/go-estoria/estoria"
 	"github.com/go-estoria/estoria/internal/reservedstream"
 	"github.com/go-estoria/estoria/projection"
 	"github.com/gofrs/uuid/v5"
@@ -128,6 +129,13 @@ type State struct {
 	// transitions — rolled back, abandoned, retired — vacate it; the stream
 	// is the audit record of past attempts.
 	Attempt AttemptState
+
+	// invalid records the first fold inconsistency, permanently. Final-state
+	// shape cannot prove historical consistency — a malformed event can
+	// assign both sides of any equality a validator would check — so the
+	// fold marks the state at the moment the inconsistency is observed, and
+	// no later event clears the mark. validate rejects a marked state.
+	invalid string
 }
 
 // AttemptState is an in-flight rebuild attempt: a child entity of the
@@ -174,6 +182,23 @@ type AttemptState struct {
 // the stream's first event, is the identity that matters.
 func NewState(uuid.UUID) State { return State{} }
 
+// poison marks the state permanently invalid with the first observed
+// inconsistency, reporting every observation via the ambient logger. The
+// event that carried the inconsistency still applies — a persisted event won
+// its append-time arbitration, and the stream is history — but no command
+// acts on a poisoned fold, and no later event clears the mark: a malformed
+// event can assign both sides of any equality a final-state validator would
+// check, so the moment of observation is the only place the evidence exists.
+func (s State) poison(msg string, args ...any) State {
+	estoria.GetLogger().WithGroup("lifecycle").Warn(msg, args...)
+
+	if s.invalid == "" {
+		s.invalid = msg
+	}
+
+	return s
+}
+
 // validate reports whether the folded state satisfies the package's
 // structural invariants. The fold is total — a persisted event always applies
 // — so only tampering or a bug produces a state that violates them; commands
@@ -182,6 +207,10 @@ func NewState(uuid.UUID) State { return State{} }
 // trust boundary, so infrastructure state is rejected here rather than
 // assumed well-formed.
 func (s State) validate() error {
+	if s.invalid != "" {
+		return fmt.Errorf("the fold observed an inconsistent event: %s", s.invalid)
+	}
+
 	if s.Name == "" {
 		if s.Allocated != 0 || s.Live != (projection.ID{}) || s.Attempt != (AttemptState{}) {
 			return errors.New("state records no projection name but is not empty")

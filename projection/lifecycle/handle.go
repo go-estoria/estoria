@@ -25,6 +25,11 @@ import (
 type Rebuild struct {
 	orchestrator *Orchestrator
 
+	// name is the projection this handle was addressed by, immutably. Every
+	// post-hydration check runs against it: the folded state's own name is
+	// mutable data, so it can never vouch for the address.
+	name string
+
 	mu            sync.Mutex
 	aggregate     *aggregatestore.Aggregate[State]
 	stopProcessor context.CancelFunc
@@ -38,6 +43,11 @@ type Rebuild struct {
 	// command (Abandon, Rollback) or by the reconcile loop observing the
 	// attempt's end — so Run reports nil rather than the cancellation.
 	stopped bool
+
+	// failure records why the reconcile loop stopped the processor when the
+	// stop was fail-closed rather than benign — the hydrated lifecycle no
+	// longer passed validation — so Run surfaces the cause instead of nil.
+	failure error
 
 	// ran records that Run was called, successfully or not: a second call
 	// would overwrite the processor ownership fields above, leaving commands
@@ -112,13 +122,13 @@ func (r *Rebuild) Run(ctx context.Context) error {
 		return fmt.Errorf("refreshing lifecycle state: %w", err)
 	}
 
+	if err := checkLifecycleAggregate(r.aggregate, r.name); err != nil {
+		r.mu.Unlock()
+		return err
+	}
+
 	state := r.aggregate.State()
 	attempt := state.Attempt
-
-	if err := state.validate(); err != nil {
-		r.mu.Unlock()
-		return fmt.Errorf("lifecycle state for projection %q is invalid: %w", state.Name, err)
-	}
 
 	var transition estoria.DomainEvent[State]
 
@@ -228,12 +238,13 @@ func (r *Rebuild) Run(ctx context.Context) error {
 
 // reconcile periodically rehydrates the lifecycle aggregate while the
 // processor runs, stopping the processor once the attempt it builds is no
-// longer the one in flight. A tailing processor appends nothing that would
-// surface a terminal transition recorded elsewhere; self-reconciliation is
-// what bounds a superseded builder's lifetime. Version numbers are never
-// reused, so the reconcile interval bounds waste, not correctness — a
-// not-yet-reconciled builder writes only to identities nothing else will
-// ever read.
+// longer the one in flight — or, fail-closed, once the hydrated lifecycle no
+// longer passes validation, in which case the cause is recorded for Run to
+// surface. A tailing processor appends nothing that would surface a terminal
+// transition recorded elsewhere; self-reconciliation is what bounds a
+// superseded builder's lifetime. Version numbers are never reused, so the
+// reconcile interval bounds waste, not correctness — a not-yet-reconciled
+// builder writes only to identities nothing else will ever read.
 func (r *Rebuild) reconcile(ctx context.Context, attemptID uuid.UUID, stop context.CancelFunc) {
 	ticker := time.NewTicker(r.orchestrator.reconcileInterval)
 	defer ticker.Stop()
@@ -262,6 +273,21 @@ func (r *Rebuild) reconcile(ctx context.Context, attemptID uuid.UUID, stop conte
 			r.orchestrator.log.Error("reconciling lifecycle state", "attempt_id", attemptID, "error", err)
 
 			continue
+		}
+
+		// Validity precedes the attempt comparison: an inconsistent stream
+		// can replace the attempt, and stopping over the replacement alone
+		// would report a poisoned lifecycle as an ordinary nil wind-down.
+		if err := checkLifecycleAggregate(r.aggregate, r.name); err != nil {
+			r.stopped = true
+			r.failure = err
+			r.mu.Unlock()
+
+			r.orchestrator.log.Error("hydrated lifecycle state is no longer valid; stopping the processor",
+				"attempt_id", attemptID, "error", err)
+			stop()
+
+			return
 		}
 
 		ended := r.aggregate.State().Attempt.ID != attemptID
@@ -301,10 +327,11 @@ func (r *Rebuild) runToCaughtUp(ctx context.Context, proc *processor.Processor, 
 	// as a version conflict — CaughtUp would land cleanly on top of the
 	// Abandoned event.
 	if r.stopped {
+		failure := r.failure
 		r.mu.Unlock()
 		<-done
 
-		return false, nil
+		return false, failure
 	}
 
 	err := r.appendLocked(ctx, CaughtUp{
@@ -320,9 +347,10 @@ func (r *Rebuild) runToCaughtUp(ctx context.Context, proc *processor.Processor, 
 
 		// An Abandon — or the reconcile loop observing the attempt's end —
 		// can win the race against the catch-up transition; the outcome is
-		// recorded, so the lost append is not an error.
+		// recorded, so the lost append is not an error. A fail-closed stop
+		// surfaces its cause instead.
 		if r.isStopped() {
-			return false, nil
+			return false, r.stopFailure()
 		}
 
 		return false, err
@@ -358,9 +386,10 @@ func (r *Rebuild) promoteAfterCatchUp(ctx context.Context, stop context.CancelFu
 	<-done
 
 	// An Abandon can win the race against auto-promotion; the abandonment is
-	// recorded, so the refused promotion is not an error.
+	// recorded, so the refused promotion is not an error. A fail-closed stop
+	// surfaces its cause instead.
 	if r.isStopped() {
-		return false, nil
+		return false, r.stopFailure()
 	}
 
 	return false, err
@@ -373,12 +402,12 @@ func (r *Rebuild) promoteAfterCatchUp(ctx context.Context, stop context.CancelFu
 func (r *Rebuild) Promote(ctx context.Context) error {
 	r.mu.Lock()
 
-	state := r.aggregate.State()
-
-	if err := state.validate(); err != nil {
+	if err := checkLifecycleAggregate(r.aggregate, r.name); err != nil {
 		r.mu.Unlock()
-		return fmt.Errorf("lifecycle state for projection %q is invalid: %w", state.Name, err)
+		return err
 	}
+
+	state := r.aggregate.State()
 
 	switch state.Attempt.Phase {
 	case PhaseNone:
@@ -421,12 +450,12 @@ func (r *Rebuild) Promote(ctx context.Context) error {
 func (r *Rebuild) Rollback(ctx context.Context) error {
 	r.mu.Lock()
 
-	state := r.aggregate.State()
-
-	if err := state.validate(); err != nil {
+	if err := checkLifecycleAggregate(r.aggregate, r.name); err != nil {
 		r.mu.Unlock()
-		return fmt.Errorf("lifecycle state for projection %q is invalid: %w", state.Name, err)
+		return err
 	}
+
+	state := r.aggregate.State()
 
 	switch state.Attempt.Phase {
 	case PhaseNone:
@@ -482,12 +511,12 @@ func (r *Rebuild) Rollback(ctx context.Context) error {
 func (r *Rebuild) Abandon(ctx context.Context, cause string) error {
 	r.mu.Lock()
 
-	state := r.aggregate.State()
-
-	if err := state.validate(); err != nil {
+	if err := checkLifecycleAggregate(r.aggregate, r.name); err != nil {
 		r.mu.Unlock()
-		return fmt.Errorf("lifecycle state for projection %q is invalid: %w", state.Name, err)
+		return err
 	}
+
+	state := r.aggregate.State()
 
 	switch state.Attempt.Phase {
 	case PhaseNone:
@@ -550,11 +579,11 @@ func (r *Rebuild) Retire(ctx context.Context) error {
 		return fmt.Errorf("refreshing lifecycle state: %w", err)
 	}
 
-	state := r.aggregate.State()
-
-	if err := state.validate(); err != nil {
-		return fmt.Errorf("lifecycle state for projection %q is invalid: %w", state.Name, err)
+	if err := checkLifecycleAggregate(r.aggregate, r.name); err != nil {
+		return err
 	}
+
+	state := r.aggregate.State()
 
 	switch state.Attempt.Phase {
 	case PhaseNone:
@@ -676,13 +705,26 @@ func staleHandleError(action string, err error) error {
 
 // processorExit maps the processor's exit to Run's result: a processor
 // stopped deliberately — by a command or by the reconcile loop observing the
-// attempt's end — is not an error.
+// attempt's end — is not an error, but a fail-closed stop over an invalid
+// lifecycle surfaces its cause.
 func (r *Rebuild) processorExit(err error) error {
+	if failure := r.stopFailure(); failure != nil {
+		return failure
+	}
+
 	if r.isStopped() {
 		return nil
 	}
 
 	return err
+}
+
+// stopFailure returns the reconcile loop's fail-closed stop cause, if any.
+func (r *Rebuild) stopFailure() error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	return r.failure
 }
 
 func (r *Rebuild) isStopped() bool {

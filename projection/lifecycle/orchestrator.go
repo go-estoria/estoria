@@ -32,7 +32,11 @@ type Config struct {
 	// Handler returns the event handler for a projection version. The ID
 	// flows through so the handler targets versioned storage. Retiring a
 	// version's predecessor requires the predecessor's handler to implement
-	// projection.Teardowner, which performs the storage removal.
+	// projection.Teardowner, which performs the storage removal. The factory
+	// must succeed for versions whose storage is already absent: a retirement
+	// interrupted after its teardown re-resolves the handler on repair, so a
+	// factory that validates or prepares against the removed storage would
+	// wedge the lifecycle in the retiring phase forever.
 	Handler func(id projection.ID) (projection.EventHandler, error)
 
 	// Projections is the aggregate store holding projection lifecycle
@@ -114,7 +118,7 @@ func (o *Orchestrator) Begin(ctx context.Context, name, reason string) (*Rebuild
 		return nil, fmt.Errorf("loading projection lifecycle: %w", err)
 	}
 
-	if err := o.checkAggregate(aggregate, name); err != nil {
+	if err := checkLifecycleAggregate(aggregate, name); err != nil {
 		return nil, err
 	}
 
@@ -146,7 +150,7 @@ func (o *Orchestrator) Begin(ctx context.Context, name, reason string) (*Rebuild
 		return nil, fmt.Errorf("recording %s: %w", RebuildInitiated{}.EventType(), err)
 	}
 
-	return &Rebuild{orchestrator: o, aggregate: aggregate}, nil
+	return &Rebuild{orchestrator: o, name: name, aggregate: aggregate}, nil
 }
 
 // Resume loads the named projection's lifecycle and returns a handle to it.
@@ -158,7 +162,7 @@ func (o *Orchestrator) Resume(ctx context.Context, name string) (*Rebuild, error
 		return nil, err
 	}
 
-	return &Rebuild{orchestrator: o, aggregate: aggregate}, nil
+	return &Rebuild{orchestrator: o, name: name, aggregate: aggregate}, nil
 }
 
 // Get returns the named projection's lifecycle state: the live version, the
@@ -182,21 +186,31 @@ func (o *Orchestrator) loadAggregate(ctx context.Context, name string) (*aggrega
 		return nil, fmt.Errorf("loading projection lifecycle: %w", err)
 	}
 
-	if err := o.checkAggregate(aggregate, name); err != nil {
+	if err := checkLifecycleAggregate(aggregate, name); err != nil {
 		return nil, err
 	}
 
 	return aggregate, nil
 }
 
-// checkAggregate verifies that the aggregate is a lifecycle aggregate, that
-// its recorded name matches the name that addressed it, and that its folded
+// checkLifecycleAggregate verifies that the aggregate is a lifecycle
+// aggregate at the stream the given projection name derives, that its
+// recorded name matches the name that addressed it, and that its folded
 // state is structurally sound. A failure means the store is wired with the
 // wrong stream type, or the stream holds tampered data — either way, no
-// command should act on it.
-func (o *Orchestrator) checkAggregate(aggregate *aggregatestore.Aggregate[State], name string) error {
-	if streamType := aggregate.ID().Type; streamType != StreamType {
-		return fmt.Errorf("projection store manages %q streams, want %q; wire it with lifecycle.NewStore", streamType, StreamType)
+// command should act on it. Handles re-run this after every hydration
+// against the name they were addressed by: the folded name is mutable data,
+// and validating relative to it alone would let a malformed but internally
+// consistent history swap the projection out from under a retained handle.
+func checkLifecycleAggregate(aggregate *aggregatestore.Aggregate[State], name string) error {
+	id := aggregate.ID()
+
+	if id.Type != StreamType {
+		return fmt.Errorf("projection store manages %q streams, want %q; wire it with lifecycle.NewStore", id.Type, StreamType)
+	}
+
+	if want := StreamUUID(name); id.UUID != want {
+		return fmt.Errorf("lifecycle aggregate at stream %s does not derive from projection %q (want %s)", id.UUID, name, want)
 	}
 
 	state := aggregate.State()

@@ -8,14 +8,6 @@ import (
 	"github.com/gofrs/uuid/v5"
 )
 
-// warnInconsistency reports a lineage inconsistency observed during a fold.
-// The event still applies: a persisted event won its append-time arbitration,
-// so an inconsistent lineage field marks tampering or a bug — something to
-// surface on every observation, never to silently skip past.
-func warnInconsistency(msg string, args ...any) {
-	estoria.GetLogger().WithGroup("lifecycle").Warn(msg, args...)
-}
-
 // RebuildInitiated records the decision that a rebuild is underway: admission
 // to the projection's single in-flight attempt slot and allocation of the
 // target version number, as one append. Optimistic concurrency on the
@@ -23,7 +15,10 @@ func warnInconsistency(msg string, args ...any) {
 // concurrent initiations conflict at the same stream version, so at most one
 // is admitted. Previous carries the live version at initiation for ledger
 // self-containment; the fold's own Live is the authority it is checked
-// against.
+// against. An admission into an occupied slot, under a different projection
+// name, from a non-live previous, or outside the allocation sequence poisons
+// the fold; the projection name is immutable once set, and the allocation
+// high-water mark never lowers.
 type RebuildInitiated struct {
 	Attempt  uuid.UUID
 	Target   projection.ID
@@ -42,21 +37,24 @@ func (RebuildInitiated) New() estoria.DomainEvent[State] { return &RebuildInitia
 func (e RebuildInitiated) ApplyTo(s State) State {
 	switch {
 	case s.Attempt.Phase != PhaseNone:
-		warnInconsistency("rebuild initiated while the attempt slot is occupied",
+		s = s.poison("rebuild initiated while the attempt slot is occupied",
 			"projection", e.Target.Name, "attempt", e.Attempt, "displaced_attempt", s.Attempt.ID)
 	case s.Name != "" && e.Target.Name != s.Name:
-		warnInconsistency("rebuild initiated for a different projection name",
+		s = s.poison("rebuild initiated for a different projection name",
 			"projection", s.Name, "target", e.Target)
 	case e.Previous != s.Live:
-		warnInconsistency("rebuild initiated with a previous version that was not live",
+		s = s.poison("rebuild initiated with a previous version that was not live",
 			"projection", e.Target.Name, "previous", e.Previous, "live", s.Live)
 	case e.Target.Version != s.Allocated+1:
-		warnInconsistency("rebuild initiated with a target version outside the allocation sequence",
+		s = s.poison("rebuild initiated with a target version outside the allocation sequence",
 			"projection", e.Target.Name, "target", e.Target, "allocated", s.Allocated)
 	}
 
-	s.Name = e.Target.Name
-	s.Allocated = e.Target.Version
+	if s.Name == "" {
+		s.Name = e.Target.Name
+	}
+
+	s.Allocated = max(s.Allocated, e.Target.Version)
 	s.Attempt = AttemptState{
 		ID:          e.Attempt,
 		Target:      e.Target,
@@ -80,6 +78,11 @@ func (BuildStarted) New() estoria.DomainEvent[State] { return &BuildStarted{} }
 
 // ApplyTo applies the event to state, returning the new state.
 func (BuildStarted) ApplyTo(s State) State {
+	if s.Attempt.Phase != PhaseCreated {
+		s = s.poison("build started outside the created phase",
+			"projection", s.Name, "phase", s.Attempt.Phase)
+	}
+
 	s.Attempt.Phase = PhaseBuilding
 
 	return s
@@ -99,6 +102,11 @@ func (BuildResumed) New() estoria.DomainEvent[State] { return &BuildResumed{} }
 
 // ApplyTo applies the event to state, returning the new state.
 func (BuildResumed) ApplyTo(s State) State {
+	if s.Attempt.Phase != PhaseBuilding {
+		s = s.poison("build resumed outside the building phase",
+			"projection", s.Name, "phase", s.Attempt.Phase)
+	}
+
 	s.Attempt.Phase = PhaseBuilding
 
 	return s
@@ -121,6 +129,11 @@ func (CaughtUp) New() estoria.DomainEvent[State] { return &CaughtUp{} }
 
 // ApplyTo applies the event to state, returning the new state.
 func (e CaughtUp) ApplyTo(s State) State {
+	if s.Attempt.Phase != PhaseBuilding {
+		s = s.poison("catch-up recorded outside the building phase",
+			"projection", s.Name, "phase", s.Attempt.Phase)
+	}
+
 	s.Attempt.Phase = PhaseCaughtUp
 	s.Attempt.CaughtUpAt = e.At
 	s.Attempt.CaughtUpPos = e.Position
@@ -147,9 +160,16 @@ func (Promoted) New() estoria.DomainEvent[State] { return &Promoted{} }
 
 // ApplyTo applies the event to state, returning the new state.
 func (e Promoted) ApplyTo(s State) State {
-	if e.Previous != s.Live {
-		warnInconsistency("promotion recorded from a version that was not live",
+	switch {
+	case s.Attempt.Phase != PhaseCaughtUp:
+		s = s.poison("promotion recorded outside the caught-up phase",
+			"projection", s.Name, "phase", s.Attempt.Phase)
+	case e.Previous != s.Live:
+		s = s.poison("promotion recorded from a version that was not live",
 			"projection", s.Name, "recorded_previous", e.Previous, "live", s.Live)
+	case e.Next != s.Attempt.Target:
+		s = s.poison("promotion recorded for a version that was not the attempt's target",
+			"projection", s.Name, "recorded_next", e.Next, "target", s.Attempt.Target)
 	}
 
 	s.Live = e.Next
@@ -177,9 +197,16 @@ func (RolledBack) New() estoria.DomainEvent[State] { return &RolledBack{} }
 
 // ApplyTo applies the event to state, returning the new state.
 func (e RolledBack) ApplyTo(s State) State {
-	if e.From != s.Live {
-		warnInconsistency("rollback recorded from a version that was not live",
+	switch {
+	case s.Attempt.Phase != PhasePromoted:
+		s = s.poison("rollback recorded outside the promoted phase",
+			"projection", s.Name, "phase", s.Attempt.Phase)
+	case e.From != s.Live:
+		s = s.poison("rollback recorded from a version that was not live",
 			"projection", s.Name, "recorded_from", e.From, "live", s.Live)
+	case e.RevertedTo != s.Attempt.Previous:
+		s = s.poison("rollback recorded to a version that was not the attempt's previous",
+			"projection", s.Name, "recorded_reverted_to", e.RevertedTo, "previous", s.Attempt.Previous)
 	}
 
 	s.Live = e.RevertedTo
@@ -204,6 +231,16 @@ func (Abandoned) New() estoria.DomainEvent[State] { return &Abandoned{} }
 
 // ApplyTo applies the event to state, returning the new state.
 func (Abandoned) ApplyTo(s State) State {
+	switch s.Attempt.Phase {
+	case PhaseCreated, PhaseBuilding, PhaseCaughtUp:
+	case PhaseNone, PhasePromoted, PhaseRetiring:
+		s = s.poison("abandonment recorded outside the pre-promotion phases",
+			"projection", s.Name, "phase", s.Attempt.Phase)
+	default:
+		s = s.poison("abandonment recorded in an unknown phase",
+			"projection", s.Name, "phase", s.Attempt.Phase)
+	}
+
 	s.Attempt = AttemptState{}
 
 	return s
@@ -228,6 +265,15 @@ func (RetireStarted) New() estoria.DomainEvent[State] { return &RetireStarted{} 
 
 // ApplyTo applies the event to state, returning the new state.
 func (e RetireStarted) ApplyTo(s State) State {
+	switch {
+	case s.Attempt.Phase != PhasePromoted:
+		s = s.poison("retirement reserved outside the promoted phase",
+			"projection", s.Name, "phase", s.Attempt.Phase)
+	case e.Retiring != s.Attempt.Previous:
+		s = s.poison("retirement reserved for a version that was not the attempt's previous",
+			"projection", s.Name, "recorded_retiring", e.Retiring, "previous", s.Attempt.Previous)
+	}
+
 	s.Attempt.Phase = PhaseRetiring
 	s.Attempt.RetiringAt = e.At
 
@@ -251,7 +297,19 @@ func (PreviousRetired) EventType() string { return "previousretired" }
 func (PreviousRetired) New() estoria.DomainEvent[State] { return &PreviousRetired{} }
 
 // ApplyTo applies the event to state, returning the new state.
-func (PreviousRetired) ApplyTo(s State) State {
+func (e PreviousRetired) ApplyTo(s State) State {
+	completable := s.Attempt.Phase == PhaseRetiring ||
+		(s.Attempt.Phase == PhasePromoted && s.Attempt.Previous == (projection.ID{}))
+
+	switch {
+	case !completable:
+		s = s.poison("retirement completed outside the retiring phase",
+			"projection", s.Name, "phase", s.Attempt.Phase)
+	case e.Retired != s.Attempt.Previous:
+		s = s.poison("retirement completed for a version that was not the attempt's previous",
+			"projection", s.Name, "recorded_retired", e.Retired, "previous", s.Attempt.Previous)
+	}
+
 	s.Attempt = AttemptState{}
 
 	return s
