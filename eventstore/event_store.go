@@ -135,14 +135,15 @@ type GlobalReader interface {
 	// positions yielded here must be the same ones per-stream reads report for
 	// the same events. eventstore/storetest enforces all of this.
 	//
-	// A read is finite: ReadAll linearizes exactly once, at some point between
-	// invocation and return, and that point fixes the read's frontier. Appends
-	// ordered before it are eligible; appends ordered after it are excluded,
-	// however long the iteration lives — an append overlapping the call may
-	// land on either side, but once ReadAll has returned, the frontier is
-	// settled. The iterator yields exactly the eligible events, then reports
-	// ErrEndOfEventStream and remains exhausted; a consumer tails the store by
-	// reading again from the last position it saw.
+	// A read is finite: ReadAll linearizes exactly once, between invocation
+	// and return, capturing a finite store frontier — an append overlapping
+	// the call may land on either side of that point, but once ReadAll has
+	// returned, the frontier is settled, however long the iteration lives.
+	// Subject to AfterPosition, the iterator yields events through that
+	// frontier, then reports ErrEndOfEventStream and remains exhausted; when
+	// Count > 0, it yields at most the first Count matching events. A
+	// consumer tails the store by reading again from the last position it
+	// saw.
 	//
 	// Yielded positions form a stable prefix: once a read yields position P, no
 	// later commit may introduce a previously unseen event at or below P.
@@ -154,8 +155,11 @@ type GlobalReader interface {
 	// checkpoints. A backend that cannot promise this — say, one that allocates
 	// positions before commit and lets commits land out of order — must not
 	// advertise GlobalReader. eventstore/storetest enforces the fixed frontier;
-	// commit ordering cannot be forced through this interface, so each backend
-	// must carry its own regression for it.
+	// commit ordering cannot be forced through this interface, so an
+	// implementation that can separate position allocation from publication
+	// must carry its own deterministic regression for it, and one that
+	// publishes atomically must pin or document the mechanism that makes
+	// ordering structural.
 	//
 	// A read with nothing to yield — an empty store, or a position at or past
 	// the newest event — returns a valid iterator that immediately reports
@@ -179,9 +183,10 @@ type ReadAllOptions struct {
 
 	// Count is the number of events to read.
 	//
-	// Count truncates the frontier: a read exhausted after exactly Count
-	// events says nothing about the store head — only an unbounded read's
-	// exhaustion, or exhaustion short of Count, observes the frontier itself.
+	// A positive Count truncates the frontier: a read exhausted after exactly
+	// that many events says nothing about the store head — only an unbounded
+	// read's exhaustion, or exhaustion short of Count, observes the frontier
+	// itself.
 	//
 	// Default: 0 (read all events)
 	Count int64

@@ -41,8 +41,11 @@ type NewGlobalStoreFunc func(t *testing.T) GlobalStore
 // One clause of the contract is deliberately absent: stable-prefix commit
 // ordering — no commit may introduce an unseen event at or below a yielded
 // position — cannot be forced deterministically through this interface, and a
-// sleep-based race would prove nothing. Each backend must carry its own
-// ordering regression at the layer where its commit timing is controllable.
+// sleep-based race would prove nothing. An implementation that can separate
+// position allocation from publication must carry its own deterministic
+// ordering regression at the layer where its commit timing is controllable;
+// one that publishes atomically documents the mechanism instead, as the
+// in-memory store does on its global log.
 func RunGlobalReaderSuite(t *testing.T, newStore NewGlobalStoreFunc) {
 	t.Helper()
 
@@ -425,7 +428,9 @@ func clauseGlobalFrontierResumedRead(t *testing.T, store GlobalStore) {
 // resume at the tip — stays empty while appends race it, and the racing event
 // lands in the next poll's frontier instead. An implementation that goes live
 // exactly when its snapshot is empty passes every nonempty clause and still
-// breaks the caught-up poll loop.
+// breaks the caught-up poll loop. Exhaustion must also stay terminal across a
+// commit made after it was reported: a drained iterator may not turn into a
+// live tail of the future.
 func clauseGlobalFrontierEmptyAndCaughtUp(t *testing.T, store GlobalStore) {
 	empty := openGlobalRead(t, store, eventstore.ReadAllOptions{})
 
@@ -435,13 +440,22 @@ func clauseGlobalFrontierEmptyAndCaughtUp(t *testing.T, store GlobalStore) {
 		t.Errorf("want an empty read to stay empty despite the racing append, got %v", err)
 	}
 
+	// A commit made after exhaustion was reported must not revive the
+	// iterator into a live tail of the future.
+	appendTo(t, store, newStreamID(), 1)
+
 	if _, err := empty.iter.Next(t.Context()); !errors.Is(err, eventstore.ErrEndOfEventStream) {
-		t.Errorf("want an exhausted empty read to keep reporting ErrEndOfEventStream, got %v", err)
+		t.Errorf("want exhaustion to stay terminal across a commit made after it was reported, got %v", err)
 	}
 
 	empty.close(t)
 
+	// Neither racing commit is lost: a fresh read yields both.
 	full := readGlobal(t, store, eventstore.ReadAllOptions{})
+	if len(full) != 2 {
+		t.Fatalf("want a fresh read to see both racing events, got %d", len(full))
+	}
+
 	tip := *full[len(full)-1].GlobalPosition
 
 	caughtUp := openGlobalRead(t, store, eventstore.ReadAllOptions{AfterPosition: tip})
