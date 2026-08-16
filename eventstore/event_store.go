@@ -119,8 +119,9 @@ type AppendStreamOptions struct {
 //
 // GlobalReader is optional and deliberately not part of Store: a backend
 // implements it only when it has a single ordering authority for everything it
-// stores, and one without such an authority is not forced to fake one. Callers
-// discover support with a type assertion.
+// stores — one able to publish positions in commit-safe order, per ReadAll's
+// stable-prefix contract — and one without such an authority is not forced to
+// fake one. Callers discover support with a type assertion.
 //
 // Global reads are forward-only: they exist so read models and projections can
 // consume history in order and resume from a position.
@@ -134,6 +135,25 @@ type GlobalReader interface {
 	// positions yielded here must be the same ones per-stream reads report for
 	// the same events. eventstore/storetest enforces all of this.
 	//
+	// A read is finite: ReadAll fixes a frontier no later than when it returns,
+	// the iterator yields exactly the events within it, and then reports
+	// ErrEndOfEventStream. Events committed after the read begins are never
+	// yielded by it, however long the iteration lives; a consumer tails the
+	// store by reading again from the last position it saw.
+	//
+	// Yielded positions form a stable prefix: once a read yields position P, no
+	// later commit may introduce a previously unseen event at or below P.
+	// Equivalently, a backend must publish positions in order — an event
+	// becomes visible only once every lower position is settled, occupied by a
+	// visible event or permanently dead, never still in flight. This is what
+	// makes resuming after a yielded position gap-free and a drained read a
+	// true caught-up-to-the-frontier observation; without it, positions are not
+	// checkpoints. A backend that cannot promise this — say, one that allocates
+	// positions before commit and lets commits land out of order — must not
+	// advertise GlobalReader. eventstore/storetest enforces the fixed frontier;
+	// commit ordering cannot be forced through this interface, so each backend
+	// carries its own regression for it.
+	//
 	// A read with nothing to yield — an empty store, or a position at or past
 	// the newest event — returns a valid iterator that immediately reports
 	// ErrEndOfEventStream. ErrStreamNotFound has no place in a global read:
@@ -146,6 +166,10 @@ type GlobalReader interface {
 type ReadAllOptions struct {
 	// AfterPosition specifies the exclusive global position after which to
 	// read: only events with GlobalPosition > AfterPosition are returned.
+	//
+	// The stable-prefix contract (see GlobalReader) is what makes resuming
+	// from a previously yielded position gap-free: everything at or below it
+	// is settled, so nothing can commit into the skipped range.
 	//
 	// Default: 0 (read from the beginning)
 	AfterPosition int64

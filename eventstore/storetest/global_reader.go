@@ -31,8 +31,15 @@ type NewGlobalStoreFunc func(t *testing.T) GlobalStore
 // The suite is the executable form of the GlobalReader contract: events from
 // all streams in ascending global order, a non-nil strictly-increasing
 // GlobalPosition on every yielded event agreeing with what per-stream reads
-// report, resumption from an exclusive position, and empty reads as empty
-// iterators rather than errors.
+// report, resumption from an exclusive position, a frontier fixed when the
+// read begins (commits during iteration wait for the next read), and empty
+// reads as empty iterators rather than errors.
+//
+// One clause of the contract is deliberately absent: stable-prefix commit
+// ordering — no commit may introduce an unseen event at or below a yielded
+// position — cannot be forced deterministically through this interface, and a
+// sleep-based race would prove nothing. Each backend carries its own ordering
+// regression at the layer where its commit timing is controllable.
 func RunGlobalReaderSuite(t *testing.T, newStore NewGlobalStoreFunc) {
 	t.Helper()
 
@@ -44,6 +51,8 @@ func RunGlobalReaderSuite(t *testing.T, newStore NewGlobalStoreFunc) {
 		{"yields the same global positions per-stream reads report", clauseGlobalPositionsMatchStreamReads},
 		{"resumes reading after an exclusive position", clauseGlobalResumesAfterPosition},
 		{"limits a global read to Count events", clauseGlobalHonorsCount},
+		{"fixes its frontier when the read begins", clauseGlobalFrontierFixedAtRead},
+		{"fixes a resumed read's frontier when the read begins", clauseGlobalFrontierFixedOnResume},
 		{"yields an empty iterator rather than an error when there is nothing to read", clauseGlobalEmptyReads},
 	} {
 		t.Run(clause.name, func(t *testing.T) {
@@ -222,6 +231,109 @@ func clauseGlobalHonorsCount(t *testing.T, store GlobalStore) {
 	for i, event := range limited {
 		if event.ID != full[i].ID {
 			t.Errorf("event %d: want the full read's event %s, got %s", i, full[i].ID, event.ID)
+		}
+	}
+}
+
+// clauseGlobalFrontierFixedAtRead pins the finite-read half of the
+// stable-prefix contract: ReadAll observes the store as of the moment it is
+// called, so an event committed while the iterator drains — before the first
+// Next or midway through — waits for the next read. Without a fixed frontier,
+// draining to ErrEndOfEventStream is not an observation a consumer can act on.
+func clauseGlobalFrontierFixedAtRead(t *testing.T, store GlobalStore) {
+	appendInterleavedStreams(t, store)
+
+	baseline := readGlobal(t, store, eventstore.ReadAllOptions{})
+
+	iter, err := store.ReadAll(t.Context(), eventstore.ReadAllOptions{})
+	if err != nil {
+		t.Fatalf("reading all streams: %v", err)
+	}
+
+	t.Cleanup(func() { _ = iter.Close(t.Context()) })
+
+	late := newStreamID()
+
+	// One commit before anything is consumed, another midway through the read.
+	if _, err := store.AppendStream(t.Context(), late, writableEvents(1), eventstore.AppendStreamOptions{}); err != nil {
+		t.Fatalf("appending after the read began: %v", err)
+	}
+
+	yielded := make([]*eventstore.Event, 0, len(baseline))
+
+	for range 2 {
+		event, nextErr := iter.Next(t.Context())
+		if nextErr != nil {
+			t.Fatalf("reading event: %v", nextErr)
+		}
+
+		yielded = append(yielded, event)
+	}
+
+	if _, err := store.AppendStream(t.Context(), late, writableEvents(2), eventstore.AppendStreamOptions{}); err != nil {
+		t.Fatalf("appending mid-iteration: %v", err)
+	}
+
+	rest, err := eventstore.Collect(t.Context(), iter)
+	if err != nil {
+		t.Fatalf("reading events: %v", err)
+	}
+
+	yielded = append(yielded, rest...)
+
+	if len(yielded) != len(baseline) {
+		t.Fatalf("want exactly the %d events committed before the read, got %d", len(baseline), len(yielded))
+	}
+
+	for i, event := range yielded {
+		if event.ID != baseline[i].ID {
+			t.Errorf("event %d: want the pre-read event %s, got %s", i, baseline[i].ID, event.ID)
+		}
+	}
+
+	// The late commits are not lost: the next read's frontier includes them.
+	full := readGlobal(t, store, eventstore.ReadAllOptions{})
+	if want := len(baseline) + 3; len(full) != want {
+		t.Fatalf("want a fresh read to see all %d events, got %d", want, len(full))
+	}
+}
+
+// clauseGlobalFrontierFixedOnResume pins the same frontier discipline on the
+// checkpoint path — the poll loop every projection processor runs: a read
+// resumed from a position yields exactly what was committed above it when the
+// read began, and commits racing the drain wait for the next poll.
+func clauseGlobalFrontierFixedOnResume(t *testing.T, store GlobalStore) {
+	appendInterleavedStreams(t, store)
+
+	baseline := readGlobal(t, store, eventstore.ReadAllOptions{})
+
+	const resumeAfter = 1
+
+	position := *baseline[resumeAfter].GlobalPosition
+
+	iter, err := store.ReadAll(t.Context(), eventstore.ReadAllOptions{AfterPosition: position})
+	if err != nil {
+		t.Fatalf("resuming after position %d: %v", position, err)
+	}
+
+	t.Cleanup(func() { _ = iter.Close(t.Context()) })
+
+	if _, err := store.AppendStream(t.Context(), newStreamID(), writableEvents(2), eventstore.AppendStreamOptions{}); err != nil {
+		t.Fatalf("appending after the resumed read began: %v", err)
+	}
+
+	resumed, err := eventstore.Collect(t.Context(), iter)
+	if err != nil {
+		t.Fatalf("reading events: %v", err)
+	}
+
+	if want := len(baseline) - resumeAfter - 1; len(resumed) != want {
+		t.Fatalf("want the %d events above position %d committed before the read, got %d", want, position, len(resumed))
+	}
+
+	for i, event := range resumed {
+		if want := baseline[resumeAfter+1+i]; event.ID != want.ID {
+			t.Errorf("event %d: want the full read's event %s, got %s", i, want.ID, event.ID)
 		}
 	}
 }
