@@ -135,11 +135,14 @@ type GlobalReader interface {
 	// positions yielded here must be the same ones per-stream reads report for
 	// the same events. eventstore/storetest enforces all of this.
 	//
-	// A read is finite: ReadAll fixes a frontier no later than when it returns,
-	// the iterator yields exactly the events within it, and then reports
-	// ErrEndOfEventStream. Events committed after the read begins are never
-	// yielded by it, however long the iteration lives; a consumer tails the
-	// store by reading again from the last position it saw.
+	// A read is finite: ReadAll linearizes exactly once, at some point between
+	// invocation and return, and that point fixes the read's frontier. Appends
+	// ordered before it are eligible; appends ordered after it are excluded,
+	// however long the iteration lives — an append overlapping the call may
+	// land on either side, but once ReadAll has returned, the frontier is
+	// settled. The iterator yields exactly the eligible events, then reports
+	// ErrEndOfEventStream and remains exhausted; a consumer tails the store by
+	// reading again from the last position it saw.
 	//
 	// Yielded positions form a stable prefix: once a read yields position P, no
 	// later commit may introduce a previously unseen event at or below P.
@@ -152,7 +155,7 @@ type GlobalReader interface {
 	// positions before commit and lets commits land out of order — must not
 	// advertise GlobalReader. eventstore/storetest enforces the fixed frontier;
 	// commit ordering cannot be forced through this interface, so each backend
-	// carries its own regression for it.
+	// must carry its own regression for it.
 	//
 	// A read with nothing to yield — an empty store, or a position at or past
 	// the newest event — returns a valid iterator that immediately reports
@@ -175,6 +178,10 @@ type ReadAllOptions struct {
 	AfterPosition int64
 
 	// Count is the number of events to read.
+	//
+	// Count truncates the frontier: a read exhausted after exactly Count
+	// events says nothing about the store head — only an unbounded read's
+	// exhaustion, or exhaustion short of Count, observes the frontier itself.
 	//
 	// Default: 0 (read all events)
 	Count int64

@@ -47,6 +47,9 @@ func (s *stream) tip() int64 {
 // A globalLogEntry is one committed event in the store's global order. The
 // position rides alongside the envelope so a global read can seek without
 // decoding, and the stream ID and version identify the entry to deletion.
+// Position allocation and publication happen inside AppendStream's single
+// critical section, so the log grows in position order and the stable-prefix
+// promise holds by construction.
 type globalLogEntry struct {
 	position int64
 	streamID string
