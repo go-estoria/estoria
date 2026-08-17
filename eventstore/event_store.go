@@ -119,8 +119,9 @@ type AppendStreamOptions struct {
 //
 // GlobalReader is optional and deliberately not part of Store: a backend
 // implements it only when it has a single ordering authority for everything it
-// stores, and one without such an authority is not forced to fake one. Callers
-// discover support with a type assertion.
+// stores — one able to publish positions in commit-safe order, per ReadAll's
+// stable-prefix contract — and one without such an authority is not forced to
+// fake one. Callers discover support with a type assertion.
 //
 // Global reads are forward-only: they exist so read models and projections can
 // consume history in order and resume from a position.
@@ -133,6 +134,32 @@ type GlobalReader interface {
 	// allowed, since backends may consume positions they never commit. The
 	// positions yielded here must be the same ones per-stream reads report for
 	// the same events. eventstore/storetest enforces all of this.
+	//
+	// A read is finite: ReadAll linearizes exactly once, between invocation
+	// and return, capturing a finite store frontier — an append overlapping
+	// the call may land on either side of that point, but once ReadAll has
+	// returned, the frontier is settled, however long the iteration lives.
+	// Subject to AfterPosition, the iterator yields events through that
+	// frontier, then reports ErrEndOfEventStream and remains exhausted; when
+	// Count > 0, it yields at most the first Count matching events. A
+	// consumer tails the store by reading again from the last position it
+	// saw.
+	//
+	// Yielded positions form a stable prefix: once a read yields position P, no
+	// later commit may introduce a previously unseen event at or below P.
+	// Equivalently, a backend must publish positions in order — an event
+	// becomes visible only once every lower position is settled, occupied by a
+	// visible event or permanently dead, never still in flight. This is what
+	// makes resuming after a yielded position gap-free and a drained read a
+	// true caught-up-to-the-frontier observation; without it, positions are not
+	// checkpoints. A backend that cannot promise this — say, one that allocates
+	// positions before commit and lets commits land out of order — must not
+	// advertise GlobalReader. eventstore/storetest enforces the fixed frontier;
+	// commit ordering cannot be forced through this interface, so an
+	// implementation that can separate position allocation from publication
+	// must carry its own deterministic regression for it, and one that
+	// publishes atomically must pin or document the mechanism that makes
+	// ordering structural.
 	//
 	// A read with nothing to yield — an empty store, or a position at or past
 	// the newest event — returns a valid iterator that immediately reports
@@ -147,10 +174,19 @@ type ReadAllOptions struct {
 	// AfterPosition specifies the exclusive global position after which to
 	// read: only events with GlobalPosition > AfterPosition are returned.
 	//
+	// The stable-prefix contract (see GlobalReader) is what makes resuming
+	// from a previously yielded position gap-free: everything at or below it
+	// is settled, so nothing can commit into the skipped range.
+	//
 	// Default: 0 (read from the beginning)
 	AfterPosition int64
 
 	// Count is the number of events to read.
+	//
+	// A positive Count truncates the frontier: a read exhausted after exactly
+	// that many events says nothing about the store head — only an unbounded
+	// read's exhaustion, or exhaustion short of Count, observes the frontier
+	// itself.
 	//
 	// Default: 0 (read all events)
 	Count int64
