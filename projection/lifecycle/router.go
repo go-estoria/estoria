@@ -116,12 +116,15 @@ var (
 // lifecycle store's default JSON domain event codec.
 //
 // The fold validates the history it consumes: per name, revisions must
-// advance by exactly one from 1, a rollback can never open a history, and
-// each event's claimed lineage — the version it records as previously live —
-// must match the fold. The authoritative record is one stream per name under
-// optimistic concurrency, so a history that skips, repeats, regresses, or
-// misreports lineage is tampered or foreign, and the fold fails closed
-// rather than serving last-write-wins.
+// advance by exactly one from 1, each event's claimed lineage — the version
+// it records as previously live — must match the fold, promoted versions
+// must exceed every version promoted before (numbers are never reused), and
+// a rollback is legal only directly after a promotion that recorded a
+// non-zero previous, reverting to exactly that version. The authoritative
+// record is one stream per name under optimistic concurrency, so a history
+// that skips, repeats, regresses, misreports lineage, or rolls back to a
+// version the promotion did not retain is tampered or foreign, and the fold
+// fails closed rather than serving last-write-wins.
 //
 // The fold is computed lazily on first use, cached, and advanced
 // incrementally from the last folded global position. Refresh advances it on
@@ -132,9 +135,60 @@ type StreamRouter struct {
 	refreshInterval time.Duration
 
 	mu          sync.Mutex
-	live        map[string]Cutover
+	live        map[string]cutoverFold
 	position    int64
 	refreshedAt time.Time
+}
+
+// cutoverFold is the per-name state the validating fold maintains: the
+// cutover serving reads, the sole legal rollback target — the previously
+// live version the latest promotion retained, zero when none, which also
+// gates whether a rollback may follow at all — and the high-water of
+// promoted versions.
+type cutoverFold struct {
+	current  Cutover
+	rollback projection.ID
+	promoted int
+}
+
+// apply extends the fold with a decoded cutover, or reports why the history
+// is not one the lifecycle could have recorded.
+func (f cutoverFold) apply(raw rawCutover) (cutoverFold, error) {
+	name := raw.cutover.Live.Name
+
+	switch {
+	case raw.rollback && f.current.Revision == 0:
+		return f, fmt.Errorf("the cutover history for projection %q opens with a rollback", name)
+	case raw.rollback && f.rollback == (projection.ID{}):
+		return f, fmt.Errorf("the cutover history for projection %q records a rollback with no promotion to revert", name)
+	case raw.cutover.Revision != f.current.Revision+1:
+		return f, fmt.Errorf("the cutover history for projection %q records revision %d after revision %d",
+			name, raw.cutover.Revision, f.current.Revision)
+	case raw.from != f.current.Live:
+		return f, fmt.Errorf("the cutover history for projection %q records a flip from %s while %s was live",
+			name, raw.from, f.current.Live)
+	}
+
+	if raw.rollback {
+		if raw.cutover.Live != f.rollback {
+			return f, fmt.Errorf("the cutover history for projection %q records a rollback to %s; the promotion retained %s",
+				name, raw.cutover.Live, f.rollback)
+		}
+
+		// Terminal for the attempt: another rollback needs another promotion.
+		return cutoverFold{current: raw.cutover, promoted: f.promoted}, nil
+	}
+
+	if raw.cutover.Live.Version <= f.promoted {
+		return f, fmt.Errorf("the cutover history for projection %q promotes %s at or below the promoted high-water %d: version numbers are never reused",
+			name, raw.cutover.Live, f.promoted)
+	}
+
+	return cutoverFold{
+		current:  raw.cutover,
+		rollback: raw.from,
+		promoted: raw.cutover.Live.Version,
+	}, nil
 }
 
 // NewStreamRouter creates a router that folds the cutover history from the
@@ -173,12 +227,12 @@ func (r *StreamRouter) Live(ctx context.Context, name string) (projection.ID, er
 		}
 	}
 
-	cutover, ok := r.live[name]
+	fold, ok := r.live[name]
 	if !ok {
 		return projection.ID{}, fmt.Errorf("%q: %w", name, ErrNoLiveVersion)
 	}
 
-	return cutover.Live, nil
+	return fold.current.Live, nil
 }
 
 // Refresh advances the fold past any cutover events recorded since the last
@@ -211,7 +265,7 @@ func (r *StreamRouter) advance(ctx context.Context) error {
 
 	live := maps.Clone(r.live)
 	if live == nil {
-		live = map[string]Cutover{}
+		live = map[string]cutoverFold{}
 	}
 
 	position := r.position
@@ -227,11 +281,12 @@ func (r *StreamRouter) advance(ctx context.Context) error {
 		if raw, ok, err := decodeCutover(event); err != nil {
 			return err
 		} else if ok {
-			if err := checkCutoverContinuity(live[raw.cutover.Live.Name], raw); err != nil {
+			next, err := live[raw.cutover.Live.Name].apply(raw)
+			if err != nil {
 				return err
 			}
 
-			live[raw.cutover.Live.Name] = raw.cutover
+			live[raw.cutover.Live.Name] = next
 		}
 
 		if event.GlobalPosition != nil {
@@ -242,29 +297,6 @@ func (r *StreamRouter) advance(ctx context.Context) error {
 	r.live = live
 	r.position = position
 	r.refreshedAt = time.Now()
-
-	return nil
-}
-
-// checkCutoverContinuity verifies that a decoded cutover extends the fold's
-// current per-name state: the revision advances by exactly one, a rollback
-// never opens a name's history, and the lineage the event claims matches the
-// version the fold holds live. A fold at the revision ceiling refuses every
-// successor through the same arithmetic — no positive revision extends it,
-// and decoding already refused non-positive ones.
-func checkCutoverContinuity(current Cutover, raw rawCutover) error {
-	name := raw.cutover.Live.Name
-
-	switch {
-	case raw.rollback && current.Revision == 0:
-		return fmt.Errorf("the cutover history for projection %q opens with a rollback", name)
-	case raw.cutover.Revision != current.Revision+1:
-		return fmt.Errorf("the cutover history for projection %q records revision %d after revision %d",
-			name, raw.cutover.Revision, current.Revision)
-	case raw.from != current.Live:
-		return fmt.Errorf("the cutover history for projection %q records a flip from %s while %s was live",
-			name, raw.from, current.Live)
-	}
 
 	return nil
 }

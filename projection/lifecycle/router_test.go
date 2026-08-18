@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -194,6 +195,19 @@ func TestStreamRouter(t *testing.T) {
 
 	if got, _ := router.Live(t.Context(), "orders"); got != ordersV1 {
 		t.Errorf("want live version %s after rollback, got %s", ordersV1, got)
+	}
+
+	// A promotion after the rollback continues the validated history:
+	// revision 4 promoting v3 from the reverted v1.
+	ordersV3 := projection.ID{Name: "orders", Version: 3}
+	recordCutover(t, projections, ordersV3, ordersV1, false)
+
+	if err := router.Refresh(t.Context()); err != nil {
+		t.Fatalf("refreshing: %v", err)
+	}
+
+	if got, _ := router.Live(t.Context(), "orders"); got != ordersV3 {
+		t.Errorf("want live version %s after the post-rollback promotion, got %s", ordersV3, got)
 	}
 }
 
@@ -394,8 +408,9 @@ func TestStreamRouter_RejectsDiscontinuousHistories(t *testing.T) {
 	v3 := projection.ID{Name: "orders", Version: 3}
 
 	for _, tt := range []struct {
-		name   string
-		events []estoria.DomainEvent[lifecycle.State]
+		name    string
+		events  []estoria.DomainEvent[lifecycle.State]
+		wantErr string
 	}{
 		{
 			name: "a revision gap",
@@ -403,6 +418,7 @@ func TestStreamRouter_RejectsDiscontinuousHistories(t *testing.T) {
 				lifecycle.Promoted{Next: v1, Revision: 1, At: promotedAt},
 				lifecycle.Promoted{Previous: v1, Next: v2, Revision: 3, At: promotedAt},
 			},
+			wantErr: "records revision",
 		},
 		{
 			name: "a duplicated revision",
@@ -410,6 +426,7 @@ func TestStreamRouter_RejectsDiscontinuousHistories(t *testing.T) {
 				lifecycle.Promoted{Next: v1, Revision: 1, At: promotedAt},
 				lifecycle.Promoted{Previous: v1, Next: v2, Revision: 1, At: promotedAt},
 			},
+			wantErr: "records revision",
 		},
 		{
 			name: "a regressed revision",
@@ -418,6 +435,7 @@ func TestStreamRouter_RejectsDiscontinuousHistories(t *testing.T) {
 				lifecycle.Promoted{Previous: v1, Next: v2, Revision: 2, At: promotedAt},
 				lifecycle.Promoted{Previous: v2, Next: v3, Revision: 1, At: promotedAt},
 			},
+			wantErr: "records revision",
 		},
 		{
 			name: "false lineage",
@@ -425,12 +443,51 @@ func TestStreamRouter_RejectsDiscontinuousHistories(t *testing.T) {
 				lifecycle.Promoted{Next: v1, Revision: 1, At: promotedAt},
 				lifecycle.Promoted{Previous: projection.ID{Name: "orders", Version: 9}, Next: v2, Revision: 2, At: promotedAt},
 			},
+			wantErr: "records a flip from",
 		},
 		{
 			name: "an opening rollback",
 			events: []estoria.DomainEvent[lifecycle.State]{
 				lifecycle.RolledBack{RevertedTo: v1, Revision: 1, At: promotedAt},
 			},
+			wantErr: "opens with a rollback",
+		},
+		{
+			name: "rollback to the wrong predecessor",
+			events: []estoria.DomainEvent[lifecycle.State]{
+				lifecycle.Promoted{Next: v1, Revision: 1, At: promotedAt},
+				lifecycle.Promoted{Previous: v1, Next: v2, Revision: 2, At: promotedAt},
+				lifecycle.RolledBack{From: v2, RevertedTo: v3, Revision: 3, At: promotedAt},
+			},
+			wantErr: "the promotion retained",
+		},
+		{
+			name: "rollback after a first promotion",
+			events: []estoria.DomainEvent[lifecycle.State]{
+				lifecycle.Promoted{Next: v1, Revision: 1, At: promotedAt},
+				lifecycle.RolledBack{From: v1, RevertedTo: v1, Revision: 2, At: promotedAt},
+			},
+			wantErr: "no promotion to revert",
+		},
+		{
+			name: "consecutive rollbacks",
+			events: []estoria.DomainEvent[lifecycle.State]{
+				lifecycle.Promoted{Next: v1, Revision: 1, At: promotedAt},
+				lifecycle.Promoted{Previous: v1, Next: v2, Revision: 2, At: promotedAt},
+				lifecycle.RolledBack{From: v2, RevertedTo: v1, Revision: 3, At: promotedAt},
+				lifecycle.RolledBack{From: v1, RevertedTo: v1, Revision: 4, At: promotedAt},
+			},
+			wantErr: "no promotion to revert",
+		},
+		{
+			name: "a re-promoted old version",
+			events: []estoria.DomainEvent[lifecycle.State]{
+				lifecycle.Promoted{Next: v1, Revision: 1, At: promotedAt},
+				lifecycle.Promoted{Previous: v1, Next: v2, Revision: 2, At: promotedAt},
+				lifecycle.RolledBack{From: v2, RevertedTo: v1, Revision: 3, At: promotedAt},
+				lifecycle.Promoted{Previous: v1, Next: v2, Revision: 4, At: promotedAt},
+			},
+			wantErr: "never reused",
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
@@ -450,8 +507,8 @@ func TestStreamRouter_RejectsDiscontinuousHistories(t *testing.T) {
 				t.Fatalf("creating stream router: %v", err)
 			}
 
-			if _, err := router.Live(t.Context(), "orders"); err == nil {
-				t.Fatal("want the discontinuous history reported, got nil")
+			if _, err := router.Live(t.Context(), "orders"); err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("want the discontinuity reported as %q, got %v", tt.wantErr, err)
 			}
 
 			if _, err := router.Live(t.Context(), "orders"); err == nil {
@@ -587,7 +644,12 @@ func recordCutover(t *testing.T, store aggregatestore.Store[lifecycle.State], ne
 		t.Fatalf("saving lifecycle aggregate: %v", err)
 	}
 
-	if state := aggregate.State(); state.InvalidReason != "" {
+	state := aggregate.State()
+	if state.InvalidReason != "" {
 		t.Fatalf("recordCutover produced a poisoned history: %s", state.InvalidReason)
+	}
+
+	if state.Attempt != (lifecycle.AttemptState{}) {
+		t.Fatalf("recordCutover left the attempt slot occupied in phase %s", state.Attempt.Phase)
 	}
 }

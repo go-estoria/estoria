@@ -3911,10 +3911,10 @@ func TestSnapshotRoundTrip_PreservesCutoverRevision(t *testing.T) {
 		t.Parallel()
 
 		// No organic snapshots: the crafted one below is the only candidate,
-		// valid but at revision 5 — replay of the six recorded events would
-		// rebuild revision 1, so a promotion stamped 6 proves the snapshot
-		// fed the command and a promotion stamped 2 proves it was silently
-		// discarded for replay.
+		// divergent but realizable — three allocations can record five
+		// cutovers — so nothing needs to be appended over it to observe
+		// which source hydration used. Replay of the six recorded events
+		// would rebuild revision 1; revision 5 proves the payload installed.
 		events, snapshots, projections, _, orchestrator := newSnapshottingOrchestrator(t,
 			snapshotstore.EventCountSnapshotPolicy{})
 
@@ -3931,32 +3931,18 @@ func TestSnapshotRoundTrip_PreservesCutoverRevision(t *testing.T) {
 			Name:            "orders",
 			Live:            projection.ID{Name: "orders", Version: 1},
 			CutoverRevision: 5,
-			Allocated:       1,
+			Allocated:       3,
 		}, loaded.Version())
 
-		r, err := orchestrator.Begin(t.Context(), "orders", "second build over the crafted snapshot")
+		hydrated, err := projections.Load(t.Context(), lifecycle.StreamUUID("orders"), nil)
 		if err != nil {
-			t.Fatalf("beginning the second rebuild: %v", err)
+			t.Fatalf("loading through the crafted snapshot: %v", err)
 		}
 
-		cancel, done := runAsync(t, r)
-		waitPhase(t, r, lifecycle.PhaseCaughtUp)
-
-		if err := r.Promote(t.Context()); err != nil {
-			t.Fatalf("promoting v2: %v", err)
-		}
-
-		got := readCutoverRevisions(t, events)
-
-		wantTail := lifecycle.Cutover{Live: projection.ID{Name: "orders", Version: 2}, Revision: 6}
-		if len(got) != 2 || got[1] != wantTail {
-			t.Fatalf("want the promotion stamped from the snapshot's revision (%+v), got %v", wantTail, got)
-		}
-
-		cancel()
-
-		if err := waitDone(t, done); !errors.Is(err, context.Canceled) {
-			t.Fatalf("want the tailing run to end on its cancellation, got %v", err)
+		state := hydrated.State()
+		if state.CutoverRevision != 5 || state.Live != (projection.ID{Name: "orders", Version: 1}) {
+			t.Fatalf("want hydration installing the payload's (live orders_v1, revision 5), got (%s, %d)",
+				state.Live, state.CutoverRevision)
 		}
 	})
 }
@@ -3966,34 +3952,96 @@ func TestSnapshotRoundTrip_PreservesCutoverRevision(t *testing.T) {
 // wrapped comparison would accept it as continuity, and the worker's decode
 // would then refuse the negative event — routing frozen while the lifecycle
 // advances. No legitimate history reaches the ceiling; persisted state is
-// trusted if it validates, so the states arrive through the snapshot layer.
+// trusted if it validates, so the states arrive through the snapshot layer,
+// shaped realizably: the ceiling is exactly what 1<<62 allocations can
+// record, and certification refusals keep their precedence — the guard sits
+// with the append, not above the license protocol.
 func TestCutoverCommands_RefuseAnExhaustedRevision(t *testing.T) {
 	t.Parallel()
 
+	const exhaustedAllocations = 1 << 62
+
 	ordersV1 := projection.ID{Name: "orders", Version: 1}
-	ordersV2 := projection.ID{Name: "orders", Version: 2}
+	ordersTop := projection.ID{Name: "orders", Version: exhaustedAllocations}
 	at := time.Date(2026, 8, 18, 16, 0, 0, 0, time.UTC)
 
-	t.Run("promote", func(t *testing.T) {
+	t.Run("promote refuses with a live certificate", func(t *testing.T) {
 		t.Parallel()
 
 		events, snapshots, _, _, orchestrator := newSnapshottingOrchestrator(t,
 			snapshotstore.EventCountSnapshotPolicy{})
 
+		appendDomainTo(t, events, 2)
+
 		if _, err := orchestrator.Begin(t.Context(), "orders", "exhausted promote"); err != nil {
 			t.Fatalf("beginning: %v", err)
 		}
 
-		// A caught-up attempt whose projection has exhausted its revisions,
-		// installed over the admission's single event.
+		// A building attempt whose projection has exhausted its revisions,
+		// installed over the admission's single event: the run below claims
+		// it, drains to the head, and certifies — every certification check
+		// passes, so only the exhaustion guard can refuse the promotion.
 		writeLifecycleSnapshot(t, snapshots, lifecycle.State{
 			Name:            "orders",
 			Live:            ordersV1,
 			CutoverRevision: math.MaxInt64,
-			Allocated:       2,
+			Allocated:       exhaustedAllocations,
 			Attempt: lifecycle.AttemptState{
 				ID:          uuid.Must(uuid.NewV4()),
-				Target:      ordersV2,
+				Target:      ordersTop,
+				Previous:    ordersV1,
+				Phase:       lifecycle.PhaseBuilding,
+				Runner:      uuid.Must(uuid.NewV4()),
+				InitiatedAt: at,
+			},
+		}, 1)
+
+		handle, err := orchestrator.Resume(t.Context(), "orders")
+		if err != nil {
+			t.Fatalf("resuming over the exhausted state: %v", err)
+		}
+
+		cancel, done := runAsync(t, handle)
+		waitPhase(t, handle, lifecycle.PhaseCaughtUp)
+
+		err = handle.Promote(t.Context())
+		if err == nil || !strings.Contains(err.Error(), "cutover revision is exhausted") {
+			t.Fatalf("want the certified promotion refused on revision exhaustion, got %v", err)
+		}
+
+		if errors.Is(err, lifecycle.ErrNotCertified) {
+			t.Errorf("want the refusal past certification, not a license refusal, got %v", err)
+		}
+
+		if got := countEventsOfType(t, events, lifecycle.Promoted{}.EventType()); got != 0 {
+			t.Errorf("want no promotion recorded at the exhausted revision, got %d", got)
+		}
+
+		cancel()
+
+		if err := waitDone(t, done); !errors.Is(err, context.Canceled) {
+			t.Fatalf("want the run to end on its cancellation, got %v", err)
+		}
+	})
+
+	t.Run("certification refusals take precedence", func(t *testing.T) {
+		t.Parallel()
+
+		events, snapshots, _, _, orchestrator := newSnapshottingOrchestrator(t,
+			snapshotstore.EventCountSnapshotPolicy{})
+
+		if _, err := orchestrator.Begin(t.Context(), "orders", "exhausted but uncertified"); err != nil {
+			t.Fatalf("beginning: %v", err)
+		}
+
+		writeLifecycleSnapshot(t, snapshots, lifecycle.State{
+			Name:            "orders",
+			Live:            ordersV1,
+			CutoverRevision: math.MaxInt64,
+			Allocated:       exhaustedAllocations,
+			Attempt: lifecycle.AttemptState{
+				ID:          uuid.Must(uuid.NewV4()),
+				Target:      ordersTop,
 				Previous:    ordersV1,
 				Phase:       lifecycle.PhaseCaughtUp,
 				Runner:      uuid.Must(uuid.NewV4()),
@@ -4008,12 +4056,16 @@ func TestCutoverCommands_RefuseAnExhaustedRevision(t *testing.T) {
 		}
 
 		err = handle.Promote(t.Context())
-		if err == nil || !strings.Contains(err.Error(), "cutover revision is exhausted") {
-			t.Fatalf("want the promotion refused on revision exhaustion, got %v", err)
+		if !errors.Is(err, lifecycle.ErrNotCertified) {
+			t.Fatalf("want the uncertified promotion refused with ErrNotCertified, got %v", err)
+		}
+
+		if strings.Contains(err.Error(), "exhausted") {
+			t.Errorf("want certification precedence over the exhaustion guard, got %v", err)
 		}
 
 		if got := countEventsOfType(t, events, lifecycle.Promoted{}.EventType()); got != 0 {
-			t.Errorf("want no promotion recorded at the exhausted revision, got %d", got)
+			t.Errorf("want no promotion recorded, got %d", got)
 		}
 	})
 
@@ -4029,12 +4081,12 @@ func TestCutoverCommands_RefuseAnExhaustedRevision(t *testing.T) {
 
 		writeLifecycleSnapshot(t, snapshots, lifecycle.State{
 			Name:            "orders",
-			Live:            ordersV2,
+			Live:            ordersTop,
 			CutoverRevision: math.MaxInt64,
-			Allocated:       2,
+			Allocated:       exhaustedAllocations,
 			Attempt: lifecycle.AttemptState{
 				ID:          uuid.Must(uuid.NewV4()),
-				Target:      ordersV2,
+				Target:      ordersTop,
 				Previous:    ordersV1,
 				Phase:       lifecycle.PhasePromoted,
 				Runner:      uuid.Must(uuid.NewV4()),

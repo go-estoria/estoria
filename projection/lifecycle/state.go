@@ -298,12 +298,17 @@ func (s State) validate() error {
 	// Every cutover flips Live to a non-zero version — a first rebuild has no
 	// rollback target, so no legitimate history returns Live to zero — and
 	// the first promotion records revision 1: a live version and a positive
-	// revision exist together or not at all.
+	// revision exist together or not at all. Each allocation contributes at
+	// most one promotion and one rollback, and the first can never roll
+	// back, so A allocations record at most 2A-1 cutovers; the division form
+	// avoids overflowing the doubled bound.
 	switch {
 	case s.Live == (projection.ID{}) && s.CutoverRevision != 0:
 		return fmt.Errorf("cutover revision %d recorded with no live version", s.CutoverRevision)
 	case s.Live != (projection.ID{}) && s.CutoverRevision < 1:
 		return errors.New("live version recorded with no cutover revision")
+	case s.CutoverRevision/2 >= int64(s.Allocated):
+		return fmt.Errorf("cutover revision %d cannot arise from %d allocations", s.CutoverRevision, s.Allocated)
 	}
 
 	return s.validateAttempt()

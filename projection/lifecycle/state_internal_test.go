@@ -765,6 +765,30 @@ func TestValidate_CutoverRevisionPairsWithLive(t *testing.T) {
 			t.Error("want a negative cutover revision rejected, got nil")
 		}
 	})
+
+	t.Run("revision at the allocation bound", func(t *testing.T) {
+		t.Parallel()
+
+		// A first promotion plus a promote-rollback pair per later
+		// allocation: 2A-1 is the most cutovers A allocations can record.
+		s := stateInPhase(PhaseNone)
+		s.CutoverRevision = 2*int64(s.Allocated) - 1
+
+		if err := s.validate(); err != nil {
+			t.Errorf("want the bound-exact revision valid, got %v", err)
+		}
+	})
+
+	t.Run("revision past the allocation bound", func(t *testing.T) {
+		t.Parallel()
+
+		s := stateInPhase(PhaseNone)
+		s.CutoverRevision = 2 * int64(s.Allocated)
+
+		if err := s.validate(); err == nil {
+			t.Error("want a revision no clean history could record rejected, got nil")
+		}
+	})
 }
 
 // TestValidateSnapshotState_Contract pins the decode-boundary contract
@@ -799,6 +823,11 @@ func TestValidateSnapshotState_Contract(t *testing.T) {
 		{name: "clean live payload without a cutover revision is rejected", state: func() State {
 			s := stateInPhase(PhaseNone)
 			s.CutoverRevision = 0
+			return s
+		}(), accept: false},
+		{name: "clean payload past the allocation bound is rejected", state: func() State {
+			s := stateInPhase(PhaseNone)
+			s.CutoverRevision = 2 * int64(s.Allocated)
 			return s
 		}(), accept: false},
 	} {
