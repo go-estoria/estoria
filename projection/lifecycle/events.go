@@ -77,13 +77,19 @@ func (e RebuildInitiated) ApplyTo(s State) State {
 // RunnerClaimed records that a runner took ownership of the in-flight
 // attempt: appended before the claimant constructs its processor, in every
 // runnable phase and phase-preserving in all of them, so duplicate execution
-// is durably observable in the stream. Ownership is cooperative supersession
-// — a previously recorded runner observes its displacement and winds itself
+// is durably observable in the stream. The claim names the attempt it
+// covers, so a delayed or misdirected claim cannot silently reassign an
+// attempt it never belonged to. Ownership is cooperative supersession — a
+// previously recorded runner observes its displacement and winds itself
 // down; runner identity is not checked by handler writes or checkpoint
-// saves, and nothing here fences the data plane. FromPosition carries the
-// checkpoint position the claimant resumes from, zero for a fresh build. A
-// claim with no runner ID or with no attempt in flight poisons the fold.
+// saves, and nothing here fences the data plane. FromPosition is the
+// checkpoint position observed at claim time — audit information; the
+// processor loads its own resume position from the checkpoint store when it
+// starts, and the two can differ if the checkpoint moves in between. A
+// claim with no runner ID, with no attempt ID, for a different attempt than
+// the one in flight, or with no attempt in flight poisons the fold.
 type RunnerClaimed struct {
+	Attempt      uuid.UUID
 	Runner       uuid.UUID
 	FromPosition int64
 	At           time.Time
@@ -97,19 +103,27 @@ func (RunnerClaimed) New() estoria.DomainEvent[State] { return &RunnerClaimed{} 
 
 // ApplyTo applies the event to state, returning the new state.
 func (e RunnerClaimed) ApplyTo(s State) State {
+	switch {
+	case e.Attempt.IsNil():
+		s = s.poison("runner claim recorded with no attempt ID",
+			"projection", s.Name)
+	case e.Runner.IsNil():
+		s = s.poison("runner claim recorded with no runner ID",
+			"projection", s.Name)
+	}
+
 	switch s.Attempt.Phase {
 	case PhaseCreated, PhaseBuilding, PhaseCaughtUp, PhasePromoted, PhaseRetiring:
+		if e.Attempt != s.Attempt.ID {
+			s = s.poison("runner claim recorded for a different attempt",
+				"projection", s.Name, "claimed_attempt", e.Attempt, "attempt", s.Attempt.ID)
+		}
 	case PhaseNone:
 		s = s.poison("runner claim recorded with no rebuild in flight",
 			"projection", s.Name, "runner", e.Runner)
 	default:
 		s = s.poison("runner claim recorded in an unknown phase",
 			"projection", s.Name, "phase", s.Attempt.Phase)
-	}
-
-	if e.Runner.IsNil() {
-		s = s.poison("runner claim recorded with no runner ID",
-			"projection", s.Name)
 	}
 
 	s.Attempt.Runner = e.Runner

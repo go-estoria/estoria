@@ -176,12 +176,13 @@ type AttemptState struct {
 	// ClaimedAt is when the attempt was most recently claimed.
 	ClaimedAt time.Time
 
-	// CaughtUpAt is when the target version first drained to the head.
+	// CaughtUpAt is when the target version's latest certified drain reached
+	// the head; the first observation lives in event history.
 	CaughtUpAt time.Time
 
-	// CaughtUpPos is the global position the target version had reached when
-	// it first caught up: one datapoint with audit value, not progress
-	// telemetry.
+	// CaughtUpPos is the global position of the latest certified drain: one
+	// datapoint with audit value, not progress telemetry. Re-certification
+	// overwrites it; the first observation lives in event history.
 	CaughtUpPos int64
 
 	// PromotedAt is when reads were cut over to the target version.

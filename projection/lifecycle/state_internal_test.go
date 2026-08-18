@@ -245,7 +245,7 @@ func TestFold_PoisonBranches(t *testing.T) {
 		{
 			name:       "runner claim with no rebuild in flight",
 			prior:      stateInPhase(PhaseNone),
-			event:      RunnerClaimed{Runner: internalRunnerID, At: internalAt},
+			event:      RunnerClaimed{Attempt: internalAttemptID, Runner: internalRunnerID, At: internalAt},
 			wantReason: "no rebuild in flight",
 			applied: func(t *testing.T, got State) {
 				t.Helper()
@@ -262,14 +262,40 @@ func TestFold_PoisonBranches(t *testing.T) {
 				s.Attempt.Phase = Phase(99)
 				return s
 			}(),
-			event:      RunnerClaimed{Runner: internalRunnerID, At: internalAt},
+			event:      RunnerClaimed{Attempt: internalAttemptID, Runner: internalRunnerID, At: internalAt},
 			wantReason: "unknown phase",
 			applied:    func(*testing.T, State) {},
 		},
 		{
+			name:       "runner claim with no attempt ID",
+			prior:      stateInPhase(PhaseBuilding),
+			event:      RunnerClaimed{Runner: internalRunnerID, At: internalAt},
+			wantReason: "no attempt ID",
+			applied: func(t *testing.T, got State) {
+				t.Helper()
+
+				if got.Attempt.Runner != internalRunnerID {
+					t.Errorf("want the claim applied as recorded, got %+v", got.Attempt)
+				}
+			},
+		},
+		{
+			name:       "runner claim for a different attempt",
+			prior:      stateInPhase(PhaseBuilding),
+			event:      RunnerClaimed{Attempt: uuid.Must(uuid.NewV4()), Runner: internalRunnerID, At: internalAt},
+			wantReason: "different attempt",
+			applied: func(t *testing.T, got State) {
+				t.Helper()
+
+				if got.Attempt.Runner != internalRunnerID {
+					t.Errorf("want the misdirected claim applied as recorded, got %+v", got.Attempt)
+				}
+			},
+		},
+		{
 			name:       "runner claim with no runner ID",
 			prior:      stateInPhase(PhaseBuilding),
-			event:      RunnerClaimed{At: internalAt},
+			event:      RunnerClaimed{Attempt: internalAttemptID, At: internalAt},
 			wantReason: "no runner ID",
 			applied: func(t *testing.T, got State) {
 				t.Helper()

@@ -4,11 +4,15 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/go-estoria/estoria/aggregatestore"
+	"github.com/go-estoria/estoria/eventstore"
 	esmemory "github.com/go-estoria/estoria/eventstore/memory"
 	"github.com/go-estoria/estoria/projection"
+	cpmemory "github.com/go-estoria/estoria/projection/checkpointstore/memory"
 	"github.com/gofrs/uuid/v5"
 )
 
@@ -124,12 +128,57 @@ func TestCancellationOnly(t *testing.T) {
 	}
 }
 
+// nopHandler is the smallest projection.EventHandler, for wiring real
+// orchestrators in white-box fixtures.
+type nopHandler struct{}
+
+func (nopHandler) Handle(context.Context, *eventstore.Event) error { return nil }
+
+// gatedSaveStore delegates and, when armed, parks the next Save on a gate:
+// entered closes when the parked save begins, and the save completes when
+// the gate closes. It holds promotion's append open so exit-publication
+// ordering can be observed.
+type gatedSaveStore struct {
+	aggregatestore.Store[State]
+
+	mu      sync.Mutex
+	entered chan struct{}
+	gate    chan struct{}
+}
+
+func (s *gatedSaveStore) armSaveGate() (entered, gate chan struct{}) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.entered = make(chan struct{})
+	s.gate = make(chan struct{})
+
+	return s.entered, s.gate
+}
+
+func (s *gatedSaveStore) Save(ctx context.Context, aggregate *aggregatestore.Aggregate[State], opts *aggregatestore.SaveOptions) error {
+	s.mu.Lock()
+	entered, gate := s.entered, s.gate
+	s.entered, s.gate = nil, nil
+	s.mu.Unlock()
+
+	if entered != nil {
+		close(entered)
+		<-gate
+	}
+
+	return s.Store.Save(ctx, aggregate, opts)
+}
+
 // caughtUpRebuildForTest builds a handle over a real caught-up lifecycle
-// aggregate, for pinning Promote's certificate arms directly: the arms guard
-// against windows — a lifecycle version that advanced past the certificate,
-// a processor that exited a moment ago — that behavioral tests cannot hold
-// open deterministically.
-func caughtUpRebuildForTest(t *testing.T) *Rebuild {
+// aggregate wired to a real orchestrator, for pinning Promote's certificate
+// arms directly: the arms guard windows — a lifecycle version that advanced
+// past the certificate, a binding that no longer matches, a processor that
+// exited a moment ago — that behavioral tests cannot hold open
+// deterministically. The real store makes a mutant that skips an arm
+// observable as a durably recorded promotion rather than as a fixture
+// panic.
+func caughtUpRebuildForTest(t *testing.T, store aggregatestore.Store[State]) (*Rebuild, *certification) {
 	t.Helper()
 
 	events, err := esmemory.NewEventStore()
@@ -137,18 +186,41 @@ func caughtUpRebuildForTest(t *testing.T) *Rebuild {
 		t.Fatalf("creating event store: %v", err)
 	}
 
-	store, err := NewStore(events)
+	if store == nil {
+		inner, err := NewStore(events)
+		if err != nil {
+			t.Fatalf("creating lifecycle store: %v", err)
+		}
+
+		store = inner
+	} else if wrapper, ok := store.(*gatedSaveStore); ok {
+		inner, err := NewStore(events)
+		if err != nil {
+			t.Fatalf("creating lifecycle store: %v", err)
+		}
+
+		wrapper.Store = inner
+	}
+
+	orchestrator, err := NewOrchestrator(Config{
+		Events:      events,
+		Checkpoints: cpmemory.NewCheckpointStore(),
+		Handler:     func(projection.ID) (projection.EventHandler, error) { return nopHandler{}, nil },
+		Projections: store,
+	})
 	if err != nil {
-		t.Fatalf("creating lifecycle store: %v", err)
+		t.Fatalf("creating orchestrator: %v", err)
 	}
 
 	v1 := projection.ID{Name: "orders", Version: 1}
 	at := time.Date(2026, 8, 18, 9, 0, 0, 0, time.UTC)
+	attempt := uuid.Must(uuid.NewV4())
+	runner := uuid.Must(uuid.NewV4())
 
 	aggregate := store.New(StreamUUID("orders"))
 	aggregate.Append(
-		RebuildInitiated{Attempt: uuid.Must(uuid.NewV4()), Target: v1, Reason: "certificate arms", At: at},
-		RunnerClaimed{Runner: uuid.Must(uuid.NewV4()), At: at},
+		RebuildInitiated{Attempt: attempt, Target: v1, Reason: "certificate arms", At: at},
+		RunnerClaimed{Attempt: attempt, Runner: runner, At: at},
 		BuildStarted{},
 		CaughtUp{Position: 7, At: at},
 	)
@@ -157,45 +229,185 @@ func caughtUpRebuildForTest(t *testing.T) *Rebuild {
 		t.Fatalf("saving the caught-up history: %v", err)
 	}
 
-	return &Rebuild{name: "orders", aggregate: aggregate, processorExited: make(chan struct{})}
-}
-
-// TestPromote_RefusesStaleCertificateVersion pins the certificate's version
-// arm: a certificate cut against an older lifecycle version than the
-// aggregate now holds is dead — the version only grows — and the refusal
-// wraps ErrNotCertified before anything is appended.
-func TestPromote_RefusesStaleCertificateVersion(t *testing.T) {
-	t.Parallel()
-
-	r := caughtUpRebuildForTest(t)
-	r.certificate = &certification{runner: uuid.Must(uuid.NewV4()), position: 7, version: r.aggregate.Version() - 1}
-
-	if err := r.Promote(t.Context()); !errors.Is(err, ErrNotCertified) {
-		t.Fatalf("want the stale-version certificate refused with ErrNotCertified, got %v", err)
+	r := &Rebuild{
+		orchestrator:    orchestrator,
+		name:            "orders",
+		aggregate:       aggregate,
+		runner:          runner,
+		processorExited: make(chan struct{}),
 	}
 
-	if r.certificate != nil {
-		t.Error("want the dead certificate cleared by the refusal")
+	return r, &certification{
+		attempt:  attempt,
+		runner:   runner,
+		position: 7,
+		version:  aggregate.Version(),
+		exited:   r.processorExited,
 	}
 }
 
-// TestPromote_RefusesCertificateOfExitedProcessor pins the certificate's
-// liveness arm: a certificate whose processor has already exited is refused
-// even when the certificate itself is otherwise current — the in-process
-// clear on exit and this check close the same window from both sides.
-func TestPromote_RefusesCertificateOfExitedProcessor(t *testing.T) {
+// TestPromote_CertificateBindings pins every arm of the promotion license
+// directly: a certificate is honored only when the handle is unrevoked and
+// every binding — attempt, runner, position, lifecycle version, processor
+// incarnation, and the exit signal itself — still holds. Each refusal wraps
+// ErrNotCertified and appends nothing; the intact-certificate control proves
+// the fixture promotes for real, so a skipped arm surfaces as a durably
+// recorded promotion rather than a fixture artifact.
+func TestPromote_CertificateBindings(t *testing.T) {
 	t.Parallel()
 
-	r := caughtUpRebuildForTest(t)
-	r.certificate = &certification{runner: uuid.Must(uuid.NewV4()), position: 7, version: r.aggregate.Version()}
-	close(r.processorExited)
+	t.Run("intact certificate promotes", func(t *testing.T) {
+		t.Parallel()
 
-	if err := r.Promote(t.Context()); !errors.Is(err, ErrNotCertified) {
-		t.Fatalf("want the exited processor's certificate refused with ErrNotCertified, got %v", err)
+		r, certificate := caughtUpRebuildForTest(t, nil)
+		r.certificate = certificate
+
+		if err := r.Promote(t.Context()); err != nil {
+			t.Fatalf("want the intact certificate honored, got %v", err)
+		}
+
+		if got := r.aggregate.State().Attempt.Phase; got != PhasePromoted {
+			t.Errorf("want the promotion recorded, got %s", got)
+		}
+
+		if r.certificate != nil {
+			t.Error("want the certificate consumed by the promotion")
+		}
+	})
+
+	for _, tt := range []struct {
+		name   string
+		mutate func(r *Rebuild, c *certification)
+	}{
+		{"revoked handle", func(r *Rebuild, _ *certification) {
+			r.failure = errors.New("recorded terminal cause")
+		}},
+		{"stopped run", func(r *Rebuild, _ *certification) {
+			r.stopped = true
+		}},
+		{"different attempt", func(_ *Rebuild, c *certification) {
+			c.attempt = uuid.Must(uuid.NewV4())
+		}},
+		{"superseded runner", func(_ *Rebuild, c *certification) {
+			c.runner = uuid.Must(uuid.NewV4())
+		}},
+		{"different position", func(_ *Rebuild, c *certification) {
+			c.position++
+		}},
+		{"stale lifecycle version", func(_ *Rebuild, c *certification) {
+			c.version--
+		}},
+		{"different processor incarnation", func(_ *Rebuild, c *certification) {
+			c.exited = make(chan struct{})
+		}},
+		{"exited processor", func(r *Rebuild, _ *certification) {
+			close(r.processorExited)
+		}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			r, certificate := caughtUpRebuildForTest(t, nil)
+			tt.mutate(r, certificate)
+			r.certificate = certificate
+
+			versionBefore := r.aggregate.Version()
+
+			if err := r.Promote(t.Context()); !errors.Is(err, ErrNotCertified) {
+				t.Fatalf("want the promotion refused with ErrNotCertified, got %v", err)
+			}
+
+			if got := r.aggregate.Version(); got != versionBefore {
+				t.Errorf("want nothing appended by the refusal, got version %d (was %d)", got, versionBefore)
+			}
+
+			if r.certificate != nil {
+				t.Error("want the dead certificate cleared by the refusal")
+			}
+		})
+	}
+}
+
+// TestPromote_RevocationCarriesTheCause pins the revoked arm's error shape:
+// the refusal carries both the typed not-certified sentinel and the recorded
+// terminal cause, so a caller can tell a revoked handle from a merely
+// uncertified one.
+func TestPromote_RevocationCarriesTheCause(t *testing.T) {
+	t.Parallel()
+
+	cause := errors.New("the recorded terminal cause")
+
+	r, certificate := caughtUpRebuildForTest(t, nil)
+	r.certificate = certificate
+	r.stopped = true
+	r.failure = cause
+
+	err := r.Promote(t.Context())
+	if !errors.Is(err, ErrNotCertified) {
+		t.Fatalf("want the refusal to wrap ErrNotCertified, got %v", err)
 	}
 
-	if r.certificate != nil {
-		t.Error("want the dead certificate cleared by the refusal")
+	if !errors.Is(err, cause) {
+		t.Errorf("want the refusal to carry the recorded cause, got %v", err)
+	}
+}
+
+// TestPublishProcessorExit_SerializesWithPromotion pins exit publication
+// against the promotion window: publication takes the handle lock a running
+// promotion holds through its append, so the exit signal cannot close
+// between a certificate check and the append it authorized. The publication
+// must block while the promotion's save is parked and land only after it —
+// and a promotion attempted after publication is refused.
+func TestPublishProcessorExit_SerializesWithPromotion(t *testing.T) {
+	t.Parallel()
+
+	store := &gatedSaveStore{}
+
+	r, certificate := caughtUpRebuildForTest(t, store)
+	r.certificate = certificate
+
+	entered, gate := store.armSaveGate()
+
+	promoted := make(chan error, 1)
+
+	go func() { promoted <- r.Promote(t.Context()) }()
+
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for the promotion save to start")
+	}
+
+	published := make(chan struct{})
+
+	go func() {
+		r.publishProcessorExit()
+		close(published)
+	}()
+
+	// One-sided by construction: an unserialized publication completes
+	// immediately, so observing it still pending while the save is parked is
+	// the whole assertion.
+	select {
+	case <-published:
+		t.Fatal("want exit publication blocked while the promotion save is in flight")
+	case <-time.After(150 * time.Millisecond):
+	}
+
+	close(gate)
+
+	if err := <-promoted; err != nil {
+		t.Fatalf("want the in-flight promotion to commit before the exit publishes, got %v", err)
+	}
+
+	select {
+	case <-published:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for the exit publication after the save completed")
+	}
+
+	if got := r.aggregate.State().Attempt.Phase; got != PhasePromoted {
+		t.Errorf("want the promotion durable, got %s", got)
 	}
 }
 
@@ -225,10 +437,12 @@ func TestCheckLifecycleAggregate_RejectsForeignAggregate(t *testing.T) {
 	// A full, internally consistent customers history lands at the stream
 	// addressed by "orders". Folding from empty state, the first admission
 	// sets the name, so nothing poisons.
+	foreignAttempt := uuid.Must(uuid.NewV4())
+
 	aggregate := store.New(StreamUUID("orders"))
 	aggregate.Append(
-		RebuildInitiated{Attempt: uuid.Must(uuid.NewV4()), Target: customersV1, Reason: "takeover", At: at},
-		RunnerClaimed{Runner: uuid.Must(uuid.NewV4()), At: at},
+		RebuildInitiated{Attempt: foreignAttempt, Target: customersV1, Reason: "takeover", At: at},
+		RunnerClaimed{Attempt: foreignAttempt, Runner: uuid.Must(uuid.NewV4()), At: at},
 		BuildStarted{},
 		CaughtUp{Position: 1, At: at},
 		Promoted{Next: customersV1, At: at},

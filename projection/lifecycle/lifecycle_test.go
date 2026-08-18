@@ -36,7 +36,7 @@ func initiated() lifecycle.RebuildInitiated {
 }
 
 func claimed() lifecycle.RunnerClaimed {
-	return lifecycle.RunnerClaimed{Runner: runnerID, At: claimedAt}
+	return lifecycle.RunnerClaimed{Attempt: attemptID, Runner: runnerID, At: claimedAt}
 }
 
 func caughtUp() lifecycle.CaughtUp {
@@ -138,10 +138,40 @@ func TestTransitions(t *testing.T) {
 		{
 			name:  "RunnerClaimed supersedes the previous claimant",
 			prior: fold(initiated(), claimed(), lifecycle.BuildStarted{}),
-			event: lifecycle.RunnerClaimed{Runner: runner2ID, FromPosition: 1_000, At: caughtUpAt},
+			event: lifecycle.RunnerClaimed{Attempt: attemptID, Runner: runner2ID, FromPosition: 1_000, At: caughtUpAt},
 			want: func(s lifecycle.State) lifecycle.State {
 				s.Attempt.Runner = runner2ID
 				s.Attempt.ClaimedAt = caughtUpAt
+				return s
+			},
+		},
+		{
+			name:  "RunnerClaimed preserves the caught-up phase",
+			prior: fold(initiated(), claimed(), lifecycle.BuildStarted{}, caughtUp()),
+			event: lifecycle.RunnerClaimed{Attempt: attemptID, Runner: runner2ID, FromPosition: 2_000, At: promotedAt},
+			want: func(s lifecycle.State) lifecycle.State {
+				s.Attempt.Runner = runner2ID
+				s.Attempt.ClaimedAt = promotedAt
+				return s
+			},
+		},
+		{
+			name:  "RunnerClaimed preserves the promoted phase",
+			prior: fold(initiated(), claimed(), lifecycle.BuildStarted{}, caughtUp(), promoted()),
+			event: lifecycle.RunnerClaimed{Attempt: attemptID, Runner: runner2ID, FromPosition: 3_000, At: retiringAt},
+			want: func(s lifecycle.State) lifecycle.State {
+				s.Attempt.Runner = runner2ID
+				s.Attempt.ClaimedAt = retiringAt
+				return s
+			},
+		},
+		{
+			name:  "RunnerClaimed preserves the retiring phase",
+			prior: fold(initiated(), claimed(), lifecycle.BuildStarted{}, caughtUp(), promoted(), lifecycle.RetireStarted{Retiring: previousID, At: retiringAt}),
+			event: lifecycle.RunnerClaimed{Attempt: attemptID, Runner: runner2ID, FromPosition: 4_000, At: retiringAt},
+			want: func(s lifecycle.State) lifecycle.State {
+				s.Attempt.Runner = runner2ID
+				s.Attempt.ClaimedAt = retiringAt
 				return s
 			},
 		},
@@ -413,7 +443,7 @@ func TestLifecycleAggregate_EndToEnd(t *testing.T) {
 func allEvents() []estoria.DomainEvent[lifecycle.State] {
 	return []estoria.DomainEvent[lifecycle.State]{
 		initiated(),
-		lifecycle.RunnerClaimed{Runner: runnerID, FromPosition: 1_000, At: claimedAt},
+		lifecycle.RunnerClaimed{Attempt: attemptID, Runner: runnerID, FromPosition: 1_000, At: claimedAt},
 		lifecycle.BuildStarted{},
 		caughtUp(),
 		promoted(),
