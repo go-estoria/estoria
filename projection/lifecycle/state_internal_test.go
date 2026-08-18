@@ -527,3 +527,40 @@ func TestValidate_NamedStateRequiresAllocation(t *testing.T) {
 		t.Errorf("want the zero state still valid (a fresh aggregate), got %v", err)
 	}
 }
+
+// TestValidateSnapshotState_Contract pins the decode-boundary contract
+// directly, independent of what fallback replay would reconstruct: a
+// poisoned payload is accepted — it is valid testimony of a poisoned fold,
+// and commands refuse it through validation as usual — while a clean payload
+// must be structurally valid and initialized. Behind the suite, fallback
+// replay of a poisoned stream re-poisons, so only a direct assertion holds
+// the acceptance arm itself in place.
+func TestValidateSnapshotState_Contract(t *testing.T) {
+	t.Parallel()
+
+	for _, tt := range []struct {
+		name   string
+		state  State
+		accept bool
+	}{
+		{name: "poisoned uninitialized payload is accepted as testimony", state: State{InvalidReason: "two lifecycles claim the same slot"}, accept: true},
+		{name: "poisoned structurally invalid payload is accepted as testimony", state: State{Name: "orders", InvalidReason: "two lifecycles claim the same slot"}, accept: true},
+		{name: "legitimate payload is accepted", state: stateInPhase(PhaseBuilding), accept: true},
+		{name: "clean uninitialized payload is rejected", state: State{}, accept: false},
+		{name: "clean named payload without allocations is rejected", state: State{Name: "orders"}, accept: false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			err := tt.state.ValidateSnapshotState()
+
+			if tt.accept && err != nil {
+				t.Errorf("want the payload accepted, got %v", err)
+			}
+
+			if !tt.accept && err == nil {
+				t.Error("want the payload rejected, got nil")
+			}
+		})
+	}
+}

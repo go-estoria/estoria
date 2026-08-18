@@ -347,7 +347,9 @@ func (r *Rebuild) reconcile(ctx context.Context, attemptID uuid.UUID, stop conte
 // alone proves the cancellation appears somewhere in the tree, which would
 // let a joined independent failure ride along and be discarded as benign.
 // The traversal mirrors the errors package's own: joined nodes fan out,
-// wrapped nodes descend, and matching applies at the leaves.
+// wrapped nodes descend, and matching applies at the leaves — where a node
+// whose unwrapping yields no children is itself a leaf, exactly as
+// errors.Is treats it.
 func cancellationOnly(err, target error) bool {
 	if err == nil {
 		return false
@@ -356,7 +358,7 @@ func cancellationOnly(err, target error) bool {
 	if multi, ok := err.(interface{ Unwrap() []error }); ok {
 		joined := multi.Unwrap()
 		if len(joined) == 0 {
-			return false
+			return errors.Is(err, target)
 		}
 
 		for _, cause := range joined {
@@ -369,7 +371,11 @@ func cancellationOnly(err, target error) bool {
 	}
 
 	if single, ok := err.(interface{ Unwrap() error }); ok {
-		return cancellationOnly(single.Unwrap(), target)
+		if cause := single.Unwrap(); cause != nil {
+			return cancellationOnly(cause, target)
+		}
+
+		return errors.Is(err, target)
 	}
 
 	return errors.Is(err, target)

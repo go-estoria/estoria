@@ -1153,64 +1153,153 @@ func (validatedEntityEvent) ApplyTo(s validatedEntity) validatedEntity {
 	return s
 }
 
+// pointerValidatedEntity is validatedEntity's pointer-state twin: the store's
+// state type is *pointerValidatedEntity and the validator reads through its
+// receiver, so a typed-nil state decoded from a null payload panics if it is
+// ever consulted.
+type pointerValidatedEntity struct {
+	Applied    int
+	Fabricated bool
+}
+
+func (e *pointerValidatedEntity) ValidateSnapshotState() error {
+	if e.Fabricated {
+		return errors.New("fabricated state")
+	}
+
+	return nil
+}
+
+type pointerValidatedEntityEvent struct{}
+
+func (pointerValidatedEntityEvent) EventType() string { return "pointervalidatedentityevent" }
+
+func (pointerValidatedEntityEvent) New() estoria.DomainEvent[*pointerValidatedEntity] {
+	return &pointerValidatedEntityEvent{}
+}
+
+func (pointerValidatedEntityEvent) ApplyTo(s *pointerValidatedEntity) *pointerValidatedEntity {
+	s.Applied++
+	return s
+}
+
+// addressValidatedEntity declares its validator on the pointer receiver while
+// the store's state type is the value: only the decoded state's address
+// satisfies the interface.
+type addressValidatedEntity struct {
+	Applied    int
+	Fabricated bool
+}
+
+func (e *addressValidatedEntity) ValidateSnapshotState() error {
+	if e.Fabricated {
+		return errors.New("fabricated state")
+	}
+
+	return nil
+}
+
+type addressValidatedEntityEvent struct{}
+
+func (addressValidatedEntityEvent) EventType() string { return "addressvalidatedentityevent" }
+
+func (addressValidatedEntityEvent) New() estoria.DomainEvent[addressValidatedEntity] {
+	return &addressValidatedEntityEvent{}
+}
+
+func (addressValidatedEntityEvent) ApplyTo(s addressValidatedEntity) addressValidatedEntity {
+	s.Applied++
+	return s
+}
+
+// newValidatedSnapshotStore seeds a three-event stream for a state type that
+// implements SnapshotStateValidator and wraps its store in a snapshotting
+// store whose snapshot store serves snapshotData at version 2.
+func newValidatedSnapshotStore[S any](
+	t *testing.T,
+	streamType string,
+	factory func(uuid.UUID) S,
+	event estoria.DomainEvent[S],
+	snapshotData []byte,
+) *aggregatestore.SnapshottingStore[S] {
+	t.Helper()
+
+	eventStore, err := memory.NewEventStore()
+	if err != nil {
+		t.Fatalf("creating event store: %v", err)
+	}
+
+	inner, err := aggregatestore.New(eventStore, streamType, factory,
+		aggregatestore.WithEventTypes[S](event))
+	if err != nil {
+		t.Fatalf("creating inner store: %v", err)
+	}
+
+	seed := inner.New(uuid.NewV5(uuid.NamespaceOID, streamType))
+	seed.Append(event, event, event)
+
+	if err := inner.Save(t.Context(), seed, nil); err != nil {
+		t.Fatalf("seeding stream: %v", err)
+	}
+
+	snapshotting, err := aggregatestore.NewSnapshottingStore(
+		inner,
+		&mockSnapshotStore{
+			ReadSnapshotFn: func(_ context.Context, aggregateID typeid.ID, _ snapshotstore.ReadSnapshotOptions) (*snapshotstore.AggregateSnapshot, error) {
+				return &snapshotstore.AggregateSnapshot{
+					AggregateID:      aggregateID,
+					AggregateVersion: 2,
+					Data:             snapshotData,
+				}, nil
+			},
+		},
+		&mockSnapshotPolicy{ShouldSnapshotFn: func(typeid.ID, int64, time.Time) bool { return false }},
+	)
+	if err != nil {
+		t.Fatalf("creating snapshotting store: %v", err)
+	}
+
+	return snapshotting
+}
+
 // TestSnapshottingStore_Hydrate_ValidatesSnapshotState pins the
 // SnapshotStateValidator contract: a decoded payload the state type rejects
 // is skipped exactly like an undecodable one — the aggregate hydrates fully
 // from its events and the fabricated state is never installed — while an
-// accepted payload is installed and only the tail is folded on top.
+// accepted payload is installed and only the tail is folded on top. The
+// validator is honored on whichever receiver form declares it, and a null
+// payload for a pointer state type falls back to full hydration rather than
+// reaching the validator or the aggregate as a typed nil.
 func TestSnapshottingStore_Hydrate_ValidatesSnapshotState(t *testing.T) {
 	t.Parallel()
 
-	newSeededStores := func(t *testing.T, snapshotData []byte) *aggregatestore.SnapshottingStore[validatedEntity] {
+	newValueStore := func(t *testing.T, snapshotData []byte) *aggregatestore.SnapshottingStore[validatedEntity] {
 		t.Helper()
-
-		eventStore, err := memory.NewEventStore()
-		if err != nil {
-			t.Fatalf("creating event store: %v", err)
-		}
-
-		inner, err := aggregatestore.New(eventStore, "validatedentity",
+		return newValidatedSnapshotStore(t, "validatedentity",
 			func(uuid.UUID) validatedEntity { return validatedEntity{} },
-			aggregatestore.WithEventTypes[validatedEntity](validatedEntityEvent{}))
-		if err != nil {
-			t.Fatalf("creating inner store: %v", err)
-		}
-
-		seed := inner.New(uuid.NewV5(uuid.NamespaceOID, "validated"))
-		seed.Append(validatedEntityEvent{}, validatedEntityEvent{}, validatedEntityEvent{})
-
-		if err := inner.Save(t.Context(), seed, nil); err != nil {
-			t.Fatalf("seeding stream: %v", err)
-		}
-
-		snapshotting, err := aggregatestore.NewSnapshottingStore(
-			inner,
-			&mockSnapshotStore{
-				ReadSnapshotFn: func(_ context.Context, aggregateID typeid.ID, _ snapshotstore.ReadSnapshotOptions) (*snapshotstore.AggregateSnapshot, error) {
-					return &snapshotstore.AggregateSnapshot{
-						AggregateID:      aggregateID,
-						AggregateVersion: 2,
-						Data:             snapshotData,
-					}, nil
-				},
-			},
-			&mockSnapshotPolicy{ShouldSnapshotFn: func(typeid.ID, int64, time.Time) bool { return false }},
-		)
-		if err != nil {
-			t.Fatalf("creating snapshotting store: %v", err)
-		}
-
-		return snapshotting
+			validatedEntityEvent{}, snapshotData)
 	}
 
-	id := uuid.NewV5(uuid.NamespaceOID, "validated")
+	newPointerStore := func(t *testing.T, snapshotData []byte) *aggregatestore.SnapshottingStore[*pointerValidatedEntity] {
+		t.Helper()
+		return newValidatedSnapshotStore(t, "pointervalidatedentity",
+			func(uuid.UUID) *pointerValidatedEntity { return &pointerValidatedEntity{} },
+			pointerValidatedEntityEvent{}, snapshotData)
+	}
+
+	newAddressStore := func(t *testing.T, snapshotData []byte) *aggregatestore.SnapshottingStore[addressValidatedEntity] {
+		t.Helper()
+		return newValidatedSnapshotStore(t, "addressvalidatedentity",
+			func(uuid.UUID) addressValidatedEntity { return addressValidatedEntity{} },
+			addressValidatedEntityEvent{}, snapshotData)
+	}
 
 	t.Run("rejected payload falls back to full hydration", func(t *testing.T) {
 		t.Parallel()
 
-		snapshotting := newSeededStores(t, []byte(`{"Applied":99,"Fabricated":true}`))
+		snapshotting := newValueStore(t, []byte(`{"Applied":99,"Fabricated":true}`))
 
-		got, err := snapshotting.Load(t.Context(), id, nil)
+		got, err := snapshotting.Load(t.Context(), uuid.NewV5(uuid.NamespaceOID, "validatedentity"), nil)
 		if err != nil {
 			t.Fatalf("loading aggregate: %v", err)
 		}
@@ -1223,9 +1312,74 @@ func TestSnapshottingStore_Hydrate_ValidatesSnapshotState(t *testing.T) {
 	t.Run("accepted payload is installed", func(t *testing.T) {
 		t.Parallel()
 
-		snapshotting := newSeededStores(t, []byte(`{"Applied":50}`))
+		snapshotting := newValueStore(t, []byte(`{"Applied":50}`))
 
-		got, err := snapshotting.Load(t.Context(), id, nil)
+		got, err := snapshotting.Load(t.Context(), uuid.NewV5(uuid.NamespaceOID, "validatedentity"), nil)
+		if err != nil {
+			t.Fatalf("loading aggregate: %v", err)
+		}
+
+		if state := got.State(); state.Applied != 51 {
+			t.Errorf("want the snapshot installed at version 2 with one tail event folded, got %+v", state)
+		}
+	})
+
+	t.Run("null payload for pointer state falls back instead of panicking", func(t *testing.T) {
+		t.Parallel()
+
+		snapshotting := newPointerStore(t, []byte(`null`))
+
+		got, err := snapshotting.Load(t.Context(), uuid.NewV5(uuid.NamespaceOID, "pointervalidatedentity"), nil)
+		if err != nil {
+			t.Fatalf("loading aggregate: %v", err)
+		}
+
+		state := got.State()
+		if state == nil {
+			t.Fatal("want the full replay, got the null snapshot's nil state installed")
+		}
+
+		if state.Applied != 3 {
+			t.Errorf("want the full replay of 3 events, got %+v", state)
+		}
+	})
+
+	t.Run("valid payload for pointer state is installed", func(t *testing.T) {
+		t.Parallel()
+
+		snapshotting := newPointerStore(t, []byte(`{"Applied":50}`))
+
+		got, err := snapshotting.Load(t.Context(), uuid.NewV5(uuid.NamespaceOID, "pointervalidatedentity"), nil)
+		if err != nil {
+			t.Fatalf("loading aggregate: %v", err)
+		}
+
+		if state := got.State(); state == nil || state.Applied != 51 {
+			t.Errorf("want the snapshot installed at version 2 with one tail event folded, got %+v", state)
+		}
+	})
+
+	t.Run("pointer-receiver validator rejects through the value state's address", func(t *testing.T) {
+		t.Parallel()
+
+		snapshotting := newAddressStore(t, []byte(`{"Applied":99,"Fabricated":true}`))
+
+		got, err := snapshotting.Load(t.Context(), uuid.NewV5(uuid.NamespaceOID, "addressvalidatedentity"), nil)
+		if err != nil {
+			t.Fatalf("loading aggregate: %v", err)
+		}
+
+		if state := got.State(); state.Applied != 3 || state.Fabricated {
+			t.Errorf("want the pointer-receiver validator found and the fabricated payload replaced by the full replay, got %+v", state)
+		}
+	})
+
+	t.Run("pointer-receiver validator accepts through the value state's address", func(t *testing.T) {
+		t.Parallel()
+
+		snapshotting := newAddressStore(t, []byte(`{"Applied":50}`))
+
+		got, err := snapshotting.Load(t.Context(), uuid.NewV5(uuid.NamespaceOID, "addressvalidatedentity"), nil)
 		if err != nil {
 			t.Fatalf("loading aggregate: %v", err)
 		}

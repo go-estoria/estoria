@@ -1,7 +1,9 @@
 package lifecycle
 
 import (
+	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -38,6 +40,69 @@ func TestProcessorExit_Classification(t *testing.T) {
 			r := &Rebuild{stopped: tt.stopped, failure: tt.failure}
 
 			if got := r.processorExit(procErr); !errors.Is(got, tt.want) {
+				t.Errorf("want %v, got %v", tt.want, got)
+			}
+		})
+	}
+}
+
+// leafCancellationError is a cancellation-aware error whose unwrapping yields no
+// children: Unwrap exists but returns nil, the shape errors.Is treats as a
+// leaf. A tree walk that recurses into the nil child instead of matching the
+// node misreads it as a non-cancellation.
+type leafCancellationError struct{ cancel bool }
+
+func (e leafCancellationError) Error() string { return "leaf cancellation" }
+
+func (e leafCancellationError) Is(target error) bool { return e.cancel && target == context.Canceled }
+
+func (e leafCancellationError) Unwrap() error { return nil }
+
+// emptyJoinCancellationError is leafCancellationError's multi-error twin: its
+// child list is empty.
+type emptyJoinCancellationError struct{ cancel bool }
+
+func (e emptyJoinCancellationError) Error() string { return "empty-join cancellation" }
+
+func (e emptyJoinCancellationError) Is(target error) bool {
+	return e.cancel && target == context.Canceled
+}
+
+func (e emptyJoinCancellationError) Unwrap() []error { return nil }
+
+// TestCancellationOnly pins the leaf semantics of the reconcile loop's benign
+// arm: every leaf must match the cancellation, a node whose unwrapping yields
+// no children is itself a leaf, and a joined independent failure is never
+// discarded. A custom cancellation with a childless Unwrap must read as
+// benign — misreading it records a false terminal failure that exit
+// classification then ranks above the processor's real error.
+func TestCancellationOnly(t *testing.T) {
+	t.Parallel()
+
+	errBoom := errors.New("boom")
+
+	for _, tt := range []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{name: "nil error is not a cancellation", err: nil, want: false},
+		{name: "the cancellation itself", err: context.Canceled, want: true},
+		{name: "wrapped cancellation", err: fmt.Errorf("tick: %w", context.Canceled), want: true},
+		{name: "joined cancellations", err: errors.Join(context.Canceled, context.Canceled), want: true},
+		{name: "joined independent failure is not benign", err: errors.Join(context.Canceled, errBoom), want: false},
+		{name: "plain failure", err: errBoom, want: false},
+		{name: "cancellation-aware leaf with a nil Unwrap", err: leafCancellationError{cancel: true}, want: true},
+		{name: "non-cancellation leaf with a nil Unwrap", err: leafCancellationError{}, want: false},
+		{name: "cancellation-aware empty join", err: emptyJoinCancellationError{cancel: true}, want: true},
+		{name: "non-cancellation empty join", err: emptyJoinCancellationError{}, want: false},
+		{name: "wrapped cancellation-aware leaf", err: fmt.Errorf("tick: %w", leafCancellationError{cancel: true}), want: true},
+		{name: "cancellation-aware leaf joined with a failure", err: errors.Join(leafCancellationError{cancel: true}, errBoom), want: false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			if got := cancellationOnly(tt.err, context.Canceled); got != tt.want {
 				t.Errorf("want %v, got %v", tt.want, got)
 			}
 		})
