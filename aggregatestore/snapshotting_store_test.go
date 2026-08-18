@@ -1124,3 +1124,114 @@ func TestSnapshottingStore_Hydrate_PartialSnapshotDoesNotCorruptEntity(t *testin
 		t.Errorf("state leaked from a failed snapshot unmarshal: want empty owner, got %q", owner)
 	}
 }
+
+// validatedEntity is a state type that vouches for its snapshots: payloads
+// marked Fabricated are ones no fold produces.
+type validatedEntity struct {
+	Applied    int
+	Fabricated bool
+}
+
+func (e validatedEntity) ValidateSnapshotState() error {
+	if e.Fabricated {
+		return errors.New("fabricated state")
+	}
+
+	return nil
+}
+
+type validatedEntityEvent struct{}
+
+func (validatedEntityEvent) EventType() string { return "validatedentityevent" }
+
+func (validatedEntityEvent) New() estoria.DomainEvent[validatedEntity] {
+	return &validatedEntityEvent{}
+}
+
+func (validatedEntityEvent) ApplyTo(s validatedEntity) validatedEntity {
+	s.Applied++
+	return s
+}
+
+// TestSnapshottingStore_Hydrate_ValidatesSnapshotState pins the
+// SnapshotStateValidator contract: a decoded payload the state type rejects
+// is skipped exactly like an undecodable one — the aggregate hydrates fully
+// from its events and the fabricated state is never installed — while an
+// accepted payload is installed and only the tail is folded on top.
+func TestSnapshottingStore_Hydrate_ValidatesSnapshotState(t *testing.T) {
+	t.Parallel()
+
+	newSeededStores := func(t *testing.T, snapshotData []byte) *aggregatestore.SnapshottingStore[validatedEntity] {
+		t.Helper()
+
+		eventStore, err := memory.NewEventStore()
+		if err != nil {
+			t.Fatalf("creating event store: %v", err)
+		}
+
+		inner, err := aggregatestore.New(eventStore, "validatedentity",
+			func(uuid.UUID) validatedEntity { return validatedEntity{} },
+			aggregatestore.WithEventTypes[validatedEntity](validatedEntityEvent{}))
+		if err != nil {
+			t.Fatalf("creating inner store: %v", err)
+		}
+
+		seed := inner.New(uuid.NewV5(uuid.NamespaceOID, "validated"))
+		seed.Append(validatedEntityEvent{}, validatedEntityEvent{}, validatedEntityEvent{})
+
+		if err := inner.Save(t.Context(), seed, nil); err != nil {
+			t.Fatalf("seeding stream: %v", err)
+		}
+
+		snapshotting, err := aggregatestore.NewSnapshottingStore(
+			inner,
+			&mockSnapshotStore{
+				ReadSnapshotFn: func(_ context.Context, aggregateID typeid.ID, _ snapshotstore.ReadSnapshotOptions) (*snapshotstore.AggregateSnapshot, error) {
+					return &snapshotstore.AggregateSnapshot{
+						AggregateID:      aggregateID,
+						AggregateVersion: 2,
+						Data:             snapshotData,
+					}, nil
+				},
+			},
+			&mockSnapshotPolicy{ShouldSnapshotFn: func(typeid.ID, int64, time.Time) bool { return false }},
+		)
+		if err != nil {
+			t.Fatalf("creating snapshotting store: %v", err)
+		}
+
+		return snapshotting
+	}
+
+	id := uuid.NewV5(uuid.NamespaceOID, "validated")
+
+	t.Run("rejected payload falls back to full hydration", func(t *testing.T) {
+		t.Parallel()
+
+		snapshotting := newSeededStores(t, []byte(`{"Applied":99,"Fabricated":true}`))
+
+		got, err := snapshotting.Load(t.Context(), id, nil)
+		if err != nil {
+			t.Fatalf("loading aggregate: %v", err)
+		}
+
+		if state := got.State(); state.Applied != 3 || state.Fabricated {
+			t.Errorf("want the full replay of 3 events with nothing installed from the snapshot, got %+v", state)
+		}
+	})
+
+	t.Run("accepted payload is installed", func(t *testing.T) {
+		t.Parallel()
+
+		snapshotting := newSeededStores(t, []byte(`{"Applied":50}`))
+
+		got, err := snapshotting.Load(t.Context(), id, nil)
+		if err != nil {
+			t.Fatalf("loading aggregate: %v", err)
+		}
+
+		if state := got.State(); state.Applied != 51 {
+			t.Errorf("want the snapshot installed at version 2 with one tail event folded, got %+v", state)
+		}
+	})
+}

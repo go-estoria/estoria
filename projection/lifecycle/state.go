@@ -203,6 +203,32 @@ func (s State) poison(msg string, args ...any) State {
 	return s
 }
 
+// ValidateSnapshotState implements aggregatestore.SnapshotStateValidator:
+// it rejects snapshot payloads no legitimate fold could have produced, so
+// the snapshotting store falls back to full hydration instead of installing
+// them. Installed, a reset payload would seed the tail's fold with
+// fabricated state — the events after the snapshot would fold as a fresh
+// history and hand out already-used version numbers. A poisoned payload is
+// accepted: it is valid testimony of a poisoned fold, and commands refuse
+// it through validation as usual.
+func (s State) ValidateSnapshotState() error {
+	if s.InvalidReason != "" {
+		return nil
+	}
+
+	if err := s.validate(); err != nil {
+		return err
+	}
+
+	// Any fold a snapshot could legitimately capture has applied at least
+	// one event, and a clean first event always records the name.
+	if s.Name == "" {
+		return errors.New("a lifecycle snapshot cannot hold uninitialized state")
+	}
+
+	return nil
+}
+
 // validate reports whether the folded state satisfies the package's
 // structural invariants. The fold is total — a persisted event always applies
 // — so only tampering or a bug produces a state that violates them; commands

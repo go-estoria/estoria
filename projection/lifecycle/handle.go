@@ -237,16 +237,24 @@ func (r *Rebuild) Run(ctx context.Context) error {
 		}
 	}
 
-	// Cancel and join reconciliation before the final classification: the
-	// reconcile loop hydrates while holding the handle's mutex, so waiting
-	// on the mutex before canceling would deadlock against a hydration that
-	// ends only on cancellation — and a fail-closed cause recorded during
-	// the wind-down must win over the processor's own exit error.
 	exitErr := <-done
 	stop()
+
+	return r.classifyExit(reconcileExited, exitErr)
+}
+
+// classifyExit joins reconciliation and classifies err through
+// processorExit: the one exit discipline every return path shares. The
+// caller must already have canceled the processor context — the reconcile
+// loop hydrates while holding the handle's mutex, so joining (or
+// classifying, which takes the mutex) before canceling would deadlock
+// against a hydration that ends only on cancellation. Joining before
+// classifying guarantees a fail-closed cause recorded during the wind-down
+// wins over err.
+func (r *Rebuild) classifyExit(reconcileExited <-chan struct{}, err error) error {
 	<-reconcileExited
 
-	return r.processorExit(exitErr)
+	return r.processorExit(err)
 }
 
 // reconcile periodically rehydrates the lifecycle aggregate while the
@@ -282,11 +290,12 @@ func (r *Rebuild) reconcile(ctx context.Context, attemptID uuid.UUID, stop conte
 		}
 
 		if err := r.orchestrator.config.Projections.Hydrate(ctx, r.aggregate, nil); err != nil {
-			// Benign only when the failure IS this run's own cancellation:
-			// deciding on the context's state alone would discard a real
-			// hydration failure that races the wind-down, laundering it
-			// into a bare cancellation.
-			if ctx.Err() != nil && errors.Is(err, ctx.Err()) {
+			// Benign only when the failure IS this run's own cancellation
+			// and nothing else: deciding on the context's state alone would
+			// discard a real failure that races the wind-down, and a joined
+			// chain carrying an independent cause alongside the cancellation
+			// must keep its fail-closed precedence.
+			if ctx.Err() != nil && cancellationOnly(err, ctx.Err()) {
 				r.mu.Unlock()
 				return
 			}
@@ -333,6 +342,39 @@ func (r *Rebuild) reconcile(ctx context.Context, attemptID uuid.UUID, stop conte
 	}
 }
 
+// cancellationOnly reports whether err represents nothing but the given
+// cancellation: every leaf of its error tree matches target. errors.Is
+// alone proves the cancellation appears somewhere in the tree, which would
+// let a joined independent failure ride along and be discarded as benign.
+// The traversal mirrors the errors package's own: joined nodes fan out,
+// wrapped nodes descend, and matching applies at the leaves.
+func cancellationOnly(err, target error) bool {
+	if err == nil {
+		return false
+	}
+
+	if multi, ok := err.(interface{ Unwrap() []error }); ok {
+		joined := multi.Unwrap()
+		if len(joined) == 0 {
+			return false
+		}
+
+		for _, cause := range joined {
+			if !cancellationOnly(cause, target) {
+				return false
+			}
+		}
+
+		return true
+	}
+
+	if single, ok := err.(interface{ Unwrap() error }); ok {
+		return cancellationOnly(single.Unwrap(), target)
+	}
+
+	return errors.Is(err, target)
+}
+
 // runToCaughtUp waits for the build's first drain to reach the head, records
 // the CaughtUp transition, and promotes if the orchestrator auto-promotes. It
 // reports whether Run should keep tailing; when it reports false, its error
@@ -345,16 +387,14 @@ func (r *Rebuild) runToCaughtUp(ctx context.Context, proc *processor.Processor, 
 	case <-ctx.Done():
 		stop()
 		<-done
-		<-reconcileExited
 
 		// Classification still applies on cancellation: a recorded
 		// fail-closed cause wins over the bare context error.
-		return false, r.processorExit(ctx.Err())
+		return false, r.classifyExit(reconcileExited, ctx.Err())
 	case err := <-done:
 		stop()
-		<-reconcileExited
 
-		return false, r.processorExit(err)
+		return false, r.classifyExit(reconcileExited, err)
 	case <-proc.CaughtUp():
 	}
 
@@ -382,13 +422,12 @@ func (r *Rebuild) runToCaughtUp(ctx context.Context, proc *processor.Processor, 
 	if err != nil {
 		stop()
 		<-done
-		<-reconcileExited
 
 		// An Abandon — or the reconcile loop observing the attempt's end —
 		// can win the race against the catch-up transition; the outcome is
 		// recorded, so the lost append is not an error. A fail-closed stop
 		// surfaces its cause instead.
-		return false, r.processorExit(err)
+		return false, r.classifyExit(reconcileExited, err)
 	}
 
 	if r.orchestrator.autoPromote {
@@ -419,12 +458,11 @@ func (r *Rebuild) promoteAfterCatchUp(ctx context.Context, stop context.CancelFu
 
 	stop()
 	<-done
-	<-reconcileExited
 
 	// An Abandon can win the race against auto-promotion; the abandonment is
 	// recorded, so the refused promotion is not an error. A fail-closed stop
 	// surfaces its cause instead.
-	return false, r.processorExit(err)
+	return false, r.classifyExit(reconcileExited, err)
 }
 
 // Promote cuts reads over to the target version by recording Promoted — the

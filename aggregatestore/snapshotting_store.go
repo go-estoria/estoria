@@ -17,6 +17,17 @@ type SnapshotPolicy interface {
 	ShouldSnapshot(aggregateID typeid.ID, aggregateVersion int64, timestamp time.Time) bool
 }
 
+// A SnapshotStateValidator is implemented by state types that can vouch for
+// what their snapshots legitimately claim. SnapshottingStore consults it
+// after decoding a snapshot and before installing the state on the
+// aggregate: a rejected payload is skipped in favor of full hydration,
+// exactly like an undecodable one, so tampered or truncated snapshot
+// storage degrades to replaying the events rather than seeding the fold
+// with fabricated state.
+type SnapshotStateValidator interface {
+	ValidateSnapshotState() error
+}
+
 // A SnapshottingStore wraps an aggregate store and uses a snapshot store to save snapshots
 // and/or hydrate aggregates from snapshots.
 type SnapshottingStore[S any] struct {
@@ -157,6 +168,18 @@ func (s *SnapshottingStore[S]) Hydrate(ctx context.Context, aggregate *Aggregate
 	if err := s.stateCodec.UnmarshalState(snap.Data, &state); err != nil {
 		log.Warn("failed to unmarshal snapshot, falling back to full hydration", "error", err)
 		return s.inner.Hydrate(ctx, aggregate, opts)
+	}
+
+	// A state type that implements SnapshotStateValidator vouches for what
+	// snapshots of it can legitimately claim. A rejected payload is treated
+	// exactly like an undecodable one, because installing it would seed the
+	// tail's fold with fabricated state — the one thing full event replay
+	// can never produce on its own.
+	if validator, ok := any(state).(SnapshotStateValidator); ok {
+		if err := validator.ValidateSnapshotState(); err != nil {
+			log.Warn("snapshot state failed validation, falling back to full hydration", "error", err)
+			return s.inner.Hydrate(ctx, aggregate, opts)
+		}
 	}
 
 	log.Debug("loaded snapshot", "version", snap.AggregateVersion)

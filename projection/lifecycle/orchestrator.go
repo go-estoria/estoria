@@ -233,7 +233,10 @@ func checkLifecycleAggregate(aggregate *aggregatestore.Aggregate[State], name st
 	// poisons the fold, so an aggregate that has applied events yet holds
 	// clean nameless state can only mean persistence was reset underneath it
 	// — a snapshot erasing the fold — and its allocation history cannot be
-	// trusted.
+	// trusted. Snapshot validation rejects such payloads before they are
+	// installed, making this arm unreachable through the core snapshotting
+	// store; it stays as defense in depth for state installed by
+	// infrastructure that does not consult the validator.
 	if aggregate.Version() > 0 && state.Name == "" {
 		return fmt.Errorf("%w: lifecycle aggregate at version %d holds uninitialized state", ErrInvalidState, aggregate.Version())
 	}

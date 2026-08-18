@@ -2660,10 +2660,24 @@ func TestRun_ReconcileHydrationFailureIsTerminal(t *testing.T) {
 // TestSnapshotCannotResetAllocation pins never-reuse against snapshot-borne
 // state: a snapshot asserting a named lifecycle with no allocations — or
 // uninitialized state over a stream that has applied events — is a fold no
-// clean history can produce, and accepting either would let Begin hand a
-// new attempt an already-used version number.
+// clean history can produce. The state's snapshot validation rejects the
+// payload at the decode boundary, so hydration falls back to full replay
+// and the truth prevails: with no tampered tail the true state recovers and
+// the next admission targets the next version, and a tail crafted to fold
+// cleanly over the reset state re-poisons on replay instead. Either way, no
+// already-used version number is handed out again. Installing the reset
+// payload would defeat both post-hydration checks — the tail's events would
+// fold over it as a fresh, valid history.
 func TestSnapshotCannotResetAllocation(t *testing.T) {
 	t.Parallel()
+
+	resetShapes := []struct {
+		name  string
+		state lifecycle.State
+	}{
+		{"zeroed allocation", lifecycle.State{Name: "orders"}},
+		{"uninitialized state", lifecycle.State{}},
+	}
 
 	// burnedV1 admits and abandons orders v1 through a snapshotting store
 	// that never writes snapshots of its own, leaving Allocated at 1 with
@@ -2686,45 +2700,61 @@ func TestSnapshotCannotResetAllocation(t *testing.T) {
 		return snapshots, events, orchestrator
 	}
 
-	refused := func(t *testing.T, events *esmemory.EventStore, orchestrator *lifecycle.Orchestrator) {
-		t.Helper()
+	for _, shape := range resetShapes {
+		t.Run(shape.name+" head snapshot recovers the truth", func(t *testing.T) {
+			t.Parallel()
 
-		if _, err := orchestrator.Resume(t.Context(), "orders"); !errors.Is(err, lifecycle.ErrInvalidState) {
-			t.Errorf("want Resume refused with ErrInvalidState, got %v", err)
-		}
+			snapshots, events, orchestrator := burnedV1(t)
 
-		if _, err := orchestrator.Begin(t.Context(), "orders", "reuse attempt"); !errors.Is(err, lifecycle.ErrInvalidState) {
-			t.Errorf("want Begin refused with ErrInvalidState, got %v", err)
-		}
+			writeLifecycleSnapshot(t, snapshots, shape.state, 2)
 
-		if got := countEventsOfType(t, events, lifecycle.RebuildInitiated{}.EventType()); got != 1 {
-			t.Errorf("want no admission recorded over the reset state, got %d in total", got)
-		}
+			r, err := orchestrator.Resume(t.Context(), "orders")
+			if err != nil {
+				t.Fatalf("want the rejected snapshot to fall back to full hydration, got %v", err)
+			}
+
+			if state := r.State(); state.Allocated != 1 || state.Attempt != (lifecycle.AttemptState{}) {
+				t.Fatalf("want the true state recovered from the events, got %+v", state)
+			}
+
+			next, err := orchestrator.Begin(t.Context(), "orders", "next build")
+			if err != nil {
+				t.Fatalf("beginning over the recovered state: %v", err)
+			}
+
+			if got, want := next.State().Attempt.Target, (projection.ID{Name: "orders", Version: 2}); got != want {
+				t.Errorf("want the next admission to target %s, never the burned v1, got %s", want, got)
+			}
+
+			if got := countEventsOfType(t, events, lifecycle.RebuildInitiated{}.EventType()); got != 2 {
+				t.Errorf("want exactly the original and the fresh admission, got %d", got)
+			}
+		})
+
+		t.Run(shape.name+" tampered tail re-poisons on replay", func(t *testing.T) {
+			t.Parallel()
+
+			snapshots, events, orchestrator := burnedV1(t)
+
+			writeLifecycleSnapshot(t, snapshots, shape.state, 2)
+
+			// Folded over the installed reset state, this admission would be
+			// a valid first admission and the final shape would pass every
+			// post-hydration check with an active reused v1. Replayed over
+			// the true history instead, it reuses the burned allocation and
+			// poisons the fold.
+			appendRawLifecycleEvent(t, events, lifecycle.RebuildInitiated{
+				Attempt: uuid.Must(uuid.NewV4()),
+				Target:  projection.ID{Name: "orders", Version: 1},
+				Reason:  "reuse over the reset state",
+				At:      time.Date(2026, 8, 17, 12, 0, 0, 0, time.UTC),
+			})
+
+			if _, err := orchestrator.Resume(t.Context(), "orders"); !errors.Is(err, lifecycle.ErrInvalidState) {
+				t.Errorf("want the replayed reuse refused with ErrInvalidState, got %v", err)
+			}
+		})
 	}
-
-	t.Run("zeroed allocation refused", func(t *testing.T) {
-		t.Parallel()
-
-		snapshots, events, orchestrator := burnedV1(t)
-
-		// The snapshot claims a named lifecycle that never allocated:
-		// hydrated, it would aim the next admission at the burned v1.
-		writeLifecycleSnapshot(t, snapshots, lifecycle.State{Name: "orders"}, 2)
-
-		refused(t, events, orchestrator)
-	})
-
-	t.Run("uninitialized state refused", func(t *testing.T) {
-		t.Parallel()
-
-		snapshots, events, orchestrator := burnedV1(t)
-
-		// The snapshot resets the fold to nothing at all, over a stream that
-		// has applied two events.
-		writeLifecycleSnapshot(t, snapshots, lifecycle.State{}, 2)
-
-		refused(t, events, orchestrator)
-	})
 }
 
 // TestRun_ProcessorFailureSurfacesDespiteHeldReconcile pins the exit path's
@@ -2874,6 +2904,108 @@ func TestRun_CancellationDuringCatchUpSurfacesRecordedFailure(t *testing.T) {
 
 	if runErr := waitDone(t, done); !errors.Is(runErr, errWindDown) {
 		t.Fatalf("want the recorded failure to win over the cancellation, got %v", runErr)
+	}
+}
+
+// TestRun_JoinedCancellationDoesNotLaunderFailure pins the benign arm's
+// exact scope: only a failure that is nothing but this run's cancellation
+// is benign. A joined chain carrying an independent cause alongside the
+// cancellation must stay terminal — errors.Is alone would find the
+// cancellation somewhere in the tree and discard the store failure with it.
+func TestRun_JoinedCancellationDoesNotLaunderFailure(t *testing.T) {
+	t.Parallel()
+
+	events := newEventStore(t)
+
+	inner, err := lifecycle.NewStore(events)
+	if err != nil {
+		t.Fatalf("creating lifecycle store: %v", err)
+	}
+
+	projections := &interceptingStore{Store: inner}
+	h := buildHarness(t, events, projections)
+	h.appendDomain(3)
+
+	r := h.begin("joined failure racing cancellation")
+
+	cancel, done := runAsync(t, r)
+	waitPhase(t, r, lifecycle.PhaseCaughtUp)
+
+	errStoreFailure := errors.New("store failure joined to the cancellation")
+	entered := projections.armHydrateIntercept(func(ctx context.Context) error {
+		cancel()
+		<-ctx.Done()
+
+		return errors.Join(ctx.Err(), errStoreFailure)
+	})
+
+	select {
+	case <-entered:
+	case <-time.After(waitTimeout):
+		t.Fatal("timed out waiting for the reconcile hydration to start")
+	}
+
+	if runErr := waitDone(t, done); !errors.Is(runErr, errStoreFailure) {
+		t.Fatalf("want the joined store failure surfaced, got %v", runErr)
+	}
+}
+
+// TestRun_ProcessorFailureDuringCatchUpSurfacesDespiteHeldReconcile pins the
+// exit discipline on the catch-up path's processor-exit arm, the same way
+// the tailing variant pins the final exit: reconciliation is parked inside
+// a hydration that ends only on cancellation, holding the handle's mutex,
+// and the processor then fails on its own before ever catching up. The arm
+// must cancel before joining and classifying, or the classification would
+// wait on the mutex the parked hydration holds.
+func TestRun_ProcessorFailureDuringCatchUpSurfacesDespiteHeldReconcile(t *testing.T) {
+	t.Parallel()
+
+	events := newEventStore(t)
+
+	inner, err := lifecycle.NewStore(events)
+	if err != nil {
+		t.Fatalf("creating lifecycle store: %v", err)
+	}
+
+	projections := &interceptingStore{Store: inner}
+	h := buildHarness(t, events, projections)
+
+	// The gate holds the build mid-replay: the run never reaches catch-up.
+	h.model.armGate()
+	h.appendDomain(3)
+
+	r := h.begin("processor failure while catching up")
+
+	_, done := runAsync(t, r)
+	waitPhase(t, r, lifecycle.PhaseBuilding)
+
+	entered := projections.armHydrateIntercept(func(ctx context.Context) error {
+		<-ctx.Done()
+		return ctx.Err()
+	})
+
+	select {
+	case <-entered:
+	case <-time.After(waitTimeout):
+		t.Fatal("timed out waiting for the reconcile hydration to start")
+	}
+
+	// With reconciliation parked, releasing the gate onto a failing handler
+	// makes the processor exit on its own, still catching up.
+	h.model.setHandleFailure(true)
+	h.model.releaseGate()
+
+	runErr := waitDone(t, done)
+
+	switch {
+	case runErr == nil:
+		t.Fatal("want the processor's own failure surfaced, got nil")
+	case errors.Is(runErr, context.Canceled):
+		t.Fatalf("want the processor's own failure surfaced, got cancellation: %v", runErr)
+	}
+
+	if !strings.Contains(runErr.Error(), "handler failure") {
+		t.Errorf("want the handler failure as the cause, got %v", runErr)
 	}
 }
 

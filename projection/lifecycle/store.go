@@ -18,6 +18,11 @@ func NewStore(events eventstore.Store) (aggregatestore.Store[State], error) {
 		aggregatestore.WithEventTypes(allDomainEvents()...))
 }
 
+// State vouches for its snapshot payloads: a snapshotting store rejects
+// payloads no legitimate fold could have produced and hydrates fully from
+// the events instead.
+var _ aggregatestore.SnapshotStateValidator = State{}
+
 // allDomainEvents returns a prototype of every lifecycle domain event, for
 // registration with the aggregate store.
 func allDomainEvents() []estoria.DomainEvent[State] {
