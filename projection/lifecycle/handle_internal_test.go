@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"sync"
 	"testing"
 	"time"
@@ -13,6 +14,7 @@ import (
 	esmemory "github.com/go-estoria/estoria/eventstore/memory"
 	"github.com/go-estoria/estoria/projection"
 	cpmemory "github.com/go-estoria/estoria/projection/checkpointstore/memory"
+	"github.com/go-estoria/estoria/typeid"
 	"github.com/gofrs/uuid/v5"
 )
 
@@ -577,18 +579,26 @@ func defeatedRebuildForTest(t *testing.T, toVersion int64) (*Rebuild, uuid.UUID,
 	return r, attempt, runner
 }
 
-// TestRecordLostAppend_ClassifiesFromTheDefeatedSlot pins both halves of
-// lost-append classification: the verdict comes from the exact slot the
-// append contended for — here a competing claim, even though the stream's
-// head shows the attempt ended — and the slot fold installs only when it is
-// at least as new as the handle's current view.
+// ordersMismatch fabricates the version-mismatch error an "orders" lifecycle
+// append loses with, expecting the given version.
+func ordersMismatch(expected int64) error {
+	return fmt.Errorf("recording caughtup: %w", eventstore.StreamVersionMismatchError{
+		StreamID:        typeid.New(StreamType, StreamUUID("orders")),
+		ExpectedVersion: expected,
+		ActualVersion:   5,
+	})
+}
+
+// TestRecordLostAppend_ClassifiesFromTheDefeatedSlot pins lost-append
+// classification: the verdict comes from the exact slot the append contended
+// for — here a competing claim, even though the stream's head shows the
+// attempt ended — the slot fold installs only when it is at least as new as
+// the handle's current view, a fold that never reaches the slot renders no
+// verdict at all, and verdict precedence between observers is explicit: an
+// exact displacement upgrades a clean terminal stop but never overwrites a
+// recorded cause.
 func TestRecordLostAppend_ClassifiesFromTheDefeatedSlot(t *testing.T) {
 	t.Parallel()
-
-	lost := func() error {
-		return fmt.Errorf("recording caughtup: %w",
-			eventstore.StreamVersionMismatchError{ExpectedVersion: 3, ActualVersion: 5})
-	}
 
 	t.Run("verdict is the slot's claim, not the head's end", func(t *testing.T) {
 		t.Parallel()
@@ -596,7 +606,7 @@ func TestRecordLostAppend_ClassifiesFromTheDefeatedSlot(t *testing.T) {
 		// The handle's view is its own pre-defeat fold at version 3.
 		r, attempt, runner := defeatedRebuildForTest(t, 3)
 
-		r.recordLostAppend(t.Context(), attempt, runner, lost())
+		r.recordLostAppend(t.Context(), attempt, runner, ordersMismatch(3))
 
 		if !r.stopped {
 			t.Fatal("want the defeat recorded as a stop")
@@ -619,7 +629,7 @@ func TestRecordLostAppend_ClassifiesFromTheDefeatedSlot(t *testing.T) {
 		// as the reconcile loop performs.
 		r, attempt, runner := defeatedRebuildForTest(t, 5)
 
-		r.recordLostAppend(t.Context(), attempt, runner, lost())
+		r.recordLostAppend(t.Context(), attempt, runner, ordersMismatch(3))
 
 		if !r.stopped {
 			t.Fatal("want the defeat recorded as a stop")
@@ -633,6 +643,242 @@ func TestRecordLostAppend_ClassifiesFromTheDefeatedSlot(t *testing.T) {
 			t.Errorf("want the newer view kept over the older slot fold, got version %d", got)
 		}
 	})
+
+	t.Run("a fold short of the slot renders no verdict", func(t *testing.T) {
+		t.Parallel()
+
+		// The fabricated expectation points past the stream's head, so the
+		// hydrate cannot reach the slot: classifying the head fold in its
+		// place would read the abandonment as a clean end and mask the raw
+		// loss.
+		r, attempt, runner := defeatedRebuildForTest(t, 3)
+
+		r.recordLostAppend(t.Context(), attempt, runner, ordersMismatch(9))
+
+		if r.stopped || r.failure != nil {
+			t.Fatalf("want no verdict from an unreachable slot, got stopped=%v failure=%v", r.stopped, r.failure)
+		}
+
+		if got := r.aggregate.Version(); got != 3 {
+			t.Errorf("want the handle's view untouched, got version %d", got)
+		}
+	})
+
+	t.Run("displacement upgrades a reconciled clean end", func(t *testing.T) {
+		t.Parallel()
+
+		// Reconciliation observed the head's abandonment first and recorded
+		// a clean terminal stop; the exact defeat still governs.
+		r, attempt, runner := defeatedRebuildForTest(t, 5)
+		r.stopped = true
+
+		r.recordLostAppend(t.Context(), attempt, runner, ordersMismatch(3))
+
+		if !errors.Is(r.failure, ErrRunnerDisplaced) {
+			t.Fatalf("want the exact displacement to upgrade the clean stop, got %v", r.failure)
+		}
+
+		if got := r.aggregate.Version(); got != 5 {
+			t.Errorf("want no install through the stopped path, got version %d", got)
+		}
+	})
+
+	t.Run("a recorded cause is never overwritten", func(t *testing.T) {
+		t.Parallel()
+
+		cause := errors.New("recorded terminal cause")
+
+		r, attempt, runner := defeatedRebuildForTest(t, 5)
+		r.stopped = true
+		r.failure = cause
+
+		r.recordLostAppend(t.Context(), attempt, runner, ordersMismatch(3))
+
+		if !errors.Is(r.failure, cause) || errors.Is(r.failure, ErrRunnerDisplaced) {
+			t.Fatalf("want the recorded cause kept over the displacement verdict, got %v", r.failure)
+		}
+	})
+}
+
+// TestClaimDefeat_RequiresTheSlotFold pins the claim site's slot proof: when
+// the hydrate cannot reach the contended slot, the raw loss surfaces — a
+// head read would misreport the abandonment at the head as a terminal
+// observation — and nothing installs.
+func TestClaimDefeat_RequiresTheSlotFold(t *testing.T) {
+	t.Parallel()
+
+	r, _, _ := defeatedRebuildForTest(t, 3)
+	base := r.aggregate.State().Attempt
+
+	lost := ordersMismatch(9)
+
+	got := r.claimDefeat(t.Context(), base, lost)
+
+	if !errors.Is(got, eventstore.StreamVersionMismatchError{}) {
+		t.Fatalf("want the raw loss surfaced for an unreachable slot, got %v", got)
+	}
+
+	if errors.Is(got, ErrRunnerDisplaced) {
+		t.Fatalf("want no displacement verdict from an unreachable slot, got %v", got)
+	}
+
+	if version := r.aggregate.Version(); version != 3 {
+		t.Errorf("want the handle's view untouched, got version %d", version)
+	}
+}
+
+// TestDefeatSlot pins which losses identify an exact defeated slot: only a
+// version mismatch for this stream, with a representable expectation, on an
+// error chain that does not also report the append as durable — a retried
+// save can carry a stale mismatch alongside ErrEventsAppended, and the
+// durable append means the contended slots hold this run's own events.
+func TestDefeatSlot(t *testing.T) {
+	t.Parallel()
+
+	stream := typeid.New(StreamType, StreamUUID("orders"))
+	foreign := typeid.New(StreamType, StreamUUID("customers"))
+
+	valid := eventstore.StreamVersionMismatchError{StreamID: stream, ExpectedVersion: 4, ActualVersion: 7}
+
+	for _, tt := range []struct {
+		name     string
+		lost     error
+		wantSlot int64
+		wantOK   bool
+	}{
+		{name: "mismatch for this stream", lost: valid, wantSlot: 5, wantOK: true},
+		{name: "wrapped mismatch", lost: fmt.Errorf("recording caughtup: %w", valid), wantSlot: 5, wantOK: true},
+		{name: "no mismatch", lost: errors.New("save refused")},
+		{name: "durable append alone", lost: aggregatestore.ErrEventsAppended},
+		{name: "durable append with a stale mismatch riding along", lost: errors.Join(aggregatestore.ErrEventsAppended, valid)},
+		{name: "mismatch for a different stream", lost: eventstore.StreamVersionMismatchError{StreamID: foreign, ExpectedVersion: 4}},
+		{name: "mismatch with no stream identity", lost: eventstore.StreamVersionMismatchError{ExpectedVersion: 4}},
+		{name: "negative expectation", lost: eventstore.StreamVersionMismatchError{StreamID: stream, ExpectedVersion: -1}},
+		{name: "expectation at the version ceiling", lost: eventstore.StreamVersionMismatchError{StreamID: stream, ExpectedVersion: math.MaxInt64}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			slot, ok := defeatSlot(tt.lost, stream)
+
+			if ok != tt.wantOK || slot != tt.wantSlot {
+				t.Errorf("want (%d, %v), got (%d, %v)", tt.wantSlot, tt.wantOK, slot, ok)
+			}
+		})
+	}
+}
+
+// TestAttributeExit pins failure attribution's ordering rule: a processor
+// stopped by the wind-down has no story of its own no matter what shape its
+// handler gave the stop, an early return that is purely the run's
+// cancellation subsumes the local failure, and an early real result is an
+// independent failure joined with the local one.
+func TestAttributeExit(t *testing.T) {
+	t.Parallel()
+
+	errExit := errors.New("the processor's own failure")
+	errLocal := errors.New("the local failure")
+
+	for _, tt := range []struct {
+		name          string
+		returnedEarly bool
+		exitErr       error
+		local         error
+		want          []error
+		wantAbsent    []error
+	}{
+		{
+			name:    "not returned early: the local failure governs",
+			exitErr: errExit, local: errLocal,
+			want: []error{errLocal}, wantAbsent: []error{errExit},
+		},
+		{
+			name:          "returned early with a real result: independent failures join",
+			returnedEarly: true, exitErr: errExit, local: errLocal,
+			want: []error{errExit, errLocal},
+		},
+		{
+			name:          "early pure cancellation subsumes the local failure",
+			returnedEarly: true, exitErr: fmt.Errorf("processing: %w", context.Canceled), local: errLocal,
+			want: []error{context.Canceled}, wantAbsent: []error{errLocal},
+		},
+		{
+			name:          "early deadline expiry subsumes the local failure",
+			returnedEarly: true, exitErr: context.DeadlineExceeded, local: errLocal,
+			want: []error{context.DeadlineExceeded}, wantAbsent: []error{errLocal},
+		},
+		{
+			name:          "early cancellation joined with a real cause is not pure",
+			returnedEarly: true, exitErr: errors.Join(context.Canceled, errExit), local: errLocal,
+			want: []error{errExit, errLocal},
+		},
+		{
+			name:          "early nil result: the local failure governs",
+			returnedEarly: true, local: errLocal,
+			want: []error{errLocal},
+		},
+		{
+			name:          "early real result with no local failure",
+			returnedEarly: true, exitErr: errExit,
+			want: []error{errExit},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			got := attributeExit(tt.returnedEarly, tt.exitErr, tt.local)
+
+			for _, want := range tt.want {
+				if !errors.Is(got, want) {
+					t.Errorf("want the result to carry %v, got %v", want, got)
+				}
+			}
+
+			for _, absent := range tt.wantAbsent {
+				if errors.Is(got, absent) {
+					t.Errorf("want the result free of %v, got %v", absent, got)
+				}
+			}
+		})
+	}
+}
+
+// TestPromoteAfterCatchUp_SamplesReturnOrderBeforeStopping pins the sampling
+// discipline behind attribution: the processor's return must be observed
+// BEFORE the wind-down initiates its stop. The fake stop here closes the
+// return signal — exactly what a real stop eventually causes — so a path
+// that sampled after stopping would misread its own stop as an early return
+// and let the fabricated result hijack the genuine local refusal.
+func TestPromoteAfterCatchUp_SamplesReturnOrderBeforeStopping(t *testing.T) {
+	t.Parallel()
+
+	r, certificate := caughtUpRebuildForTest(t, nil)
+
+	// No certificate installed: the promotion refuses locally.
+	r.processorReturned = make(chan struct{})
+
+	fabricated := errors.New("laundered cancellation")
+	done := make(chan error, 1)
+	done <- fabricated
+
+	reconcileExited := make(chan struct{})
+	close(reconcileExited)
+
+	stop := func() { close(r.processorReturned) }
+
+	keepTailing, err := r.promoteAfterCatchUp(t.Context(), certificate.attempt, certificate.runner, stop, done, reconcileExited)
+
+	if keepTailing {
+		t.Fatal("want the failed promotion to end the run")
+	}
+
+	if !errors.Is(err, ErrNotCertified) {
+		t.Fatalf("want the local refusal to govern a stop-caused exit, got %v", err)
+	}
+
+	if errors.Is(err, fabricated) {
+		t.Errorf("want the stopped processor's fabricated result ignored, got %v", err)
+	}
 }
 
 // TestCheckLifecycleAggregate_RejectsForeignAggregate is the supplemental

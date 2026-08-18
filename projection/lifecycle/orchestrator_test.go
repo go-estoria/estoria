@@ -2246,6 +2246,223 @@ func TestRun_LostCatchUpToClaimThenAbandonIsDisplacement(t *testing.T) {
 	}
 }
 
+// TestRun_LostCatchUpDisplacementSurvivesReconciledEnd pins verdict
+// precedence between the two observers: a reconcile tick already holding a
+// read of the terminal head — the abandonment that followed the defeating
+// claim — completes after the CaughtUp loss and records a clean terminal
+// stop before classification reads the defeat at its slot. The exact defeat
+// governs: the displacement verdict must upgrade the clean stop, so the
+// same history reports ErrRunnerDisplaced no matter which observer landed
+// first. One tick is parked as a barrier over the pre-defeat fold, the next
+// parks holding the terminal head, and the classification read is parked
+// until the reconciled end is provably recorded.
+func TestRun_LostCatchUpDisplacementSurvivesReconciledEnd(t *testing.T) {
+	t.Parallel()
+
+	events := newEventStore(t)
+
+	inner, err := lifecycle.NewStore(events)
+	if err != nil {
+		t.Fatalf("creating lifecycle store: %v", err)
+	}
+
+	projections := &interceptingStore{Store: inner}
+	h := buildHarness(t, events, projections)
+	h.appendDomain(3)
+	h.model.armGate()
+
+	r := h.begin("claim then abandon, reconciled first")
+	_, done := runAsync(t, r)
+	waitPhase(t, r, lifecycle.PhaseBuilding)
+
+	// Barrier: park the next reconcile tick over the pre-defeat fold, so no
+	// unparked tick can observe the terminal events below early and end the
+	// run before its CaughtUp ever contends.
+	release1 := make(chan struct{})
+	entered1 := projections.armHydrateAfter(func(ctx context.Context) error {
+		select {
+		case <-release1:
+		case <-ctx.Done():
+		}
+
+		return nil
+	})
+
+	select {
+	case <-entered1:
+	case <-time.After(waitTimeout):
+		t.Fatal("timed out waiting for the barrier tick to park")
+	}
+
+	// The competing claim and its claimant's abandonment land while the
+	// barrier holds; the tick after the barrier reads this terminal head and
+	// parks holding it — released only when the lost catch-up's wind-down
+	// cancels the run, which is exactly the in-flight-read race.
+	appendRawLifecycleEvent(t, events, lifecycle.RunnerClaimed{
+		Attempt: r.State().Attempt.ID,
+		Runner:  uuid.Must(uuid.NewV4()),
+		At:      time.Date(2026, 8, 18, 13, 0, 0, 0, time.UTC),
+	})
+	appendRawLifecycleEvent(t, events, lifecycle.Abandoned{Cause: "the winning claimant gave up"})
+
+	entered2 := projections.armHydrateAfter(func(ctx context.Context) error {
+		<-ctx.Done()
+		return nil
+	})
+
+	release := make(chan struct{})
+	classifying := projections.armVersionedHydrateBefore(func(ctx context.Context) error {
+		select {
+		case <-release:
+		case <-ctx.Done():
+		}
+
+		return nil
+	})
+
+	close(release1)
+
+	select {
+	case <-entered2:
+	case <-time.After(waitTimeout):
+		t.Fatal("timed out waiting for the terminal-head tick to park")
+	}
+
+	// The build catches up and its CaughtUp loses to the claim; the parked
+	// terminal-head tick completes on the wind-down's cancellation and
+	// records the clean stop while classification is parked at its read.
+	h.model.releaseGate()
+
+	select {
+	case <-classifying:
+	case <-time.After(waitTimeout):
+		t.Fatal("timed out waiting for the classification read to park")
+	}
+
+	waitFor(t, func() bool { return r.State().Attempt.Phase == lifecycle.PhaseNone })
+
+	close(release)
+
+	if err := waitDone(t, done); !errors.Is(err, lifecycle.ErrRunnerDisplaced) {
+		t.Errorf("want the exact displacement to upgrade the reconciled clean stop, got %v", err)
+	}
+}
+
+// TestRun_InitialClaimLostToClaimThenAbandonIsDisplacement pins the claim
+// site's defeat classification to the exact slot: the competing claim wins
+// the slot and its claimant abandons immediately after, so a head read
+// would see only the vacated slot and report a clean wind-down. The defeat
+// was the claim; the verdict is displacement, and the verified slot fold —
+// the competitor's claim — is installed on the handle.
+func TestRun_InitialClaimLostToClaimThenAbandonIsDisplacement(t *testing.T) {
+	t.Parallel()
+
+	events := newEventStore(t)
+	writer := &racingWriter{Store: events}
+
+	projections, err := lifecycle.NewStore(writer)
+	if err != nil {
+		t.Fatalf("creating lifecycle store: %v", err)
+	}
+
+	h := buildHarness(t, events, projections, lifecycle.WithReconcileInterval(time.Hour))
+	h.appendDomain(3)
+
+	r := h.begin("claim lost to a claim that then abandons")
+
+	competitor := uuid.Must(uuid.NewV4())
+
+	writer.armRaceAfter(0,
+		writableLifecycleEvent(t, lifecycle.RunnerClaimed{
+			Attempt: r.State().Attempt.ID,
+			Runner:  competitor,
+			At:      time.Date(2026, 8, 18, 13, 0, 0, 0, time.UTC),
+		}),
+		writableLifecycleEvent(t, lifecycle.Abandoned{Cause: "the winning claimant gave up"}),
+	)
+
+	_, done := runAsync(t, r)
+
+	if err := waitDone(t, done); !errors.Is(err, lifecycle.ErrRunnerDisplaced) {
+		t.Fatalf("want the lost claim classified from the claim that won the slot, not the abandonment after it, got %v", err)
+	}
+
+	if got := r.State().Attempt.Runner; got != competitor {
+		t.Errorf("want the verified slot fold installed — the competitor as recorded claimant — got %s", got)
+	}
+
+	if got := countEventsOfType(t, events, lifecycle.BuildStarted{}.EventType()); got != 0 {
+		t.Errorf("want nothing started by the defeated claimant, got %d", got)
+	}
+}
+
+// TestRun_ProcessorDeathDuringLostCatchUpSurfacesItsError pins the catch-up
+// append-failure path's exit attribution: the processor dies on its own
+// while the CaughtUp append is parked — its return committed before the
+// wind-down stops anything — and the append then loses its slot to a
+// verdict-neutral raw CaughtUp. Two genuinely independent failures: the
+// processor's own result must surface, joined with the unclassifiable loss,
+// not be drained and discarded.
+func TestRun_ProcessorDeathDuringLostCatchUpSurfacesItsError(t *testing.T) {
+	t.Parallel()
+
+	events := newEventStore(t)
+	writer := &racingWriter{Store: events}
+
+	inner, err := lifecycle.NewStore(writer)
+	if err != nil {
+		t.Fatalf("creating lifecycle store: %v", err)
+	}
+
+	projections := &parkingSaveStore{Store: inner}
+	h := buildHarness(t, events, projections, lifecycle.WithReconcileInterval(time.Hour))
+	h.appendDomain(3)
+
+	r := h.begin("processor dies during the lost catch-up")
+
+	// The claim save passes; the CaughtUp save parks with the handle lock
+	// held.
+	entered, gate := projections.armSaveGateAfter(1)
+
+	_, done := runAsync(t, r)
+
+	select {
+	case <-entered:
+	case <-time.After(waitTimeout):
+		t.Fatal("timed out waiting for the catch-up save to park")
+	}
+
+	// With the append parked, the processor dies on its own: its return is
+	// committed — and visible to attribution — before any stop.
+	h.model.armHandleFailure()
+	h.appendDomain(1)
+
+	select {
+	case <-h.model.handleFailed():
+	case <-time.After(waitTimeout):
+		t.Fatal("timed out waiting for the processor to fail")
+	}
+
+	// The parked append loses its slot to a verdict-neutral competitor:
+	// same attempt, same claimant, so classification records nothing.
+	writer.armRaceAfter(0, writableLifecycleEvent(t, lifecycle.CaughtUp{
+		Position: 4,
+		At:       time.Date(2026, 8, 18, 13, 30, 0, 0, time.UTC),
+	}))
+
+	close(gate)
+
+	runErr := waitDone(t, done)
+
+	if runErr == nil || !strings.Contains(runErr.Error(), "handler failure") {
+		t.Fatalf("want the processor's own failure surfaced, got %v", runErr)
+	}
+
+	if !errors.Is(runErr, eventstore.StreamVersionMismatchError{}) {
+		t.Errorf("want the independent unclassifiable loss joined alongside the death, got %v", runErr)
+	}
+}
+
 // TestRun_UnobservedCatchUpSurfacesEventsAppended pins the classification
 // gate's other side: a CaughtUp append that is durable but unobserved has no
 // foreign winner — the event at the contended slot is this run's own — so
@@ -2283,6 +2500,13 @@ func TestRun_UnobservedCatchUpSurfacesEventsAppended(t *testing.T) {
 
 	if errors.Is(runErr, lifecycle.ErrRunnerDisplaced) {
 		t.Errorf("want no displacement verdict from the run's own durable append, got %v", runErr)
+	}
+
+	// Classification was skipped entirely, not run to a neutral verdict: a
+	// classifier that hydrated the durable state would have installed the
+	// caught-up fold on the handle.
+	if got := r.State().Attempt.Phase; got != lifecycle.PhaseBuilding {
+		t.Errorf("want the handle's view untouched by the unclassified loss, got %s", got)
 	}
 
 	if got := countEventsOfType(t, events, lifecycle.CaughtUp{}.EventType()); got != 1 {
@@ -2396,6 +2620,12 @@ func TestRun_InitialClaimLostToEndedAttemptWindsDownNil(t *testing.T) {
 
 	if err := waitDone(t, done); err != nil {
 		t.Fatalf("want the claim lost to the attempt's end to wind down clean, got %v", err)
+	}
+
+	// The verified slot fold installs: the handle observed the end it
+	// reported, rather than still showing the pre-defeat attempt in flight.
+	if got := r.State().Attempt.Phase; got != lifecycle.PhaseNone {
+		t.Errorf("want the handle's state to reflect the observed end, got %s", got)
 	}
 
 	if got := countEventsOfType(t, events, lifecycle.RunnerClaimed{}.EventType()); got != 0 {
@@ -2582,7 +2812,7 @@ func TestReconcile_StaleReadDoesNotOverwriteCertifiedState(t *testing.T) {
 	// The next reconcile tick reads the pre-catch-up fold, then parks before
 	// returning it.
 	release1 := make(chan struct{})
-	entered1 := projections.armHydrateAfter(0, func(ctx context.Context) error {
+	entered1 := projections.armHydrateAfter(func(ctx context.Context) error {
 		select {
 		case <-release1:
 		case <-ctx.Done():
@@ -2600,7 +2830,7 @@ func TestReconcile_StaleReadDoesNotOverwriteCertifiedState(t *testing.T) {
 	// Pre-arm the tick after it, so the promotion below runs strictly
 	// between the stale view's verdict and any fresher read.
 	release2 := make(chan struct{})
-	entered2 := projections.armHydrateAfter(0, func(ctx context.Context) error {
+	entered2 := projections.armHydrateAfter(func(ctx context.Context) error {
 		select {
 		case <-release2:
 		case <-ctx.Done():
@@ -2673,7 +2903,7 @@ func TestRun_ProcessorDeathAtCaughtUpSurfacesItsError(t *testing.T) {
 	// With the promotion parked, the processor dies on its own. Its exit
 	// publication queues behind the held lock, and its result is sent only
 	// after that publication — the failure path below must wait for both.
-	h.model.setHandleFailure(true)
+	h.model.armHandleFailure()
 	h.appendDomain(1)
 
 	select {
@@ -2698,8 +2928,8 @@ func TestRun_ProcessorDeathAtCaughtUpSurfacesItsError(t *testing.T) {
 		t.Fatalf("want the processor's own failure surfaced, got %v", runErr)
 	}
 
-	if errors.Is(runErr, eventstore.StreamVersionMismatchError{}) {
-		t.Errorf("want the unclassifiable refusal subsumed by the processor's real result, got %v", runErr)
+	if !errors.Is(runErr, eventstore.StreamVersionMismatchError{}) {
+		t.Errorf("want the independent unclassifiable refusal joined alongside the death, got %v", runErr)
 	}
 }
 
@@ -3752,7 +3982,7 @@ func TestRun_ProcessorFailureSurfacesDespiteHeldReconcile(t *testing.T) {
 	}
 
 	// With reconciliation parked, the processor fails on its own.
-	h.model.setHandleFailure(true)
+	h.model.armHandleFailure()
 	h.appendDomain(1)
 
 	runErr := waitDone(t, done)
@@ -3946,7 +4176,7 @@ func TestRun_ProcessorFailureDuringCatchUpSurfacesDespiteHeldReconcile(t *testin
 
 	// With reconciliation parked, releasing the gate onto a failing handler
 	// makes the processor exit on its own, still catching up.
-	h.model.setHandleFailure(true)
+	h.model.armHandleFailure()
 	h.model.releaseGate()
 
 	runErr := waitDone(t, done)
@@ -4046,13 +4276,13 @@ func (m *readModel) handleFailed() <-chan struct{} {
 	return m.failed
 }
 
-// setHandleFailure arms or disarms handler failures on domain events, so
-// tests can make a running processor fail independently of the lifecycle.
-func (m *readModel) setHandleFailure(fail bool) {
+// armHandleFailure arms handler failures on domain events, so tests can make
+// a running processor fail independently of the lifecycle.
+func (m *readModel) armHandleFailure() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	m.failHandle = fail
+	m.failHandle = true
 }
 
 type readModelHandler struct {
@@ -4211,8 +4441,10 @@ type interceptingStore struct {
 	before         func(context.Context) error
 	beforeSkip     int
 	after          func(context.Context) error
-	afterSkip      int
 	afterEntered   chan struct{}
+
+	versionedBefore        func(context.Context) error
+	versionedBeforeEntered chan struct{}
 }
 
 // armHydrateIntercept arms fn to run in place of a Hydrate call — which
@@ -4240,27 +4472,57 @@ func (s *interceptingStore) armHydrateBefore(skip int, fn func(context.Context) 
 	s.beforeSkip = skip
 }
 
-// armHydrateAfter arms fn to run after a delegated Hydrate completes, before
-// the call returns, once skip calls have passed untouched; the returned
-// channel closes when fn begins — the inner hydrate's view is settled by
-// then, so a parked fn holds exactly that view open.
-func (s *interceptingStore) armHydrateAfter(skip int, fn func(context.Context) error) <-chan struct{} {
+// armHydrateAfter arms fn to run after the next delegated Hydrate completes,
+// before the call returns; the returned channel closes when fn begins — the
+// inner hydrate's view is settled by then, so a parked fn holds exactly that
+// view open.
+func (s *interceptingStore) armHydrateAfter(fn func(context.Context) error) <-chan struct{} {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	s.after = fn
-	s.afterSkip = skip
 	s.afterEntered = make(chan struct{})
 
 	return s.afterEntered
 }
 
+// armVersionedHydrateBefore arms fn to run ahead of the next VERSIONED
+// hydrate (ToVersion > 0) — the defeat-classification read, the only
+// versioned read the handle performs — leaving the unversioned reconcile,
+// entry, and recovery hydrates untouched; the returned channel closes when
+// fn begins.
+func (s *interceptingStore) armVersionedHydrateBefore(fn func(context.Context) error) <-chan struct{} {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.versionedBefore = fn
+	s.versionedBeforeEntered = make(chan struct{})
+
+	return s.versionedBeforeEntered
+}
+
 func (s *interceptingStore) Hydrate(ctx context.Context, aggregate *aggregatestore.Aggregate[lifecycle.State], opts *aggregatestore.HydrateOptions) error {
+	versioned := opts != nil && opts.ToVersion > 0
+
 	s.mu.Lock()
 
 	var replace, before, after func(context.Context) error
 
 	var replaceEntered, afterEntered chan struct{}
+
+	if versioned && s.versionedBefore != nil {
+		fn, entered := s.versionedBefore, s.versionedBeforeEntered
+		s.versionedBefore, s.versionedBeforeEntered = nil, nil
+		s.mu.Unlock()
+
+		close(entered)
+
+		if err := fn(ctx); err != nil {
+			return err
+		}
+
+		return s.Store.Hydrate(ctx, aggregate, opts)
+	}
 
 	if s.replace != nil {
 		if s.replaceSkip > 0 {
@@ -4281,12 +4543,8 @@ func (s *interceptingStore) Hydrate(ctx context.Context, aggregate *aggregatesto
 	}
 
 	if replace == nil && s.after != nil {
-		if s.afterSkip > 0 {
-			s.afterSkip--
-		} else {
-			after, afterEntered = s.after, s.afterEntered
-			s.after, s.afterEntered = nil, nil
-		}
+		after, afterEntered = s.after, s.afterEntered
+		s.after, s.afterEntered = nil, nil
 	}
 	s.mu.Unlock()
 

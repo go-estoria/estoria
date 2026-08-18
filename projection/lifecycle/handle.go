@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"strings"
 	"sync"
 	"time"
@@ -14,6 +15,7 @@ import (
 	"github.com/go-estoria/estoria/projection"
 	"github.com/go-estoria/estoria/projection/checkpointstore"
 	"github.com/go-estoria/estoria/projection/processor"
+	"github.com/go-estoria/estoria/typeid"
 	"github.com/gofrs/uuid/v5"
 )
 
@@ -54,6 +56,13 @@ type Rebuild struct {
 	// exited; commands that clean up after stopping the processor wait on it
 	// so cleanup cannot race a final checkpoint save.
 	processorExited chan struct{}
+
+	// processorReturned is closed the instant the processor's Run returns,
+	// before its exit is published: publication serializes with promotion
+	// through the handle lock, so it cannot witness return order — failure
+	// attribution needs the unserialized fact of whether the processor had
+	// already returned before a wind-down stopped it.
+	processorReturned chan struct{}
 
 	// stopped records that the processor was stopped deliberately — by a
 	// command (Abandon, Rollback) or by the reconcile loop observing the
@@ -289,10 +298,12 @@ func (r *Rebuild) Run(ctx context.Context) error {
 
 	done := make(chan error, 1)
 	exited := make(chan struct{})
+	returned := make(chan struct{})
 
 	r.runner = runner
 	r.stopProcessor = stop
 	r.processorExited = exited
+	r.processorReturned = returned
 	catchingUp := attempt.Phase == PhaseCreated || attempt.Phase == PhaseBuilding || attempt.Phase == PhaseCaughtUp
 	r.mu.Unlock()
 
@@ -300,6 +311,7 @@ func (r *Rebuild) Run(ctx context.Context) error {
 
 	go func() {
 		err := proc.Run(processorCtx)
+		close(returned)
 		r.publishProcessorExit()
 		done <- err
 	}()
@@ -463,7 +475,7 @@ func (r *Rebuild) reconcile(ctx context.Context, attemptID, runnerID uuid.UUID, 
 			// Sticky revocation: the recorded cause is never cleared, and the
 			// certificate can no longer vouch for a superseded runner.
 			r.stopped = true
-			r.failure = fmt.Errorf("runner %s claimed rebuild attempt %s: %w", current.Runner, attemptID, ErrRunnerDisplaced)
+			r.failure = displacedError(current.Runner, attemptID)
 			r.certificate = nil
 		}
 		r.mu.Unlock()
@@ -582,8 +594,10 @@ func (r *Rebuild) runToCaughtUp(ctx context.Context, proc *processor.Processor, 
 
 		return false, r.classifyExit(reconcileExited, exitErr)
 	case err != nil:
+		returnedEarly := r.processorHasReturned()
+
 		stop()
-		<-done
+		exitErr := <-done
 
 		// An Abandon — or the reconcile loop observing the attempt's end —
 		// can win the race against the catch-up transition; the outcome is
@@ -592,7 +606,7 @@ func (r *Rebuild) runToCaughtUp(ctx context.Context, proc *processor.Processor, 
 		// surfaces its cause instead.
 		r.recordLostAppend(ctx, attemptID, runnerID, err)
 
-		return false, r.classifyExit(reconcileExited, err)
+		return false, r.classifyExit(reconcileExited, attributeExit(returnedEarly, exitErr, err))
 	}
 
 	if r.orchestrator.autoPromote {
@@ -662,6 +676,8 @@ func (r *Rebuild) promoteAfterCatchUp(ctx context.Context, attemptID, runnerID u
 		return true, nil
 	}
 
+	returnedEarly := r.processorHasReturned()
+
 	stop()
 	exitErr := <-done
 
@@ -671,16 +687,44 @@ func (r *Rebuild) promoteAfterCatchUp(ctx context.Context, attemptID, runnerID u
 	// its cause instead.
 	r.recordLostAppend(ctx, attemptID, runnerID, err)
 
-	// A processor that died on its own killed the certification, making the
-	// refusal a mere echo of that death: the processor's result is the run's
-	// story. One that exited only because this wind-down canceled it reports
-	// nothing but its context's cancellation, and the refusal stands as the
-	// cause.
-	if exitErr != nil && !cancellationOnly(exitErr, context.Canceled) && !cancellationOnly(exitErr, context.DeadlineExceeded) {
-		return false, r.classifyExit(reconcileExited, exitErr)
+	return false, r.classifyExit(reconcileExited, attributeExit(returnedEarly, exitErr, err))
+}
+
+// processorHasReturned reports whether the processor's Run has already
+// returned — sampled by failure paths before they initiate their stop, so
+// attribution rests on ordering rather than on the shape of the result.
+func (r *Rebuild) processorHasReturned() bool {
+	select {
+	case <-r.processorReturned:
+		return true
+	default:
+		return false
+	}
+}
+
+// attributeExit decides what a failure path reports when a local failure and
+// the processor's result compete, by ordering rather than error shape: only
+// a processor that had already returned before the wind-down stopped it has
+// a result of its own — one stopped by the wind-down reports nothing but the
+// stop's echo, whatever shape its handler gave it, and the local failure
+// governs. An early result that is purely the run's cancellation subsumes
+// the local failure — everything after it is downstream of the dying
+// context; any other early result is a genuinely independent failure and
+// joins the local one.
+func attributeExit(returnedEarly bool, exitErr, local error) error {
+	if !returnedEarly || exitErr == nil {
+		return local
 	}
 
-	return false, r.classifyExit(reconcileExited, err)
+	if cancellationOnly(exitErr, context.Canceled) || cancellationOnly(exitErr, context.DeadlineExceeded) {
+		return exitErr
+	}
+
+	if local == nil {
+		return exitErr
+	}
+
+	return errors.Join(exitErr, local)
 }
 
 // hydrateFresh reads the projection's lifecycle stream into a new aggregate,
@@ -703,14 +747,40 @@ func (r *Rebuild) hydrateFresh(ctx context.Context, toVersion int64) (*aggregate
 	return loaded, nil
 }
 
+// lifecycleStream is the typed stream identity this handle addresses.
+func (r *Rebuild) lifecycleStream() typeid.ID {
+	return typeid.New(StreamType, StreamUUID(r.name))
+}
+
+// displacedError reports another runner's claim over the attempt, wrapping
+// ErrRunnerDisplaced.
+func displacedError(claimant, attemptID uuid.UUID) error {
+	return fmt.Errorf("runner %s claimed rebuild attempt %s: %w", claimant, attemptID, ErrRunnerDisplaced)
+}
+
 // defeatSlot reports the exact stream slot a lost lifecycle append contended
 // for: the version the save expected, plus one. The slot is known only for a
-// loss carrying the store's version-mismatch error; a loss carrying
-// ErrEventsAppended has no foreign winner to classify — the events at the
-// contended slots are this run's own, durably recorded.
-func defeatSlot(lost error) (int64, bool) {
+// loss that is genuinely a foreign win over the given stream: a loss
+// carrying ErrEventsAppended is never one — the events at the contended
+// slots are this run's own, durably recorded, even if a retried save's error
+// chain also carries a stale mismatch — and a mismatch naming a different
+// stream, a negative expectation, or one at the version ceiling identifies
+// no slot on this stream.
+func defeatSlot(lost error, stream typeid.ID) (int64, bool) {
+	if errors.Is(lost, aggregatestore.ErrEventsAppended) {
+		return 0, false
+	}
+
 	var mismatch eventstore.StreamVersionMismatchError
 	if !errors.As(lost, &mismatch) {
+		return 0, false
+	}
+
+	if mismatch.StreamID != stream {
+		return 0, false
+	}
+
+	if mismatch.ExpectedVersion < 0 || mismatch.ExpectedVersion == math.MaxInt64 {
 		return 0, false
 	}
 
@@ -724,15 +794,25 @@ func defeatSlot(lost error) (int64, bool) {
 // cannot be read back — leaves the raw loss to surface. The baseline is the
 // fold the claim was appended against: base names the attempt and the
 // claimant it recorded before the defeat, so an incumbent's own transition
-// winning the slot is not mistaken for a new claimant.
+// winning the slot is not mistaken for a new claimant. Classified verdicts
+// install the verified slot fold, so the handle's state reflects the defeat
+// it just observed; the caller holds r.mu.
 func (r *Rebuild) claimDefeat(ctx context.Context, base AttemptState, lost error) error {
-	slot, ok := defeatSlot(lost)
+	slot, ok := defeatSlot(lost, r.lifecycleStream())
 	if !ok {
 		return lost
 	}
 
 	loaded, err := r.hydrateFresh(ctx, slot)
 	if err != nil {
+		return lost
+	}
+
+	// ToVersion is an upper bound, so a short stream hydrates below it: a
+	// fold that never reaches the slot proves the expectation was not this
+	// stream's — classifying from it would read an unrelated fold as the
+	// defeating event.
+	if loaded.Version() != slot {
 		return lost
 	}
 
@@ -747,8 +827,10 @@ func (r *Rebuild) claimDefeat(ctx context.Context, base AttemptState, lost error
 	case current.ID != base.ID:
 		// The defeating event ended or replaced the attempt: terminal state
 		// reached and observed, nothing to run.
+		r.aggregate = loaded
 		return nil
 	case current.Runner != base.Runner:
+		r.aggregate = loaded
 		return fmt.Errorf("the claim lost the stream to a competing runner: %w", ErrRunnerDisplaced)
 	default:
 		return lost
@@ -764,12 +846,17 @@ func (r *Rebuild) claimDefeat(ctx context.Context, base AttemptState, lost error
 // classified: the events at the contended slots are this run's own durable
 // append, and the raw error already reports exactly that. The verdict
 // records through the same fields the reconcile loop uses, so exit
-// classification surfaces it uniformly; the slot fold installs only when it
-// is at least as new as the handle's current view. A load failure leaves the
-// verdict unclassified rather than masking the original loss; a slot fold
-// that fails validation is terminal.
+// classification surfaces it uniformly — with explicit precedence between
+// the two observers: a displacement read at the defeated slot upgrades a
+// clean terminal stop the reconcile loop recorded from the head, because the
+// head can already show the end that FOLLOWED the defeating claim, and the
+// verdict belongs to the exact defeat; a stop that carries a cause is never
+// overwritten. The slot fold installs only when it is at least as new as the
+// handle's current view. A load failure — or a fold that never reaches the
+// slot — leaves the verdict unclassified rather than masking the original
+// loss; a slot fold that fails validation is terminal.
 func (r *Rebuild) recordLostAppend(ctx context.Context, attemptID, runnerID uuid.UUID, lost error) {
-	slot, ok := defeatSlot(lost)
+	slot, ok := defeatSlot(lost, r.lifecycleStream())
 	if !ok {
 		return
 	}
@@ -779,15 +866,27 @@ func (r *Rebuild) recordLostAppend(ctx context.Context, attemptID, runnerID uuid
 		return
 	}
 
+	if loaded.Version() != slot {
+		return
+	}
+
 	if err := checkLifecycleAggregate(loaded, r.name); err != nil {
 		r.recordTerminalStop(err)
 		return
 	}
 
+	current := loaded.State().Attempt
+	ended := current.ID != attemptID
+	displaced := !ended && current.Runner != runnerID
+
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
 	if r.stopped {
+		if displaced && r.failure == nil {
+			r.failure = displacedError(current.Runner, attemptID)
+		}
+
 		return
 	}
 
@@ -795,15 +894,13 @@ func (r *Rebuild) recordLostAppend(ctx context.Context, attemptID, runnerID uuid
 		r.aggregate = loaded
 	}
 
-	current := loaded.State().Attempt
-
 	switch {
-	case current.ID != attemptID:
+	case ended:
 		r.stopped = true
 		r.certificate = nil
-	case current.Runner != runnerID:
+	case displaced:
 		r.stopped = true
-		r.failure = fmt.Errorf("runner %s claimed rebuild attempt %s: %w", current.Runner, attemptID, ErrRunnerDisplaced)
+		r.failure = displacedError(current.Runner, attemptID)
 		r.certificate = nil
 	}
 }
