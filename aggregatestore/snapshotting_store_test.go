@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"testing"
 	"time"
+	"unsafe"
 
 	"github.com/go-estoria/estoria"
 	"github.com/go-estoria/estoria/aggregatestore"
@@ -1311,6 +1312,30 @@ func (ifaceEntityCodec) UnmarshalState(data []byte, dest *entityIface) error {
 
 func (ifaceEntityCodec) ContentType() string { return estoria.ContentTypeJSON }
 
+// nilingMapEntity is a named map whose pointer-receiver validator accepts
+// while nilling the very state it vouches for: unless nil is rechecked after
+// validation, the store installs nil and the first tail event panics on map
+// assignment.
+type nilingMapEntity map[string]int
+
+func (m *nilingMapEntity) ValidateSnapshotState() error {
+	*m = nil
+	return nil
+}
+
+type nilingMapEntityEvent struct{}
+
+func (nilingMapEntityEvent) EventType() string { return "nilingmapentityevent" }
+
+func (nilingMapEntityEvent) New() estoria.DomainEvent[nilingMapEntity] {
+	return &nilingMapEntityEvent{}
+}
+
+func (nilingMapEntityEvent) ApplyTo(s nilingMapEntity) nilingMapEntity {
+	s["applied"]++
+	return s
+}
+
 // newValidatedSnapshotStore seeds a three-event stream for a state type that
 // implements SnapshotStateValidator and wraps its store in a snapshotting
 // store whose snapshot store serves snapshotData at version 2.
@@ -1611,4 +1636,91 @@ func TestSnapshottingStore_Hydrate_ValidatesSnapshotState(t *testing.T) {
 			t.Errorf("want the copy the validator vouched for installed at version 2 with one tail event folded, got %+v", got.State())
 		}
 	})
+
+	t.Run("valid payload for slice state is installed", func(t *testing.T) {
+		t.Parallel()
+
+		snapshotting := newValidatedSnapshotStore(t, "sliceentity",
+			func(uuid.UUID) []int { return []int{} },
+			sliceEntityEvent{}, []byte(`[5,5]`))
+
+		got, err := snapshotting.Load(t.Context(), uuid.NewV5(uuid.NamespaceOID, "sliceentity"), nil)
+		if err != nil {
+			t.Fatalf("loading aggregate: %v", err)
+		}
+
+		state := got.State()
+		if len(state) != 3 || state[0] != 5 || state[1] != 5 || state[2] != 1 {
+			t.Errorf("want the snapshot installed at version 2 with one tail event appended, got %+v", state)
+		}
+	})
+
+	t.Run("state nilled by an accepting validator falls back", func(t *testing.T) {
+		t.Parallel()
+
+		snapshotting := newValidatedSnapshotStore(t, "nilingmapentity",
+			func(uuid.UUID) nilingMapEntity { return nilingMapEntity{} },
+			nilingMapEntityEvent{}, []byte(`{"applied":50}`))
+
+		got, err := snapshotting.Load(t.Context(), uuid.NewV5(uuid.NamespaceOID, "nilingmapentity"), nil)
+		if err != nil {
+			t.Fatalf("loading aggregate: %v", err)
+		}
+
+		if state := got.State(); state == nil || state["applied"] != 3 {
+			t.Errorf("want the full replay of 3 events, got %+v", state)
+		}
+	})
+}
+
+// TestNilState pins the nil guard's coverage directly — every nilable kind
+// is rejected when nil, and nothing else is — so the "every nilable kind"
+// claim behind the null-payload fallbacks holds by enumeration rather than
+// by the store harnesses alone.
+func TestNilState(t *testing.T) {
+	t.Parallel()
+
+	var (
+		nilChan   chan int
+		nilFunc   func()
+		nilIface  error
+		nilMap    map[string]int
+		nilPtr    *int
+		nilSlice  []int
+		nilUnsafe unsafe.Pointer
+	)
+
+	typedNilInIface := error((*strconv.NumError)(nil))
+	n := 5
+
+	for _, tt := range []struct {
+		name  string
+		state any
+		want  bool
+	}{
+		{name: "nil interface", state: nilIface, want: true},
+		{name: "typed nil pointer in an interface", state: typedNilInIface, want: true},
+		{name: "nil channel", state: nilChan, want: true},
+		{name: "nil function", state: nilFunc, want: true},
+		{name: "nil map", state: nilMap, want: true},
+		{name: "nil pointer", state: nilPtr, want: true},
+		{name: "nil slice", state: nilSlice, want: true},
+		{name: "nil unsafe pointer", state: nilUnsafe, want: true},
+		{name: "non-nil channel", state: make(chan int), want: false},
+		{name: "non-nil function", state: func() {}, want: false},
+		{name: "non-nil map", state: map[string]int{}, want: false},
+		{name: "non-nil pointer", state: &n, want: false},
+		{name: "non-nil slice", state: []int{}, want: false},
+		{name: "non-nil unsafe pointer", state: unsafe.Pointer(&n), want: false},
+		{name: "integer zero", state: 0, want: false},
+		{name: "struct value", state: struct{}{}, want: false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			if got := aggregatestore.NilStateForTest(tt.state); got != tt.want {
+				t.Errorf("want %v, got %v", tt.want, got)
+			}
+		})
+	}
 }

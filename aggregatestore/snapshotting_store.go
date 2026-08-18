@@ -181,7 +181,7 @@ func (s *SnapshottingStore[S]) Hydrate(ctx context.Context, aggregate *Aggregate
 	// history the events never produced, while full replay reproduces any
 	// legitimately nil state on its own. The payload is treated exactly
 	// like an undecodable one.
-	if v := reflect.ValueOf(state); !v.IsValid() || (nilableKind(v.Kind()) && v.IsNil()) {
+	if nilState(state) {
 		log.Warn("snapshot decoded to nil state, falling back to full hydration")
 		return s.inner.Hydrate(ctx, aggregate, opts)
 	}
@@ -193,6 +193,15 @@ func (s *SnapshottingStore[S]) Hydrate(ctx context.Context, aggregate *Aggregate
 	// can never produce on its own.
 	if err := validateSnapshotState(&state); err != nil {
 		log.Warn("snapshot state failed validation, falling back to full hydration", "error", err)
+		return s.inner.Hydrate(ctx, aggregate, opts)
+	}
+
+	// A validator receives the state through a pointer and may mutate what
+	// it vouches for — the interface write-back even installs the mutated
+	// copy — so nil is rechecked on the validated result: acceptance must
+	// not smuggle a nil past the decode-time guard.
+	if nilState(state) {
+		log.Warn("validated snapshot state is nil, falling back to full hydration")
 		return s.inner.Hydrate(ctx, aggregate, opts)
 	}
 
@@ -212,6 +221,15 @@ func nilableKind(k reflect.Kind) bool {
 	return k == reflect.Chan || k == reflect.Func || k == reflect.Interface ||
 		k == reflect.Map || k == reflect.Pointer || k == reflect.Slice ||
 		k == reflect.UnsafePointer
+}
+
+// nilState reports whether state holds nil — decoded from an encoded null,
+// or left behind by a validator that mutated what it vouched for. IsZero
+// stands in for IsNil: they agree on every nilable kind, and IsZero's
+// documented domain includes unsafe pointers.
+func nilState(state any) bool {
+	v := reflect.ValueOf(state)
+	return !v.IsValid() || (nilableKind(v.Kind()) && v.IsZero())
 }
 
 // validateSnapshotState consults the state's SnapshotStateValidator, if it

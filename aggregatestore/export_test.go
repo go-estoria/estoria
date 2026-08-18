@@ -27,3 +27,7 @@ func (a *Aggregate[S]) TestOnlySetStateAtVersion(state S, version int64) {
 func (a *Aggregate[S]) TestOnlyUnappliedEvents() []*Event[S] {
 	return a.unappliedEvents
 }
+
+// NilStateForTest reports whether the snapshotting store's nil guard rejects
+// state, so the guard's nilable-kind coverage can be pinned directly.
+func NilStateForTest(state any) bool { return nilState(state) }
