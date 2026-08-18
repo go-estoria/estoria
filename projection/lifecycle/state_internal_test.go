@@ -101,6 +101,23 @@ func TestFold_PoisonBranches(t *testing.T) {
 			},
 		},
 		{
+			name:  "admission with an invalid target",
+			prior: State{},
+			event: RebuildInitiated{
+				Attempt: uuid.Must(uuid.NewV4()),
+				Target:  projection.ID{Version: 1},
+				At:      internalAt,
+			},
+			wantReason: "invalid target",
+			applied: func(t *testing.T, got State) {
+				t.Helper()
+
+				if got.Attempt.Phase != PhaseCreated || got.Allocated != 1 || got.Name != "" {
+					t.Errorf("want the malformed admission applied as recorded, got %+v", got)
+				}
+			},
+		},
+		{
 			name:  "admission into an occupied slot",
 			prior: stateInPhase(PhaseBuilding),
 			event: RebuildInitiated{
@@ -160,6 +177,24 @@ func TestFold_PoisonBranches(t *testing.T) {
 			event: RebuildInitiated{
 				Attempt:  uuid.Must(uuid.NewV4()),
 				Target:   projection.ID{Name: "orders", Version: 6},
+				Previous: ordersV6,
+				At:       internalAt,
+			},
+			wantReason: "outside the allocation sequence",
+			applied: func(t *testing.T, got State) {
+				t.Helper()
+
+				if got.Allocated != 6 {
+					t.Errorf("want the allocation high-water mark never lowered, got %d", got.Allocated)
+				}
+			},
+		},
+		{
+			name:  "admission below the allocation sequence keeps the high-water mark",
+			prior: State{Name: "orders", Allocated: 6, Live: ordersV6},
+			event: RebuildInitiated{
+				Attempt:  uuid.Must(uuid.NewV4()),
+				Target:   projection.ID{Name: "orders", Version: 3},
 				Previous: ordersV6,
 				At:       internalAt,
 			},
@@ -443,8 +478,10 @@ func TestFold_LegalCompletionForms(t *testing.T) {
 }
 
 // TestFold_MarkIsSticky pins first-observation permanence: the first
-// inconsistency's message survives both later poisonings and later
-// well-formed events.
+// inconsistency's message survives a later, differently-worded poisoning
+// and a later well-formed terminal event. The second poisoning must carry a
+// distinct message, or an overwriting mark would be indistinguishable from
+// a retained one.
 func TestFold_MarkIsSticky(t *testing.T) {
 	t.Parallel()
 
@@ -455,17 +492,38 @@ func TestFold_MarkIsSticky(t *testing.T) {
 		t.Fatal("want the first event to poison the fold")
 	}
 
-	again := BuildStarted{}.ApplyTo(poisoned)
-	if again.InvalidReason != first {
-		t.Errorf("want the first mark retained across later poisonings, got %q", again.InvalidReason)
+	// A second poisoning with a different message: reserving retirement from
+	// the building phase.
+	again := RetireStarted{Retiring: ordersV6, At: internalAt}.ApplyTo(poisoned)
+	if again.InvalidReason == "" || again.InvalidReason != first {
+		t.Errorf("want the first mark retained across a later distinct poisoning, got %q", again.InvalidReason)
 	}
 
-	covered := Abandoned{Cause: "covering the tracks"}.ApplyTo(again)
+	// The reservation applied (the attempt is retiring with its previous
+	// recorded), so a well-formed completion vacates the slot cleanly.
+	covered := PreviousRetired{Retired: ordersV6}.ApplyTo(again)
 	if covered.InvalidReason != first {
 		t.Errorf("want the mark to survive a well-formed terminal event, got %q", covered.InvalidReason)
 	}
 
 	if err := covered.validate(); err == nil {
 		t.Error("want the covered-up state to fail validation, got nil")
+	}
+}
+
+// TestValidate_NamedStateRequiresAllocation pins the representability rule
+// behind the snapshot-reset refusal: the admission that records a name
+// allocates at least version 1, so a named state with no allocations cannot
+// come from any clean fold — only from persistence reset underneath the
+// aggregate — and accepting it would let Begin reissue version 1.
+func TestValidate_NamedStateRequiresAllocation(t *testing.T) {
+	t.Parallel()
+
+	if err := (State{Name: "orders"}).validate(); err == nil {
+		t.Error("want a named state with no allocations rejected, got nil")
+	}
+
+	if err := (State{}).validate(); err != nil {
+		t.Errorf("want the zero state still valid (a fresh aggregate), got %v", err)
 	}
 }

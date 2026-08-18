@@ -229,6 +229,15 @@ func checkLifecycleAggregate(aggregate *aggregatestore.Aggregate[State], name st
 		return fmt.Errorf("%w for projection %q: %w", ErrInvalidState, name, err)
 	}
 
+	// A lifecycle stream's first event either records the projection name or
+	// poisons the fold, so an aggregate that has applied events yet holds
+	// clean nameless state can only mean persistence was reset underneath it
+	// — a snapshot erasing the fold — and its allocation history cannot be
+	// trusted.
+	if aggregate.Version() > 0 && state.Name == "" {
+		return fmt.Errorf("%w: lifecycle aggregate at version %d holds uninitialized state", ErrInvalidState, aggregate.Version())
+	}
+
 	return nil
 }
 

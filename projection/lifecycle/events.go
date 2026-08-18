@@ -15,10 +15,11 @@ import (
 // concurrent initiations conflict at the same stream version, so at most one
 // is admitted. Previous carries the live version at initiation for ledger
 // self-containment; the fold's own Live is the authority it is checked
-// against. An admission with no attempt ID, into an occupied slot, under a
-// different projection name, from a non-live previous, or outside the
-// allocation sequence poisons the fold; the projection name is immutable
-// once set, and the allocation high-water mark never lowers.
+// against. An admission with no attempt ID, with an invalid target, into an
+// occupied slot, under a different projection name, from a non-live
+// previous, or outside the allocation sequence poisons the fold; the
+// projection name is immutable once set, and the allocation high-water mark
+// never lowers.
 type RebuildInitiated struct {
 	Attempt  uuid.UUID
 	Target   projection.ID
@@ -38,6 +39,9 @@ func (e RebuildInitiated) ApplyTo(s State) State {
 	switch {
 	case e.Attempt.IsNil():
 		s = s.poison("rebuild initiated with no attempt ID",
+			"projection", e.Target.Name, "target", e.Target)
+	case e.Target.Validate() != nil:
+		s = s.poison("rebuild initiated with an invalid target",
 			"projection", e.Target.Name, "target", e.Target)
 	case s.Attempt.Phase != PhaseNone:
 		s = s.poison("rebuild initiated while the attempt slot is occupied",

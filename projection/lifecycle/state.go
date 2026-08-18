@@ -227,6 +227,15 @@ func (s State) validate() error {
 		return fmt.Errorf("projection name %q: %w", s.Name, err)
 	}
 
+	// The admission that records the name allocates at least version 1, so
+	// a named fold always carries a positive high-water mark. A named state
+	// claiming none can only come from tampered or truncated persistence —
+	// a snapshot resetting the fold — and trusting it would hand the next
+	// admission an already-used version number.
+	if s.Allocated < 1 {
+		return errors.New("named state records no allocated versions")
+	}
+
 	if s.Live != (projection.ID{}) {
 		if err := s.Live.Validate(); err != nil {
 			return fmt.Errorf("live version %s: %w", s.Live, err)

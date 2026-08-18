@@ -100,3 +100,33 @@ func TestCheckLifecycleAggregate_RejectsForeignAggregate(t *testing.T) {
 		t.Errorf("want the refusal to wrap ErrInvalidState, got %v", err)
 	}
 }
+
+// TestCheckLifecycleAggregate_RejectsMisderivedStream pins the address arm
+// no public flow reaches — Begin, Resume, and Get derive the stream from the
+// name they load, so only a direct check can hold an aggregate against a
+// name it does not derive from — and pins its refusal to ErrInvalidState by
+// identity.
+func TestCheckLifecycleAggregate_RejectsMisderivedStream(t *testing.T) {
+	t.Parallel()
+
+	events, err := esmemory.NewEventStore()
+	if err != nil {
+		t.Fatalf("creating event store: %v", err)
+	}
+
+	store, err := NewStore(events)
+	if err != nil {
+		t.Fatalf("creating lifecycle store: %v", err)
+	}
+
+	aggregate := store.New(StreamUUID("orders"))
+
+	err = checkLifecycleAggregate(aggregate, "customers")
+	if err == nil {
+		t.Fatal("want an aggregate held against a name it does not derive from refused, got nil")
+	}
+
+	if !errors.Is(err, ErrInvalidState) {
+		t.Errorf("want the derivation refusal to wrap ErrInvalidState, got %v", err)
+	}
+}

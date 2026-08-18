@@ -2380,11 +2380,11 @@ func foreignLifecycleState() lifecycle.State {
 	}
 }
 
-// writeForeignSnapshot installs the state as a snapshot of the "orders"
+// writeLifecycleSnapshot installs the state as a snapshot of the "orders"
 // lifecycle aggregate at the given version — the tampering shape the fold
 // cannot observe: hydration installs a snapshot wholesale without folding,
-// so the fold's foreign-name poisoning never runs.
-func writeForeignSnapshot(t *testing.T, snapshots *ssmemory.SnapshotStore, state lifecycle.State, version int64) {
+// so no poison arm ever runs against its contents.
+func writeLifecycleSnapshot(t *testing.T, snapshots *ssmemory.SnapshotStore, state lifecycle.State, version int64) {
 	t.Helper()
 
 	data, err := json.Marshal(state)
@@ -2424,7 +2424,7 @@ func TestRetainedHandle_RefusesForeignStateViaSnapshot(t *testing.T) {
 
 		// The admission is the stream's only event, so a snapshot at version
 		// 1 leaves no tail to fold.
-		writeForeignSnapshot(t, snapshots, foreignLifecycleState(), 1)
+		writeLifecycleSnapshot(t, snapshots, foreignLifecycleState(), 1)
 
 		_, done := runAsync(t, r)
 
@@ -2450,7 +2450,7 @@ func TestRetainedHandle_RefusesForeignStateViaSnapshot(t *testing.T) {
 
 		// Structurally valid, promoted, with a nonzero previous: exactly the
 		// shape whose retirement would tear down another projection's storage.
-		writeForeignSnapshot(t, snapshots, foreignLifecycleState(), 1)
+		writeLifecycleSnapshot(t, snapshots, foreignLifecycleState(), 1)
 
 		if err := r.Retire(t.Context()); !errors.Is(err, lifecycle.ErrInvalidState) {
 			t.Fatalf("want Retire refused with ErrInvalidState on foreign state, got %v", err)
@@ -2487,7 +2487,7 @@ func TestRetainedHandle_RefusesForeignStateViaSnapshot(t *testing.T) {
 		// attempt ID also differs from the running one, so a check reduced
 		// to State validation would classify this as an ordinary benign
 		// wind-down instead of failing closed.
-		writeForeignSnapshot(t, snapshots, foreignLifecycleState(), 3)
+		writeLifecycleSnapshot(t, snapshots, foreignLifecycleState(), 3)
 
 		if err := waitDone(t, done); !errors.Is(err, lifecycle.ErrInvalidState) {
 			t.Errorf("want Run to fail closed with ErrInvalidState via reconciliation, got %v", err)
@@ -2573,6 +2573,36 @@ func TestResume_RefusesCoveredUpSequences(t *testing.T) {
 			t.Errorf("want the first-version reservation refused with ErrInvalidState, got %v", err)
 		}
 	})
+
+	t.Run("empty-target admission then abandonment", func(t *testing.T) {
+		t.Parallel()
+
+		events := newEventStore(t)
+		orchestrator := bareOrchestrator(t, events, cpmemory.NewCheckpointStore(), newReadModel().handler)
+
+		// The first admission's target has no name, so it records none; the
+		// abandonment vacates the slot, and a well-formed second admission
+		// supplies the name — erasing every trace the malformed prefix left
+		// in the final shape.
+		appendRawLifecycleEvent(t, events, lifecycle.RebuildInitiated{
+			Attempt: uuid.Must(uuid.NewV4()),
+			Target:  projection.ID{Version: 1},
+			Reason:  "nameless target",
+			At:      at,
+		})
+		appendRawLifecycleEvent(t, events, lifecycle.Abandoned{Cause: "covering the tracks"})
+		appendRawLifecycleEvent(t, events, lifecycle.RebuildInitiated{
+			Attempt: uuid.Must(uuid.NewV4()),
+			Target:  projection.ID{Name: "orders", Version: 2},
+			Reason:  "supplies the name",
+			At:      at,
+		})
+		appendRawLifecycleEvent(t, events, lifecycle.Abandoned{Cause: "covering the tracks again"})
+
+		if _, err := orchestrator.Resume(t.Context(), "orders"); !errors.Is(err, lifecycle.ErrInvalidState) {
+			t.Errorf("want the empty-target admission refused with ErrInvalidState, got %v", err)
+		}
+	})
 }
 
 // TestRun_ReconcileHydrationFailureIsTerminal pins the terminal contract for
@@ -2627,6 +2657,226 @@ func TestRun_ReconcileHydrationFailureIsTerminal(t *testing.T) {
 	}
 }
 
+// TestSnapshotCannotResetAllocation pins never-reuse against snapshot-borne
+// state: a snapshot asserting a named lifecycle with no allocations — or
+// uninitialized state over a stream that has applied events — is a fold no
+// clean history can produce, and accepting either would let Begin hand a
+// new attempt an already-used version number.
+func TestSnapshotCannotResetAllocation(t *testing.T) {
+	t.Parallel()
+
+	// burnedV1 admits and abandons orders v1 through a snapshotting store
+	// that never writes snapshots of its own, leaving Allocated at 1 with
+	// the slot vacant and the stream at version 2.
+	burnedV1 := func(t *testing.T) (*ssmemory.SnapshotStore, *esmemory.EventStore, *lifecycle.Orchestrator) {
+		t.Helper()
+
+		events, snapshots, _, _, orchestrator := newSnapshottingOrchestrator(t,
+			snapshotstore.EventCountSnapshotPolicy{})
+
+		r, err := orchestrator.Begin(t.Context(), "orders", "will be burned")
+		if err != nil {
+			t.Fatalf("beginning v1: %v", err)
+		}
+
+		if err := r.Abandon(t.Context(), "burning v1"); err != nil {
+			t.Fatalf("abandoning v1: %v", err)
+		}
+
+		return snapshots, events, orchestrator
+	}
+
+	refused := func(t *testing.T, events *esmemory.EventStore, orchestrator *lifecycle.Orchestrator) {
+		t.Helper()
+
+		if _, err := orchestrator.Resume(t.Context(), "orders"); !errors.Is(err, lifecycle.ErrInvalidState) {
+			t.Errorf("want Resume refused with ErrInvalidState, got %v", err)
+		}
+
+		if _, err := orchestrator.Begin(t.Context(), "orders", "reuse attempt"); !errors.Is(err, lifecycle.ErrInvalidState) {
+			t.Errorf("want Begin refused with ErrInvalidState, got %v", err)
+		}
+
+		if got := countEventsOfType(t, events, lifecycle.RebuildInitiated{}.EventType()); got != 1 {
+			t.Errorf("want no admission recorded over the reset state, got %d in total", got)
+		}
+	}
+
+	t.Run("zeroed allocation refused", func(t *testing.T) {
+		t.Parallel()
+
+		snapshots, events, orchestrator := burnedV1(t)
+
+		// The snapshot claims a named lifecycle that never allocated:
+		// hydrated, it would aim the next admission at the burned v1.
+		writeLifecycleSnapshot(t, snapshots, lifecycle.State{Name: "orders"}, 2)
+
+		refused(t, events, orchestrator)
+	})
+
+	t.Run("uninitialized state refused", func(t *testing.T) {
+		t.Parallel()
+
+		snapshots, events, orchestrator := burnedV1(t)
+
+		// The snapshot resets the fold to nothing at all, over a stream that
+		// has applied two events.
+		writeLifecycleSnapshot(t, snapshots, lifecycle.State{}, 2)
+
+		refused(t, events, orchestrator)
+	})
+}
+
+// TestRun_ProcessorFailureSurfacesDespiteHeldReconcile pins the exit path's
+// lock discipline: the reconcile loop hydrates while holding the handle's
+// mutex, so Run must cancel and join it before taking the final status
+// snapshot. Here the hydration ends only on cancellation; a classification
+// that waited on the mutex before canceling would deadlock against it, and
+// an independent processor failure would hang the Run until its caller gave
+// up.
+func TestRun_ProcessorFailureSurfacesDespiteHeldReconcile(t *testing.T) {
+	t.Parallel()
+
+	events := newEventStore(t)
+
+	inner, err := lifecycle.NewStore(events)
+	if err != nil {
+		t.Fatalf("creating lifecycle store: %v", err)
+	}
+
+	projections := &interceptingStore{Store: inner}
+	h := buildHarness(t, events, projections)
+	h.appendDomain(3)
+
+	r := h.begin("processor failure under a held reconciliation")
+
+	_, done := runAsync(t, r)
+	waitPhase(t, r, lifecycle.PhaseCaughtUp)
+
+	// The next reconcile hydration parks inside the store holding the
+	// handle's mutex, releasing only when the run's wind-down cancels it.
+	entered := projections.armHydrateIntercept(func(ctx context.Context) error {
+		<-ctx.Done()
+		return ctx.Err()
+	})
+
+	select {
+	case <-entered:
+	case <-time.After(waitTimeout):
+		t.Fatal("timed out waiting for the reconcile hydration to start")
+	}
+
+	// With reconciliation parked, the processor fails on its own.
+	h.model.setHandleFailure(true)
+	h.appendDomain(1)
+
+	runErr := waitDone(t, done)
+
+	switch {
+	case runErr == nil:
+		t.Fatal("want the processor's own failure surfaced, got nil")
+	case errors.Is(runErr, context.Canceled):
+		t.Fatalf("want the processor's own failure surfaced, got cancellation: %v", runErr)
+	}
+
+	if !strings.Contains(runErr.Error(), "handler failure") {
+		t.Errorf("want the handler failure as the cause, got %v", runErr)
+	}
+}
+
+// TestRun_HydrationFailureNotLaunderedByCancellation pins the terminal
+// contract's discrimination: a reconcile hydration failure is benign only
+// when it IS this run's own cancellation. A real failure that merely races
+// the wind-down must surface as the run's result, not vanish behind the
+// context error.
+func TestRun_HydrationFailureNotLaunderedByCancellation(t *testing.T) {
+	t.Parallel()
+
+	events := newEventStore(t)
+
+	inner, err := lifecycle.NewStore(events)
+	if err != nil {
+		t.Fatalf("creating lifecycle store: %v", err)
+	}
+
+	projections := &interceptingStore{Store: inner}
+	h := buildHarness(t, events, projections)
+	h.appendDomain(3)
+
+	r := h.begin("failure racing cancellation")
+
+	cancel, done := runAsync(t, r)
+	waitPhase(t, r, lifecycle.PhaseCaughtUp)
+
+	// The hydration cancels the run itself, waits for the cancellation to
+	// land, and then fails with a distinct error: the exact race the
+	// discrimination must not launder.
+	errWindDown := errors.New("store failure during wind-down")
+	entered := projections.armHydrateIntercept(func(ctx context.Context) error {
+		cancel()
+		<-ctx.Done()
+
+		return errWindDown
+	})
+
+	select {
+	case <-entered:
+	case <-time.After(waitTimeout):
+		t.Fatal("timed out waiting for the reconcile hydration to start")
+	}
+
+	if runErr := waitDone(t, done); !errors.Is(runErr, errWindDown) {
+		t.Fatalf("want the hydration failure surfaced despite the cancellation, got %v", runErr)
+	}
+}
+
+// TestRun_CancellationDuringCatchUpSurfacesRecordedFailure pins exit
+// classification on the catch-up path: cancellation must not outrank a
+// fail-closed cause recorded during the wind-down, which requires the
+// cancellation arm to join reconciliation and classify instead of
+// returning the bare context error.
+func TestRun_CancellationDuringCatchUpSurfacesRecordedFailure(t *testing.T) {
+	t.Parallel()
+
+	events := newEventStore(t)
+
+	inner, err := lifecycle.NewStore(events)
+	if err != nil {
+		t.Fatalf("creating lifecycle store: %v", err)
+	}
+
+	projections := &interceptingStore{Store: inner}
+	h := buildHarness(t, events, projections)
+
+	// The gate holds the build mid-replay, so the run is still catching up
+	// when the failure and the cancellation race.
+	h.model.armGate()
+	h.appendDomain(3)
+
+	r := h.begin("cancellation during catch-up")
+
+	cancel, done := runAsync(t, r)
+	waitPhase(t, r, lifecycle.PhaseBuilding)
+
+	errWindDown := errors.New("store failure during wind-down")
+	entered := projections.armHydrateIntercept(func(ctx context.Context) error {
+		cancel()
+		<-ctx.Done()
+
+		return errWindDown
+	})
+
+	select {
+	case <-entered:
+	case <-time.After(waitTimeout):
+		t.Fatal("timed out waiting for the reconcile hydration to start")
+	}
+
+	if runErr := waitDone(t, done); !errors.Is(runErr, errWindDown) {
+		t.Fatalf("want the recorded failure to win over the cancellation, got %v", runErr)
+	}
+}
+
 //
 // read model test double
 //
@@ -2639,6 +2889,7 @@ type readModel struct {
 	dropped      []projection.ID
 	gate         chan struct{}
 	failTeardown bool
+	failHandle   bool
 }
 
 func newReadModel() *readModel {
@@ -2700,6 +2951,15 @@ func (m *readModel) setTeardownFailure(fail bool) {
 	m.failTeardown = fail
 }
 
+// setHandleFailure arms or disarms handler failures on domain events, so
+// tests can make a running processor fail independently of the lifecycle.
+func (m *readModel) setHandleFailure(fail bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	m.failHandle = fail
+}
+
 type readModelHandler struct {
 	model *readModel
 	id    projection.ID
@@ -2726,6 +2986,10 @@ func (h *readModelHandler) Handle(ctx context.Context, event *eventstore.Event) 
 
 	h.model.mu.Lock()
 	defer h.model.mu.Unlock()
+
+	if h.model.failHandle {
+		return errors.New("handler failure")
+	}
 
 	h.model.tables[h.id] = append(h.model.tables[h.id], *event.GlobalPosition)
 
@@ -2826,6 +3090,45 @@ func (s *refusingStore) Save(ctx context.Context, aggregate *aggregatestore.Aggr
 	}
 
 	return s.Store.Save(ctx, aggregate, opts)
+}
+
+// interceptingStore delegates and, when armed, runs the configured function
+// in place of the next Hydrate call, signaling entry and then disarming.
+// Tests use it to park the reconcile loop inside a hydration or to fail one
+// deterministically at a chosen moment.
+type interceptingStore struct {
+	aggregatestore.Store[lifecycle.State]
+
+	mu        sync.Mutex
+	intercept func(context.Context) error
+	entered   chan struct{}
+}
+
+// armHydrateIntercept arms fn to run in place of the next Hydrate call; the
+// returned channel closes when the intercepted call begins.
+func (s *interceptingStore) armHydrateIntercept(fn func(context.Context) error) <-chan struct{} {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.intercept = fn
+	s.entered = make(chan struct{})
+
+	return s.entered
+}
+
+func (s *interceptingStore) Hydrate(ctx context.Context, aggregate *aggregatestore.Aggregate[lifecycle.State], opts *aggregatestore.HydrateOptions) error {
+	s.mu.Lock()
+	fn, entered := s.intercept, s.entered
+	s.intercept, s.entered = nil, nil
+	s.mu.Unlock()
+
+	if fn == nil {
+		return s.Store.Hydrate(ctx, aggregate, opts)
+	}
+
+	close(entered)
+
+	return fn(ctx)
 }
 
 // truncatingWriter delegates appends and, when armed, truncates the next
