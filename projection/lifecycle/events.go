@@ -74,7 +74,53 @@ func (e RebuildInitiated) ApplyTo(s State) State {
 	return s
 }
 
-// BuildStarted records the first start of the target version's processor.
+// RunnerClaimed records that a runner took ownership of the in-flight
+// attempt: appended before the claimant constructs its processor, in every
+// runnable phase and phase-preserving in all of them, so duplicate execution
+// is durably observable in the stream. Ownership is cooperative supersession
+// — a previously recorded runner observes its displacement and winds itself
+// down; runner identity is not checked by handler writes or checkpoint
+// saves, and nothing here fences the data plane. FromPosition carries the
+// checkpoint position the claimant resumes from, zero for a fresh build. A
+// claim with no runner ID or with no attempt in flight poisons the fold.
+type RunnerClaimed struct {
+	Runner       uuid.UUID
+	FromPosition int64
+	At           time.Time
+}
+
+// EventType returns the type of event.
+func (RunnerClaimed) EventType() string { return "runnerclaimed" }
+
+// New returns a new instance of the event.
+func (RunnerClaimed) New() estoria.DomainEvent[State] { return &RunnerClaimed{} }
+
+// ApplyTo applies the event to state, returning the new state.
+func (e RunnerClaimed) ApplyTo(s State) State {
+	switch s.Attempt.Phase {
+	case PhaseCreated, PhaseBuilding, PhaseCaughtUp, PhasePromoted, PhaseRetiring:
+	case PhaseNone:
+		s = s.poison("runner claim recorded with no rebuild in flight",
+			"projection", s.Name, "runner", e.Runner)
+	default:
+		s = s.poison("runner claim recorded in an unknown phase",
+			"projection", s.Name, "phase", s.Attempt.Phase)
+	}
+
+	if e.Runner.IsNil() {
+		s = s.poison("runner claim recorded with no runner ID",
+			"projection", s.Name)
+	}
+
+	s.Attempt.Runner = e.Runner
+	s.Attempt.ClaimedAt = e.At
+
+	return s
+}
+
+// BuildStarted records the first start of the target version's processor: the
+// one Created-to-Building transition, appended atomically after the starting
+// runner's claim. A start with no claimed runner poisons the fold.
 type BuildStarted struct{}
 
 // EventType returns the type of event.
@@ -85,9 +131,13 @@ func (BuildStarted) New() estoria.DomainEvent[State] { return &BuildStarted{} }
 
 // ApplyTo applies the event to state, returning the new state.
 func (BuildStarted) ApplyTo(s State) State {
-	if s.Attempt.Phase != PhaseCreated {
+	switch {
+	case s.Attempt.Phase != PhaseCreated:
 		s = s.poison("build started outside the created phase",
 			"projection", s.Name, "phase", s.Attempt.Phase)
+	case s.Attempt.Runner.IsNil():
+		s = s.poison("build started without a claimed runner",
+			"projection", s.Name)
 	}
 
 	s.Attempt.Phase = PhaseBuilding
@@ -95,33 +145,11 @@ func (BuildStarted) ApplyTo(s State) State {
 	return s
 }
 
-// BuildResumed records a processor restart after crash or stall
-// reconciliation, carrying the checkpointed position it resumed from.
-type BuildResumed struct {
-	FromPosition int64
-}
-
-// EventType returns the type of event.
-func (BuildResumed) EventType() string { return "buildresumed" }
-
-// New returns a new instance of the event.
-func (BuildResumed) New() estoria.DomainEvent[State] { return &BuildResumed{} }
-
-// ApplyTo applies the event to state, returning the new state.
-func (BuildResumed) ApplyTo(s State) State {
-	if s.Attempt.Phase != PhaseBuilding {
-		s = s.poison("build resumed outside the building phase",
-			"projection", s.Name, "phase", s.Attempt.Phase)
-	}
-
-	s.Attempt.Phase = PhaseBuilding
-
-	return s
-}
-
-// CaughtUp records that the target version first drained to the head of the
-// event sequence: one event with the position and elapsed time as payload,
-// not per-batch telemetry.
+// CaughtUp records that the target version drained to the head of the event
+// sequence — the first time, making the attempt eligible for promotion, or
+// again when a later run re-certifies a caught-up attempt by draining to the
+// then-current head, preserving the phase. One event with the position and
+// elapsed time as payload, not per-batch telemetry.
 type CaughtUp struct {
 	Position int64
 	Duration time.Duration
@@ -136,8 +164,8 @@ func (CaughtUp) New() estoria.DomainEvent[State] { return &CaughtUp{} }
 
 // ApplyTo applies the event to state, returning the new state.
 func (e CaughtUp) ApplyTo(s State) State {
-	if s.Attempt.Phase != PhaseBuilding {
-		s = s.poison("catch-up recorded outside the building phase",
+	if s.Attempt.Phase != PhaseBuilding && s.Attempt.Phase != PhaseCaughtUp {
+		s = s.poison("catch-up recorded outside the building and caught-up phases",
 			"projection", s.Name, "phase", s.Attempt.Phase)
 	}
 

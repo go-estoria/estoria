@@ -13,10 +13,13 @@ import (
 
 var (
 	attemptID  = uuid.Must(uuid.FromString("d3a95f2c-6c0e-4ac8-9a53-3d7202d0a1f6"))
+	runnerID   = uuid.Must(uuid.FromString("0f6e2c8a-1b4d-4e7f-9a3c-5d8b2f1e4a6c"))
+	runner2ID  = uuid.Must(uuid.FromString("9c3b1a7e-6f2d-4c8b-8e5a-2a7d4f9c1b3e"))
 	targetID   = projection.ID{Name: "orders", Version: 7}
 	previousID = projection.ID{Name: "orders", Version: 6}
 
 	initiatedAt = time.Date(2026, 8, 13, 9, 0, 0, 0, time.UTC)
+	claimedAt   = time.Date(2026, 8, 13, 9, 1, 0, 0, time.UTC)
 	caughtUpAt  = time.Date(2026, 8, 13, 9, 14, 0, 0, time.UTC)
 	promotedAt  = time.Date(2026, 8, 13, 9, 15, 0, 0, time.UTC)
 	retiringAt  = time.Date(2026, 8, 13, 9, 20, 0, 0, time.UTC)
@@ -30,6 +33,10 @@ func initiated() lifecycle.RebuildInitiated {
 		Reason:   "add customer_region column",
 		At:       initiatedAt,
 	}
+}
+
+func claimed() lifecycle.RunnerClaimed {
+	return lifecycle.RunnerClaimed{Runner: runnerID, At: claimedAt}
 }
 
 func caughtUp() lifecycle.CaughtUp {
@@ -119,8 +126,28 @@ func TestTransitions(t *testing.T) {
 		want  func(lifecycle.State) lifecycle.State
 	}{
 		{
-			name:  "BuildStarted marks the attempt building",
+			name:  "RunnerClaimed records the claimant and preserves the phase",
 			prior: base,
+			event: claimed(),
+			want: func(s lifecycle.State) lifecycle.State {
+				s.Attempt.Runner = runnerID
+				s.Attempt.ClaimedAt = claimedAt
+				return s
+			},
+		},
+		{
+			name:  "RunnerClaimed supersedes the previous claimant",
+			prior: fold(initiated(), claimed(), lifecycle.BuildStarted{}),
+			event: lifecycle.RunnerClaimed{Runner: runner2ID, FromPosition: 1_000, At: caughtUpAt},
+			want: func(s lifecycle.State) lifecycle.State {
+				s.Attempt.Runner = runner2ID
+				s.Attempt.ClaimedAt = caughtUpAt
+				return s
+			},
+		},
+		{
+			name:  "BuildStarted marks the attempt building",
+			prior: fold(initiated(), claimed()),
 			event: lifecycle.BuildStarted{},
 			want: func(s lifecycle.State) lifecycle.State {
 				s.Attempt.Phase = lifecycle.PhaseBuilding
@@ -128,17 +155,8 @@ func TestTransitions(t *testing.T) {
 			},
 		},
 		{
-			name:  "BuildResumed keeps the attempt building",
-			prior: fold(initiated(), lifecycle.BuildStarted{}),
-			event: lifecycle.BuildResumed{FromPosition: 1_000},
-			want: func(s lifecycle.State) lifecycle.State {
-				s.Attempt.Phase = lifecycle.PhaseBuilding
-				return s
-			},
-		},
-		{
 			name:  "CaughtUp records the position and time",
-			prior: fold(initiated(), lifecycle.BuildStarted{}),
+			prior: fold(initiated(), claimed(), lifecycle.BuildStarted{}),
 			event: caughtUp(),
 			want: func(s lifecycle.State) lifecycle.State {
 				s.Attempt.Phase = lifecycle.PhaseCaughtUp
@@ -148,8 +166,19 @@ func TestTransitions(t *testing.T) {
 			},
 		},
 		{
+			name:  "CaughtUp re-certifies from the caught-up phase",
+			prior: fold(initiated(), claimed(), lifecycle.BuildStarted{}, caughtUp()),
+			event: lifecycle.CaughtUp{Position: 4_182_400, Duration: time.Minute, At: promotedAt},
+			want: func(s lifecycle.State) lifecycle.State {
+				s.Attempt.Phase = lifecycle.PhaseCaughtUp
+				s.Attempt.CaughtUpAt = promotedAt
+				s.Attempt.CaughtUpPos = 4_182_400
+				return s
+			},
+		},
+		{
 			name:  "Promoted flips the live version",
-			prior: fold(initiated(), lifecycle.BuildStarted{}, caughtUp()),
+			prior: fold(initiated(), claimed(), lifecycle.BuildStarted{}, caughtUp()),
 			event: promoted(),
 			want: func(s lifecycle.State) lifecycle.State {
 				s.Live = targetID
@@ -160,7 +189,7 @@ func TestTransitions(t *testing.T) {
 		},
 		{
 			name:  "RolledBack reverts the live version and vacates the slot",
-			prior: fold(initiated(), lifecycle.BuildStarted{}, caughtUp(), promoted()),
+			prior: fold(initiated(), claimed(), lifecycle.BuildStarted{}, caughtUp(), promoted()),
 			event: lifecycle.RolledBack{From: targetID, RevertedTo: previousID, At: promotedAt},
 			want: func(s lifecycle.State) lifecycle.State {
 				s.Live = previousID
@@ -170,7 +199,7 @@ func TestTransitions(t *testing.T) {
 		},
 		{
 			name:  "Abandoned vacates the slot",
-			prior: fold(initiated(), lifecycle.BuildStarted{}),
+			prior: fold(initiated(), claimed(), lifecycle.BuildStarted{}),
 			event: lifecycle.Abandoned{Cause: "handler bug discovered mid-replay"},
 			want: func(s lifecycle.State) lifecycle.State {
 				s.Attempt = lifecycle.AttemptState{}
@@ -179,7 +208,7 @@ func TestTransitions(t *testing.T) {
 		},
 		{
 			name:  "RetireStarted reserves the retirement",
-			prior: fold(initiated(), lifecycle.BuildStarted{}, caughtUp(), promoted()),
+			prior: fold(initiated(), claimed(), lifecycle.BuildStarted{}, caughtUp(), promoted()),
 			event: lifecycle.RetireStarted{Retiring: previousID, At: retiringAt},
 			want: func(s lifecycle.State) lifecycle.State {
 				s.Attempt.Phase = lifecycle.PhaseRetiring
@@ -189,7 +218,7 @@ func TestTransitions(t *testing.T) {
 		},
 		{
 			name:  "PreviousRetired completes the rebuild, leaving the live version",
-			prior: fold(initiated(), lifecycle.BuildStarted{}, caughtUp(), promoted(), lifecycle.RetireStarted{Retiring: previousID, At: retiringAt}),
+			prior: fold(initiated(), claimed(), lifecycle.BuildStarted{}, caughtUp(), promoted(), lifecycle.RetireStarted{Retiring: previousID, At: retiringAt}),
 			event: lifecycle.PreviousRetired{Retired: previousID},
 			want: func(s lifecycle.State) lifecycle.State {
 				s.Attempt = lifecycle.AttemptState{}
@@ -212,7 +241,7 @@ func TestTransitions(t *testing.T) {
 func TestFold_HappyPath(t *testing.T) {
 	t.Parallel()
 
-	state := fold(initiated(), lifecycle.BuildStarted{}, caughtUp(), promoted(),
+	state := fold(initiated(), claimed(), lifecycle.BuildStarted{}, caughtUp(), promoted(),
 		lifecycle.RetireStarted{Retiring: previousID, At: retiringAt},
 		lifecycle.PreviousRetired{Retired: previousID})
 
@@ -227,7 +256,7 @@ func TestFold_HappyPath(t *testing.T) {
 func TestFold_NeverReuseAfterRollback(t *testing.T) {
 	t.Parallel()
 
-	state := fold(initiated(), lifecycle.BuildStarted{}, caughtUp(), promoted(),
+	state := fold(initiated(), claimed(), lifecycle.BuildStarted{}, caughtUp(), promoted(),
 		lifecycle.RolledBack{From: targetID, RevertedTo: previousID, At: promotedAt})
 
 	want := lifecycle.State{Name: "orders", Live: previousID, Allocated: 7}
@@ -255,7 +284,7 @@ func TestFold_NeverReuseAfterRollback(t *testing.T) {
 func TestFold_AppliesDespiteInconsistentLineage(t *testing.T) {
 	t.Parallel()
 
-	prior := fold(initiated(), lifecycle.BuildStarted{}, caughtUp())
+	prior := fold(initiated(), claimed(), lifecycle.BuildStarted{}, caughtUp())
 
 	inconsistent := lifecycle.Promoted{
 		Previous: projection.ID{Name: "orders", Version: 3},
@@ -291,7 +320,7 @@ func TestEvents_RoundTripJSON(t *testing.T) {
 	t.Parallel()
 
 	codec := estoria.JSONDomainEventCodec[lifecycle.State]{}
-	prior := fold(initiated(), lifecycle.BuildStarted{})
+	prior := fold(initiated(), claimed(), lifecycle.BuildStarted{})
 
 	for _, event := range allEvents() {
 		t.Run(event.EventType(), func(t *testing.T) {
@@ -361,7 +390,7 @@ func TestLifecycleAggregate_EndToEnd(t *testing.T) {
 	}
 
 	aggregate := store.New(lifecycle.StreamUUID("orders"))
-	aggregate.Append(initiated(), lifecycle.BuildStarted{}, caughtUp(), promoted())
+	aggregate.Append(initiated(), claimed(), lifecycle.BuildStarted{}, caughtUp(), promoted())
 
 	if err := store.Save(t.Context(), aggregate, nil); err != nil {
 		t.Fatalf("saving aggregate: %v", err)
@@ -376,16 +405,16 @@ func TestLifecycleAggregate_EndToEnd(t *testing.T) {
 		t.Errorf("want hydrated state to match saved state:\nwant %+v\ngot  %+v", want, got)
 	}
 
-	if got := loaded.Version(); got != 4 {
-		t.Errorf("want aggregate version 4, got %d", got)
+	if got := loaded.Version(); got != 5 {
+		t.Errorf("want aggregate version 5, got %d", got)
 	}
 }
 
 func allEvents() []estoria.DomainEvent[lifecycle.State] {
 	return []estoria.DomainEvent[lifecycle.State]{
 		initiated(),
+		lifecycle.RunnerClaimed{Runner: runnerID, FromPosition: 1_000, At: claimedAt},
 		lifecycle.BuildStarted{},
-		lifecycle.BuildResumed{FromPosition: 1_000},
 		caughtUp(),
 		promoted(),
 		lifecycle.RolledBack{From: targetID, RevertedTo: previousID, At: promotedAt},

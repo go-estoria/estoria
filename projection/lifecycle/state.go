@@ -16,8 +16,8 @@
 // into any later build. Gaps in live version numbers are normal — the
 // version is an allocation counter, not a count of successful rebuilds.
 //
-// Only decisions and durable facts are events: initiated, started, caught
-// up, promoted, rolled back, abandoned, retiring, retired. Progress is not —
+// Only decisions and durable facts are events: initiated, claimed, started,
+// caught up, promoted, rolled back, abandoned, retiring, retired. Progress is not —
 // the advancing checkpoint lives in a checkpointstore.Store, and liveness is
 // inferred from checkpoint recency, because a crashed process appends
 // nothing on its way down. The test for what belongs in the stream: would a
@@ -163,8 +163,18 @@ type AttemptState struct {
 	// Reason records why this rebuild exists.
 	Reason string
 
+	// Runner identifies the runner that most recently claimed the attempt —
+	// the process presumed to be building it. Claims are cooperative
+	// supersession: a superseded runner observes its displacement and winds
+	// itself down; nothing fences its data-plane writes, version isolation
+	// contains them.
+	Runner uuid.UUID
+
 	// InitiatedAt is when the rebuild was admitted.
 	InitiatedAt time.Time
+
+	// ClaimedAt is when the attempt was most recently claimed.
+	ClaimedAt time.Time
 
 	// CaughtUpAt is when the target version first drained to the head.
 	CaughtUpAt time.Time
@@ -309,6 +319,12 @@ func (s State) validateAttempt() error {
 		return fmt.Errorf("attempt target %s does not belong to projection %q", a.Target, s.Name)
 	case a.Target.Version != s.Allocated:
 		return fmt.Errorf("attempt target %s is not the latest allocation %d", a.Target, s.Allocated)
+	}
+
+	// A runner claim precedes every processor start, so any attempt past the
+	// created phase records the runner that last claimed it.
+	if a.Phase != PhaseCreated && a.Runner.IsNil() {
+		return fmt.Errorf("attempt in phase %s records no claimed runner", a.Phase)
 	}
 
 	if a.Previous != (projection.ID{}) {

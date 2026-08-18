@@ -28,8 +28,8 @@ var _ aggregatestore.SnapshotStateValidator = State{}
 func allDomainEvents() []estoria.DomainEvent[State] {
 	return []estoria.DomainEvent[State]{
 		RebuildInitiated{},
+		RunnerClaimed{},
 		BuildStarted{},
-		BuildResumed{},
 		CaughtUp{},
 		Promoted{},
 		RolledBack{},

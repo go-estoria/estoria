@@ -11,6 +11,7 @@ import (
 
 var (
 	internalAttemptID = uuid.Must(uuid.FromString("aa5c0f2d-9c3e-4f2a-8b1d-2f6f6f0a1b2c"))
+	internalRunnerID  = uuid.Must(uuid.FromString("5b1f7f6e-3a8c-4d0e-9f2b-7c4a1d8e6f0a"))
 	ordersV6          = projection.ID{Name: "orders", Version: 6}
 	ordersV7          = projection.ID{Name: "orders", Version: 7}
 	internalAt        = time.Date(2026, 8, 17, 9, 0, 0, 0, time.UTC)
@@ -19,7 +20,7 @@ var (
 // stateInPhase returns a structurally valid orders state whose attempt is in
 // the given phase, shaped per the phase's own invariants: pre-promotion
 // phases keep the previous version live; promoted and retiring phases have
-// cut over to the target.
+// cut over to the target; every phase past created records a claimed runner.
 func stateInPhase(phase Phase) State {
 	s := State{
 		Name:      "orders",
@@ -40,6 +41,10 @@ func stateInPhase(phase Phase) State {
 	case PhasePromoted, PhaseRetiring:
 		s.Live = ordersV7
 	case PhaseCreated, PhaseBuilding, PhaseCaughtUp:
+	}
+
+	if phase != PhaseNone && phase != PhaseCreated {
+		s.Attempt.Runner = internalRunnerID
 	}
 
 	return s
@@ -63,6 +68,10 @@ func firstVersionInPhase(phase Phase) State {
 
 	if phase == PhasePromoted || phase == PhaseRetiring {
 		s.Live = v1
+	}
+
+	if phase != PhaseNone && phase != PhaseCreated {
+		s.Attempt.Runner = internalRunnerID
 	}
 
 	return s
@@ -221,10 +230,10 @@ func TestFold_PoisonBranches(t *testing.T) {
 			},
 		},
 		{
-			name:       "build resumed outside the building phase",
+			name:       "build started without a claimed runner",
 			prior:      stateInPhase(PhaseCreated),
-			event:      BuildResumed{FromPosition: 10},
-			wantReason: "outside the building phase",
+			event:      BuildStarted{},
+			wantReason: "without a claimed runner",
 			applied: func(t *testing.T, got State) {
 				t.Helper()
 
@@ -234,10 +243,47 @@ func TestFold_PoisonBranches(t *testing.T) {
 			},
 		},
 		{
-			name:       "catch-up outside the building phase",
+			name:       "runner claim with no rebuild in flight",
+			prior:      stateInPhase(PhaseNone),
+			event:      RunnerClaimed{Runner: internalRunnerID, At: internalAt},
+			wantReason: "no rebuild in flight",
+			applied: func(t *testing.T, got State) {
+				t.Helper()
+
+				if got.Attempt.Runner != internalRunnerID {
+					t.Errorf("want the claim applied as recorded, got %+v", got.Attempt)
+				}
+			},
+		},
+		{
+			name: "runner claim in an unknown phase",
+			prior: func() State {
+				s := stateInPhase(PhaseBuilding)
+				s.Attempt.Phase = Phase(99)
+				return s
+			}(),
+			event:      RunnerClaimed{Runner: internalRunnerID, At: internalAt},
+			wantReason: "unknown phase",
+			applied:    func(*testing.T, State) {},
+		},
+		{
+			name:       "runner claim with no runner ID",
+			prior:      stateInPhase(PhaseBuilding),
+			event:      RunnerClaimed{At: internalAt},
+			wantReason: "no runner ID",
+			applied: func(t *testing.T, got State) {
+				t.Helper()
+
+				if !got.Attempt.Runner.IsNil() {
+					t.Errorf("want the nil claimant applied as recorded, got %+v", got.Attempt)
+				}
+			},
+		},
+		{
+			name:       "catch-up outside the building and caught-up phases",
 			prior:      stateInPhase(PhaseCreated),
 			event:      CaughtUp{Position: 9, At: internalAt},
-			wantReason: "outside the building phase",
+			wantReason: "outside the building and caught-up phases",
 			applied: func(t *testing.T, got State) {
 				t.Helper()
 
@@ -245,6 +291,13 @@ func TestFold_PoisonBranches(t *testing.T) {
 					t.Errorf("want the catch-up applied, got %+v", got.Attempt)
 				}
 			},
+		},
+		{
+			name:       "catch-up after promotion",
+			prior:      stateInPhase(PhasePromoted),
+			event:      CaughtUp{Position: 9, At: internalAt},
+			wantReason: "outside the building and caught-up phases",
+			applied:    func(*testing.T, State) {},
 		},
 		{
 			name:       "promotion outside the caught-up phase",
@@ -528,6 +581,32 @@ func TestValidate_NamedStateRequiresAllocation(t *testing.T) {
 	}
 }
 
+// TestValidate_ClaimedRunnerRequiredPastCreated pins the structural rule the
+// claim protocol establishes: a runner claim precedes every processor start,
+// so an attempt in any phase past created without a recorded runner cannot
+// come from a clean fold — only from tampered or reset persistence — while
+// an admitted-but-never-run attempt legitimately has no claimant yet.
+func TestValidate_ClaimedRunnerRequiredPastCreated(t *testing.T) {
+	t.Parallel()
+
+	for _, phase := range []Phase{PhaseBuilding, PhaseCaughtUp, PhasePromoted, PhaseRetiring} {
+		t.Run(phase.String(), func(t *testing.T) {
+			t.Parallel()
+
+			s := stateInPhase(phase)
+			s.Attempt.Runner = uuid.UUID{}
+
+			if err := s.validate(); err == nil {
+				t.Errorf("want a runnerless %s attempt rejected, got nil", phase)
+			}
+		})
+	}
+
+	if err := stateInPhase(PhaseCreated).validate(); err != nil {
+		t.Errorf("want an admitted-but-unclaimed attempt still valid, got %v", err)
+	}
+}
+
 // TestValidateSnapshotState_Contract pins the decode-boundary contract
 // directly, independent of what fallback replay would reconstruct: a
 // poisoned payload is accepted — it is valid testimony of a poisoned fold,
@@ -552,6 +631,11 @@ func TestValidateSnapshotState_Contract(t *testing.T) {
 		{name: "legitimate payload is accepted", state: stateInPhase(PhaseBuilding), accept: true},
 		{name: "clean uninitialized payload is rejected", state: State{}, accept: false},
 		{name: "clean named payload without allocations is rejected", state: State{Name: "orders"}, accept: false},
+		{name: "clean building payload without a claimed runner is rejected", state: func() State {
+			s := stateInPhase(PhaseBuilding)
+			s.Attempt.Runner = uuid.UUID{}
+			return s
+		}(), accept: false},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()

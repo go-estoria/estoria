@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -34,6 +35,18 @@ type Rebuild struct {
 	aggregate     *aggregatestore.Aggregate[State]
 	stopProcessor context.CancelFunc
 
+	// runner identifies this handle's Run for claim arbitration: generated
+	// once per Run, recorded durably by its RunnerClaimed append, compared by
+	// the reconcile loop against the runner the stream last recorded.
+	runner uuid.UUID
+
+	// certificate is the current catch-up certification, nil when none
+	// exists. It is set when this run's drain records CaughtUp and cleared
+	// when it can no longer vouch — processor exit, displacement by another
+	// runner's claim, an uncertain lifecycle save, or consumption by a
+	// successful promotion.
+	certificate *certification
+
 	// processorExited is closed when Run's processor goroutine has fully
 	// exited; commands that clean up after stopping the processor wait on it
 	// so cleanup cannot race a final checkpoint save.
@@ -41,13 +54,15 @@ type Rebuild struct {
 
 	// stopped records that the processor was stopped deliberately — by a
 	// command (Abandon, Rollback) or by the reconcile loop observing the
-	// attempt's end — so Run reports nil rather than the cancellation.
+	// attempt's end or this runner's displacement — so Run reports nil
+	// rather than the cancellation.
 	stopped bool
 
 	// failure records why the reconcile loop stopped the processor when the
-	// stop was fail-closed rather than benign — the lifecycle could not be
-	// rehydrated, or the hydrated state no longer passed validation — so Run
-	// surfaces the cause instead of nil.
+	// stop carries a cause Run must surface rather than report as a benign
+	// wind-down: the lifecycle could not be rehydrated, the hydrated state no
+	// longer passed validation, or another runner claimed the attempt. Never
+	// cleared once set — a displaced handle stays revoked.
 	failure error
 
 	// ran records that Run was called, successfully or not: a second call
@@ -55,6 +70,32 @@ type Rebuild struct {
 	// able to stop only the newest of two running processors.
 	ran bool
 }
+
+// A certification is the in-process record that this handle's run drained
+// the build to the head: the runner that certified, the position certified,
+// and the lifecycle version the certificate was cut against. It is
+// deliberately not durable — persisted PhaseCaughtUp is a historical fact,
+// not a standing promotion license — and it is valid only while the
+// certifying runner's processor is the attempt's current claimant and still
+// running. The contract is point-in-time-head: domain events arriving after
+// certification do not invalidate it; a certificate from a stopped run is
+// never reused.
+type certification struct {
+	runner   uuid.UUID
+	position int64
+	version  int64
+}
+
+// ErrRunnerDisplaced reports that another runner claimed the in-flight
+// attempt: the build continues under the new claimant, and the displaced
+// handle is permanently revoked — its Run winds down and its certification,
+// if any, is cleared.
+var ErrRunnerDisplaced = errors.New("the rebuild attempt was claimed by another runner")
+
+// ErrNotCertified reports a promotion refused for lack of a current catch-up
+// certification: only the run that drained the rebuild to the head — and
+// whose processor is still the attempt's current claimant — may promote it.
+var ErrNotCertified = errors.New("the rebuild has no current catch-up certification")
 
 // Name returns the projection whose lifecycle this handle drives.
 func (r *Rebuild) Name() string {
@@ -85,27 +126,34 @@ func (r *Rebuild) Checkpoint(ctx context.Context) (checkpointstore.Checkpoint, e
 	return r.orchestrator.config.Checkpoints.Load(ctx, state.Attempt.Target)
 }
 
-// Run drives the in-flight rebuild: it records the build starting (or
-// resuming, when the attempt was already building), runs a processor for the
-// target version, records catch-up when the build first drains to the head,
-// promotes if the orchestrator auto-promotes — including when resuming an
-// attempt that recorded catch-up but stopped before promoting — and keeps
-// the processor tailing until ctx is canceled. While it runs, a reconcile
-// loop rehydrates the lifecycle on an interval and stops the processor once
-// the attempt is no longer the one in flight, so a builder whose attempt is
-// rolled back, abandoned, or completed elsewhere winds itself down instead
-// of running until an operator notices.
+// Run drives the in-flight rebuild. It first claims the attempt for this
+// run — a RunnerClaimed append in every runnable phase, atomic with
+// BuildStarted when the attempt has never started — so ownership is durably
+// recorded before the processor exists. It then runs a processor for the
+// target version; entering at a catch-up-eligible phase (created, building,
+// or caught up), it waits for the drain to reach the head, records CaughtUp,
+// and certifies the catch-up in-process. The certificate, not the persisted
+// phase, is the promotion license: a rebuild entering at PhaseCaughtUp
+// re-certifies by draining to the current head and recording a fresh
+// CaughtUp — the phase is preserved, never regressed — and only then
+// promotes, if the orchestrator auto-promotes. The processor keeps tailing
+// until ctx is canceled. While it runs, a reconcile loop rehydrates the
+// lifecycle on an interval and stops the processor once the attempt is no
+// longer in flight or another runner has claimed it, so a superseded builder
+// winds itself down instead of running until an operator notices.
 //
 // Run returns nil once the attempt reaches a terminal state — through this
 // handle's own commands or through transitions recorded elsewhere — and the
-// context's error on cancellation. A reconcile failure is terminal for the
-// Run: if the lifecycle cannot be rehydrated or no longer validates, the
-// processor is stopped and Run returns the cause; recovery is Resume and a
-// fresh handle once the fault is resolved. A fully retired rebuild is
-// complete: steady-state processing of the live version is a plain
-// processor.Processor, not a lifecycle concern. Run may be called at most
-// once per handle, successful or not; Resume the projection for a new handle
-// to run it again.
+// context's error on cancellation. It returns an error wrapping
+// ErrRunnerDisplaced when another runner claims the attempt: the build
+// continues under the claimant, and this handle is permanently revoked. A
+// reconcile failure is terminal for the Run: if the lifecycle cannot be
+// rehydrated or no longer validates, the processor is stopped and Run
+// returns the cause; recovery is Resume and a fresh handle once the fault is
+// resolved. A fully retired rebuild is complete: steady-state processing of
+// the live version is a plain processor.Processor, not a lifecycle concern.
+// Run may be called at most once per handle, successful or not; Resume the
+// projection for a new handle to run it again.
 func (r *Rebuild) Run(ctx context.Context) error {
 	r.mu.Lock()
 
@@ -116,11 +164,10 @@ func (r *Rebuild) Run(ctx context.Context) error {
 
 	r.ran = true
 
-	// Refresh before deciding: entering at a caught-up or later phase
-	// appends nothing, so a stale handle would otherwise start a processor
-	// for an attempt that was since rolled back, abandoned, or retired — and
-	// a tailing processor appends nothing that would ever surface the
-	// conflict.
+	// Refresh before deciding: a stale handle would otherwise claim and
+	// start a processor for an attempt that was since rolled back, abandoned,
+	// or retired — and a tailing processor appends nothing that would ever
+	// surface the conflict.
 	if err := r.orchestrator.config.Projections.Hydrate(ctx, r.aggregate, nil); err != nil {
 		r.mu.Unlock()
 		return fmt.Errorf("refreshing lifecycle state: %w", err)
@@ -133,16 +180,20 @@ func (r *Rebuild) Run(ctx context.Context) error {
 
 	state := r.aggregate.State()
 	attempt := state.Attempt
+	runner := uuid.Must(uuid.NewV4())
 
-	var transition estoria.DomainEvent[State]
+	var transitions []estoria.DomainEvent[State]
 
 	switch attempt.Phase {
 	case PhaseNone:
 		r.mu.Unlock()
 		return fmt.Errorf("projection %q has no rebuild in flight; nothing to run", state.Name)
 	case PhaseCreated:
-		transition = BuildStarted{}
-	case PhaseBuilding:
+		transitions = []estoria.DomainEvent[State]{
+			RunnerClaimed{Runner: runner, At: time.Now()},
+			BuildStarted{},
+		}
+	case PhaseBuilding, PhaseCaughtUp, PhasePromoted, PhaseRetiring:
 		position := int64(0)
 
 		checkpoint, err := r.orchestrator.config.Checkpoints.Load(ctx, attempt.Target)
@@ -153,21 +204,45 @@ func (r *Rebuild) Run(ctx context.Context) error {
 			return fmt.Errorf("loading checkpoint: %w", err)
 		}
 
-		transition = BuildResumed{FromPosition: position}
-	case PhaseCaughtUp, PhasePromoted, PhaseRetiring:
-		// No transition to record; run the processor so the version resumes
-		// tailing the event sequence.
+		transitions = []estoria.DomainEvent[State]{
+			RunnerClaimed{Runner: runner, FromPosition: position, At: time.Now()},
+		}
 	default:
 		r.mu.Unlock()
 		return fmt.Errorf("cannot run a rebuild in unknown phase %s", attempt.Phase)
 	}
 
-	// Append-then-act: the intent is recorded before the processor starts. A
-	// crash between the two is exactly what resume reconciliation handles.
-	if transition != nil {
-		if err := r.appendLocked(ctx, transition); err != nil {
+	// Claim-then-act: ownership is recorded before the processor exists. A
+	// pre-append failure — including losing the stream to a competing claim —
+	// starts nothing; a crash after the append is exactly what resume
+	// reconciliation handles.
+	if err := r.appendLocked(ctx, transitions...); err != nil {
+		if !errors.Is(err, aggregatestore.ErrEventsAppended) {
 			r.mu.Unlock()
 			return err
+		}
+
+		// The claim is durable but unobserved: reload, and start only if
+		// this exact runner won it.
+		if hydrateErr := r.orchestrator.config.Projections.Hydrate(ctx, r.aggregate, nil); hydrateErr != nil {
+			r.mu.Unlock()
+			return fmt.Errorf("refreshing lifecycle state after an unobserved claim: %w", hydrateErr)
+		}
+
+		if checkErr := checkLifecycleAggregate(r.aggregate, r.name); checkErr != nil {
+			r.mu.Unlock()
+			return checkErr
+		}
+
+		switch current := r.aggregate.State().Attempt; {
+		case current.ID != attempt.ID:
+			// The claim landed and the attempt then ended: terminal state
+			// reached and observed, nothing to run.
+			r.mu.Unlock()
+			return nil
+		case current.Runner != runner:
+			r.mu.Unlock()
+			return fmt.Errorf("the claim was recorded but superseded before this runner observed it: %w", ErrRunnerDisplaced)
 		}
 	}
 
@@ -195,10 +270,10 @@ func (r *Rebuild) Run(ctx context.Context) error {
 	done := make(chan error, 1)
 	exited := make(chan struct{})
 
+	r.runner = runner
 	r.stopProcessor = stop
 	r.processorExited = exited
-	catchingUp := attempt.Phase == PhaseCreated || attempt.Phase == PhaseBuilding
-	promoteOnResume := attempt.Phase == PhaseCaughtUp && r.orchestrator.autoPromote
+	catchingUp := attempt.Phase == PhaseCreated || attempt.Phase == PhaseBuilding || attempt.Phase == PhaseCaughtUp
 	r.mu.Unlock()
 
 	started := time.Now()
@@ -212,7 +287,7 @@ func (r *Rebuild) Run(ctx context.Context) error {
 
 	go func() {
 		defer close(reconcileExited)
-		r.reconcile(processorCtx, attempt.ID, stop)
+		r.reconcile(processorCtx, attempt.ID, runner, stop)
 	}()
 
 	// Runs before the deferred stop above: the reconcile loop exits on the
@@ -222,17 +297,8 @@ func (r *Rebuild) Run(ctx context.Context) error {
 		<-reconcileExited
 	}()
 
-	switch {
-	case catchingUp:
+	if catchingUp {
 		if keepTailing, err := r.runToCaughtUp(ctx, proc, stop, done, reconcileExited, started); !keepTailing {
-			return err
-		}
-	case promoteOnResume:
-		// Append-then-act reconciliation: recording CaughtUp and promoting
-		// are separate appends, so a crash between them leaves an
-		// auto-promoting rebuild caught up but unpromoted. Resume repairs
-		// that by retrying the promotion.
-		if keepTailing, err := r.promoteAfterCatchUp(ctx, stop, done, reconcileExited); !keepTailing {
 			return err
 		}
 	}
@@ -259,19 +325,21 @@ func (r *Rebuild) classifyExit(reconcileExited <-chan struct{}, err error) error
 
 // reconcile periodically rehydrates the lifecycle aggregate while the
 // processor runs, stopping the processor once the attempt it builds is no
-// longer the one in flight — or, fail-closed, once the lifecycle can no
-// longer vouch for the attempt, in which case the cause is recorded for Run
-// to surface. Both failure shapes are terminal: a hydrated state that fails
-// validation, and a rehydration that itself fails on anything but this
-// run's own cancellation. Hydration applies events incrementally, so an
-// error can strike after earlier events already mutated the aggregate;
-// retrying would tail the processor over state that was never revalidated.
-// A tailing processor appends nothing that would surface a terminal
-// transition recorded elsewhere; self-reconciliation is what bounds a
-// superseded builder's lifetime. Version numbers are never reused, so the
-// reconcile interval bounds waste, not correctness — a not-yet-reconciled
-// builder writes only to identities nothing else will ever read.
-func (r *Rebuild) reconcile(ctx context.Context, attemptID uuid.UUID, stop context.CancelFunc) {
+// longer the one in flight, once another runner has claimed the attempt —
+// displacement, recorded for Run to surface as ErrRunnerDisplaced — or,
+// fail-closed, once the lifecycle can no longer vouch for the attempt, in
+// which case the cause is recorded for Run to surface. Both failure shapes
+// are terminal: a hydrated state that fails validation, and a rehydration
+// that itself fails on anything but this run's own cancellation. Hydration
+// applies events incrementally, so an error can strike after earlier events
+// already mutated the aggregate; retrying would tail the processor over
+// state that was never revalidated. A tailing processor appends nothing
+// that would surface a terminal transition recorded elsewhere;
+// self-reconciliation is what bounds a superseded builder's lifetime.
+// Version numbers are never reused, so the reconcile interval bounds waste,
+// not correctness — a not-yet-reconciled builder writes only to identities
+// nothing else will ever read.
+func (r *Rebuild) reconcile(ctx context.Context, attemptID, runnerID uuid.UUID, stop context.CancelFunc) {
 	ticker := time.NewTicker(r.orchestrator.reconcileInterval)
 	defer ticker.Stop()
 
@@ -326,15 +394,33 @@ func (r *Rebuild) reconcile(ctx context.Context, attemptID uuid.UUID, stop conte
 			return
 		}
 
-		ended := r.aggregate.State().Attempt.ID != attemptID
+		current := r.aggregate.State().Attempt
+		ended := current.ID != attemptID
+		displaced := !ended && current.Runner != runnerID
+
 		if ended {
 			r.stopped = true
 		}
+
+		if displaced {
+			// Sticky revocation: the recorded cause is never cleared, and the
+			// certificate can no longer vouch for a superseded runner.
+			r.stopped = true
+			r.failure = fmt.Errorf("runner %s claimed rebuild attempt %s: %w", current.Runner, attemptID, ErrRunnerDisplaced)
+			r.certificate = nil
+		}
 		r.mu.Unlock()
 
-		if ended {
+		switch {
+		case ended:
 			r.orchestrator.log.Info("rebuild attempt is no longer in flight; stopping its processor",
 				"attempt_id", attemptID)
+			stop()
+
+			return
+		case displaced:
+			r.orchestrator.log.Info("another runner claimed the rebuild attempt; stopping this builder",
+				"attempt_id", attemptID, "runner", runnerID, "claimed_by", current.Runner)
 			stop()
 
 			return
@@ -381,13 +467,15 @@ func cancellationOnly(err, target error) bool {
 	return errors.Is(err, target)
 }
 
-// runToCaughtUp waits for the build's first drain to reach the head, records
-// the CaughtUp transition, and promotes if the orchestrator auto-promotes. It
-// reports whether Run should keep tailing; when it reports false, its error
-// is Run's result. Every exit cancels and joins reconciliation before
-// classifying: the reconcile loop hydrates while holding the handle's mutex,
-// so classifying first would deadlock against a hydration that ends only on
-// cancellation, and a fail-closed cause it records must not be missed.
+// runToCaughtUp waits for this run's drain to reach the head, records the
+// CaughtUp transition — the first, or a fresh one re-certifying an attempt
+// entered at PhaseCaughtUp — certifies the catch-up in-process, and promotes
+// if the orchestrator auto-promotes. It reports whether Run should keep
+// tailing; when it reports false, its error is Run's result. Every exit
+// cancels and joins reconciliation before classifying: the reconcile loop
+// hydrates while holding the handle's mutex, so classifying first would
+// deadlock against a hydration that ends only on cancellation, and a
+// fail-closed cause it records must not be missed.
 func (r *Rebuild) runToCaughtUp(ctx context.Context, proc *processor.Processor, stop context.CancelFunc, done <-chan error, reconcileExited <-chan struct{}, started time.Time) (bool, error) {
 	select {
 	case <-ctx.Done():
@@ -418,11 +506,20 @@ func (r *Rebuild) runToCaughtUp(ctx context.Context, proc *processor.Processor, 
 		return false, failure
 	}
 
+	position := proc.CaughtUpPosition()
+
 	err := r.appendLocked(ctx, CaughtUp{
-		Position: proc.CaughtUpPosition(),
+		Position: position,
 		Duration: time.Since(started),
 		At:       time.Now(),
 	})
+	if err == nil {
+		r.certificate = &certification{
+			runner:   r.runner,
+			position: position,
+			version:  r.aggregate.Version(),
+		}
+	}
 	r.mu.Unlock()
 
 	if err != nil {
@@ -443,10 +540,9 @@ func (r *Rebuild) runToCaughtUp(ctx context.Context, proc *processor.Processor, 
 	return true, nil
 }
 
-// promoteAfterCatchUp auto-promotes a caught-up rebuild — directly after
-// catch-up, or on resume of one that recorded catch-up but never promoted —
-// mapping the outcome to the shared contract: it reports whether Run should
-// keep tailing.
+// promoteAfterCatchUp auto-promotes a rebuild directly after its catch-up
+// was certified, mapping the outcome to the shared contract: it reports
+// whether Run should keep tailing.
 func (r *Rebuild) promoteAfterCatchUp(ctx context.Context, stop context.CancelFunc, done <-chan error, reconcileExited <-chan struct{}) (bool, error) {
 	err := r.Promote(ctx)
 	if err == nil {
@@ -475,6 +571,14 @@ func (r *Rebuild) promoteAfterCatchUp(ctx context.Context, stop context.CancelFu
 // event is the flip. The effect worker applies the flip to registered caches
 // and storage objects in stream order; nothing runs inline, so there is no
 // hook failure to special-case and no unrecorded cutover to repair.
+//
+// Promotion requires a current catch-up certification: persisted
+// PhaseCaughtUp is a historical fact, not a standing license, so only the
+// run that drained this rebuild to the head — and whose processor is still
+// the attempt's current claimant — may promote it. A handle that merely
+// resumed or read a caught-up rebuild must Run it, re-certifying against
+// the current head, before it can promote; the refusal wraps
+// ErrNotCertified.
 func (r *Rebuild) Promote(ctx context.Context) error {
 	r.mu.Lock()
 
@@ -498,11 +602,37 @@ func (r *Rebuild) Promote(ctx context.Context) error {
 		return fmt.Errorf("cannot promote a rebuild in unknown phase %s", state.Attempt.Phase)
 	}
 
+	switch certificate := r.certificate; {
+	case certificate == nil:
+		r.mu.Unlock()
+		return fmt.Errorf("%w: run the rebuild to drain it to the head and certify", ErrNotCertified)
+	case certificate.version != r.aggregate.Version():
+		// The lifecycle advanced past the version the certificate was cut
+		// against; the version only grows, so the certificate is dead.
+		r.certificate = nil
+		r.mu.Unlock()
+
+		return fmt.Errorf("%w: the lifecycle advanced after catch-up was certified", ErrNotCertified)
+	}
+
+	select {
+	case <-r.processorExited:
+		r.certificate = nil
+		r.mu.Unlock()
+
+		return fmt.Errorf("%w: the certifying processor has exited", ErrNotCertified)
+	default:
+	}
+
 	appendErr := r.appendLocked(ctx, Promoted{
 		Previous: state.Live,
 		Next:     state.Attempt.Target,
 		At:       time.Now(),
 	})
+	if appendErr == nil {
+		// Consumed: the flip is recorded and observed.
+		r.certificate = nil
+	}
 	r.mu.Unlock()
 
 	// An error carrying ErrEventsAppended means the event is durable and the
@@ -750,22 +880,32 @@ func (r *Rebuild) awaitProcessorStop(ctx context.Context) error {
 	}
 }
 
-// appendLocked appends the transition to the aggregate and saves it. The save
-// carries the aggregate's expected version, so competing handles are
-// arbitrated here: the loser's save reports a version mismatch, and the
-// handle should be discarded and the projection resumed to observe what won.
-// The caller must hold r.mu.
-func (r *Rebuild) appendLocked(ctx context.Context, event estoria.DomainEvent[State]) error {
-	r.aggregate.Append(event)
+// appendLocked appends the transitions to the aggregate and saves them as
+// one atomic append. The save carries the aggregate's expected version, so
+// competing handles are arbitrated here: the loser's save reports a version
+// mismatch, and the handle should be discarded and the projection resumed to
+// observe what won. The caller must hold r.mu.
+func (r *Rebuild) appendLocked(ctx context.Context, events ...estoria.DomainEvent[State]) error {
+	r.aggregate.Append(events...)
 
 	if err := r.orchestrator.config.Projections.Save(ctx, r.aggregate, nil); err != nil {
 		// Discard the failed append: left queued, it would ride along with a
 		// later command's save and durably record both transitions. When the
-		// error carries ErrEventsAppended the event is durable regardless, and
-		// the next hydration observes it.
+		// error carries ErrEventsAppended the events are durable regardless,
+		// and the next hydration observes them — but the aggregate can no
+		// longer vouch for the version a certificate was cut against.
 		r.aggregate.DiscardUnsavedEvents()
 
-		return fmt.Errorf("recording %s: %w", event.EventType(), err)
+		if errors.Is(err, aggregatestore.ErrEventsAppended) {
+			r.certificate = nil
+		}
+
+		types := make([]string, 0, len(events))
+		for _, event := range events {
+			types = append(types, event.EventType())
+		}
+
+		return fmt.Errorf("recording %s: %w", strings.Join(types, "+"), err)
 	}
 
 	return nil
@@ -779,15 +919,17 @@ func staleHandleError(action string, err error) error {
 	return fmt.Errorf("%s recorded, but the rebuild handle is stale; resume the projection before issuing further commands: %w", action, err)
 }
 
-// processorExit maps an exited processor to Run's result: a recorded
-// fail-closed cause is surfaced, a deliberate stop — by a command or by the
-// reconcile loop observing the attempt's end — is not an error, and anything
-// else reports err. Both fields are read in one critical section: reading
-// them separately would let the reconcile loop record a fail-closed stop
-// between the reads, and the exit would classify as deliberate and clean.
+// processorExit maps an exited processor to Run's result: a recorded cause —
+// fail-closed or displacement — is surfaced, a deliberate stop by a command
+// or by the reconcile loop observing the attempt's end is not an error, and
+// anything else reports err. Both fields are read in one critical section:
+// reading them separately would let the reconcile loop record a cause
+// between the reads, and the exit would classify as deliberate and clean. A
+// certificate never survives its processor's exit.
 func (r *Rebuild) processorExit(err error) error {
 	r.mu.Lock()
 	stopped, failure := r.stopped, r.failure
+	r.certificate = nil
 	r.mu.Unlock()
 
 	switch {

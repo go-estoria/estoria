@@ -155,7 +155,10 @@ func (o *Orchestrator) Begin(ctx context.Context, name, reason string) (*Rebuild
 
 // Resume loads the named projection's lifecycle and returns a handle to it.
 // Inspect its State to decide what to do next: Run continues an in-flight
-// build; a projection with no rebuild in flight can only be read.
+// build; a projection with no rebuild in flight can only be read. A resumed
+// handle cannot promote until it has Run — promotion requires the catch-up
+// certification only a running drain establishes — while Rollback, Abandon,
+// and Retire are deliberately not runner-scoped.
 func (o *Orchestrator) Resume(ctx context.Context, name string) (*Rebuild, error) {
 	aggregate, err := o.loadAggregate(ctx, name)
 	if err != nil {

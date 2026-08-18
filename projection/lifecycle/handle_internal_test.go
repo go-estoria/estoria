@@ -124,6 +124,81 @@ func TestCancellationOnly(t *testing.T) {
 	}
 }
 
+// caughtUpRebuildForTest builds a handle over a real caught-up lifecycle
+// aggregate, for pinning Promote's certificate arms directly: the arms guard
+// against windows — a lifecycle version that advanced past the certificate,
+// a processor that exited a moment ago — that behavioral tests cannot hold
+// open deterministically.
+func caughtUpRebuildForTest(t *testing.T) *Rebuild {
+	t.Helper()
+
+	events, err := esmemory.NewEventStore()
+	if err != nil {
+		t.Fatalf("creating event store: %v", err)
+	}
+
+	store, err := NewStore(events)
+	if err != nil {
+		t.Fatalf("creating lifecycle store: %v", err)
+	}
+
+	v1 := projection.ID{Name: "orders", Version: 1}
+	at := time.Date(2026, 8, 18, 9, 0, 0, 0, time.UTC)
+
+	aggregate := store.New(StreamUUID("orders"))
+	aggregate.Append(
+		RebuildInitiated{Attempt: uuid.Must(uuid.NewV4()), Target: v1, Reason: "certificate arms", At: at},
+		RunnerClaimed{Runner: uuid.Must(uuid.NewV4()), At: at},
+		BuildStarted{},
+		CaughtUp{Position: 7, At: at},
+	)
+
+	if err := store.Save(t.Context(), aggregate, nil); err != nil {
+		t.Fatalf("saving the caught-up history: %v", err)
+	}
+
+	return &Rebuild{name: "orders", aggregate: aggregate, processorExited: make(chan struct{})}
+}
+
+// TestPromote_RefusesStaleCertificateVersion pins the certificate's version
+// arm: a certificate cut against an older lifecycle version than the
+// aggregate now holds is dead — the version only grows — and the refusal
+// wraps ErrNotCertified before anything is appended.
+func TestPromote_RefusesStaleCertificateVersion(t *testing.T) {
+	t.Parallel()
+
+	r := caughtUpRebuildForTest(t)
+	r.certificate = &certification{runner: uuid.Must(uuid.NewV4()), position: 7, version: r.aggregate.Version() - 1}
+
+	if err := r.Promote(t.Context()); !errors.Is(err, ErrNotCertified) {
+		t.Fatalf("want the stale-version certificate refused with ErrNotCertified, got %v", err)
+	}
+
+	if r.certificate != nil {
+		t.Error("want the dead certificate cleared by the refusal")
+	}
+}
+
+// TestPromote_RefusesCertificateOfExitedProcessor pins the certificate's
+// liveness arm: a certificate whose processor has already exited is refused
+// even when the certificate itself is otherwise current — the in-process
+// clear on exit and this check close the same window from both sides.
+func TestPromote_RefusesCertificateOfExitedProcessor(t *testing.T) {
+	t.Parallel()
+
+	r := caughtUpRebuildForTest(t)
+	r.certificate = &certification{runner: uuid.Must(uuid.NewV4()), position: 7, version: r.aggregate.Version()}
+	close(r.processorExited)
+
+	if err := r.Promote(t.Context()); !errors.Is(err, ErrNotCertified) {
+		t.Fatalf("want the exited processor's certificate refused with ErrNotCertified, got %v", err)
+	}
+
+	if r.certificate != nil {
+		t.Error("want the dead certificate cleared by the refusal")
+	}
+}
+
 // TestCheckLifecycleAggregate_RejectsForeignAggregate is the supplemental
 // direct proof that the helper refuses a self-consistent foreign history: a
 // fresh fold that never knew its address accepts a foreign name without
@@ -153,6 +228,7 @@ func TestCheckLifecycleAggregate_RejectsForeignAggregate(t *testing.T) {
 	aggregate := store.New(StreamUUID("orders"))
 	aggregate.Append(
 		RebuildInitiated{Attempt: uuid.Must(uuid.NewV4()), Target: customersV1, Reason: "takeover", At: at},
+		RunnerClaimed{Runner: uuid.Must(uuid.NewV4()), At: at},
 		BuildStarted{},
 		CaughtUp{Position: 1, At: at},
 		Promoted{Next: customersV1, At: at},

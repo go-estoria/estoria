@@ -1604,6 +1604,13 @@ func TestStaleHandle_DoesNotReplayDurableTransition(t *testing.T) {
 		t.Fatalf("want an error carrying ErrEventsAppended, got %v", err)
 	}
 
+	// The uncertain save voided the certificate — the aggregate can no
+	// longer vouch for the version it was cut against — so a promote retry
+	// is refused as uncertified instead of reaching the stream again.
+	if err := r2.Promote(t.Context()); !errors.Is(err, lifecycle.ErrNotCertified) {
+		t.Fatalf("want the retried promotion refused with ErrNotCertified, got %v", err)
+	}
+
 	// The promotion is durable despite the failed save; Retire rehydrates,
 	// observes it, and must record exactly one reservation and one
 	// completion — not a replayed Promoted.
@@ -1705,11 +1712,13 @@ func TestRun_SingleUse(t *testing.T) {
 	}
 }
 
-// TestRun_ResumesAutoPromotion pins append-then-act reconciliation for the
-// caught-up window: a rebuild that recorded CaughtUp but stopped before its
-// auto-promotion is promoted when Run resumes it, rather than tailing
-// unpromoted forever.
-func TestRun_ResumesAutoPromotion(t *testing.T) {
+// TestRun_RecertifiesCaughtUpAttempt pins re-certification: a rebuild that
+// recorded CaughtUp but stopped before promoting is not promoted on the
+// strength of the persisted phase — a run entering at PhaseCaughtUp claims,
+// drains to the current head, records a fresh CaughtUp covering the events
+// that arrived while nothing ran, and only then auto-promotes. The persisted
+// phase never regresses along the way.
+func TestRun_RecertifiesCaughtUpAttempt(t *testing.T) {
 	t.Parallel()
 
 	h := newHarness(t)
@@ -1724,8 +1733,13 @@ func TestRun_ResumesAutoPromotion(t *testing.T) {
 		t.Fatalf("stopping the build: %v", err)
 	}
 
+	// Events arrive while no processor runs: the stopped run's catch-up
+	// position is stale the moment these land.
+	h.appendDomain(4)
+
 	// An auto-promoting orchestrator over the same stores resumes the
-	// rebuild; entering at caught-up must retry the promotion.
+	// rebuild; entering at caught-up must re-certify against the current
+	// head before promoting.
 	auto, err := lifecycle.NewOrchestrator(lifecycle.Config{
 		Events:      h.events,
 		Checkpoints: h.checkpoints,
@@ -1745,16 +1759,312 @@ func TestRun_ResumesAutoPromotion(t *testing.T) {
 		t.Fatalf("resuming: %v", err)
 	}
 
+	if got := resumed.State().Attempt.Phase; got != lifecycle.PhaseCaughtUp {
+		t.Fatalf("want the resumed rebuild still %s, got %s", lifecycle.PhaseCaughtUp, got)
+	}
+
+	staleCertifiedPos := resumed.State().Attempt.CaughtUpPos
+
 	cancel2, done2 := runAsync(t, resumed)
 	waitPhase(t, resumed, lifecycle.PhasePromoted)
 
 	v1 := projection.ID{Name: "orders", Version: 1}
 	h.waitLive(v1)
 
+	// The promotion was licensed by a fresh certification: a second CaughtUp
+	// is durable, and its position covers the events that arrived while the
+	// rebuild sat caught up.
+	if got := countEventsOfType(t, h.events, lifecycle.CaughtUp{}.EventType()); got != 2 {
+		t.Errorf("want the re-certification to record a second CaughtUp, got %d total", got)
+	}
+
+	if got := resumed.State().Attempt.CaughtUpPos; got <= staleCertifiedPos {
+		t.Errorf("want the fresh certification past the stale position %d, got %d", staleCertifiedPos, got)
+	}
+
+	// The build drained everything before promoting.
+	if got := len(h.model.table(v1)); got != 7 {
+		t.Errorf("want all 7 domain events drained before promotion, got %d", got)
+	}
+
 	cancel2()
 
 	if err := waitDone(t, done2); !errors.Is(err, context.Canceled) {
 		t.Fatalf("stopping the resumed run: %v", err)
+	}
+}
+
+// TestPromote_RequiresCertification pins the promotion license: persisted
+// PhaseCaughtUp is a historical fact, not a standing license, so a handle
+// that merely resumed the caught-up rebuild cannot promote it — only the
+// run that drained it to the head holds the certificate.
+func TestPromote_RequiresCertification(t *testing.T) {
+	t.Parallel()
+
+	h := newHarness(t)
+	h.appendDomain(3)
+
+	r := h.begin("certified promotion only")
+	cancel, done := runAsync(t, r)
+	waitPhase(t, r, lifecycle.PhaseCaughtUp)
+
+	resumed, err := h.orchestrator.Resume(t.Context(), "orders")
+	if err != nil {
+		t.Fatalf("resuming: %v", err)
+	}
+
+	if err := resumed.Promote(t.Context()); !errors.Is(err, lifecycle.ErrNotCertified) {
+		t.Fatalf("want the resumed handle's promotion refused with ErrNotCertified, got %v", err)
+	}
+
+	if got := countEventsOfType(t, h.events, lifecycle.Promoted{}.EventType()); got != 0 {
+		t.Fatalf("want no promotion recorded through the uncertified handle, got %d", got)
+	}
+
+	// The certifying run itself promotes.
+	if err := r.Promote(t.Context()); err != nil {
+		t.Fatalf("promoting from the certifying run: %v", err)
+	}
+
+	cancel()
+
+	if err := waitDone(t, done); !errors.Is(err, context.Canceled) {
+		t.Errorf("want the tailing run to report cancellation, got %v", err)
+	}
+}
+
+// TestPromote_CertificateDiesWithTheRun pins that a certificate from a
+// stopped run is never reused: the same handle that certified catch-up loses
+// its license the moment its processor exits, even though the persisted
+// phase is still PhaseCaughtUp.
+func TestPromote_CertificateDiesWithTheRun(t *testing.T) {
+	t.Parallel()
+
+	h := newHarness(t)
+	h.appendDomain(3)
+
+	r := h.begin("certificate dies with the run")
+	cancel, done := runAsync(t, r)
+	waitPhase(t, r, lifecycle.PhaseCaughtUp)
+	cancel()
+
+	if err := waitDone(t, done); !errors.Is(err, context.Canceled) {
+		t.Fatalf("stopping the run: %v", err)
+	}
+
+	if got := r.State().Attempt.Phase; got != lifecycle.PhaseCaughtUp {
+		t.Fatalf("want the persisted phase still %s, got %s", lifecycle.PhaseCaughtUp, got)
+	}
+
+	if err := r.Promote(t.Context()); !errors.Is(err, lifecycle.ErrNotCertified) {
+		t.Fatalf("want promotion refused after the certifying processor exited, got %v", err)
+	}
+
+	if got := countEventsOfType(t, h.events, lifecycle.Promoted{}.EventType()); got != 0 {
+		t.Errorf("want no promotion recorded from the dead certificate, got %d", got)
+	}
+}
+
+// TestRun_DisplacedBuilderWindsDown pins cooperative supersession: a second
+// run's claim displaces the first builder, whose reconcile loop observes the
+// recorded runner change, stops its processor, and surfaces
+// ErrRunnerDisplaced — with its certification revoked for good, so the
+// displaced handle cannot promote what it no longer builds.
+func TestRun_DisplacedBuilderWindsDown(t *testing.T) {
+	t.Parallel()
+
+	h := newHarness(t)
+	h.appendDomain(3)
+
+	r1 := h.begin("will be displaced")
+	_, done1 := runAsync(t, r1)
+	waitPhase(t, r1, lifecycle.PhaseCaughtUp)
+
+	r2, err := h.orchestrator.Resume(t.Context(), "orders")
+	if err != nil {
+		t.Fatalf("resuming the second runner: %v", err)
+	}
+
+	cancel2, done2 := runAsync(t, r2)
+
+	// The first builder observes the second runner's claim and winds down.
+	if err := waitDone(t, done1); !errors.Is(err, lifecycle.ErrRunnerDisplaced) {
+		t.Fatalf("want the displaced builder to surface ErrRunnerDisplaced, got %v", err)
+	}
+
+	// Sticky revocation: the displaced handle's certificate is gone.
+	if err := r1.Promote(t.Context()); !errors.Is(err, lifecycle.ErrNotCertified) {
+		t.Fatalf("want the displaced handle's promotion refused with ErrNotCertified, got %v", err)
+	}
+
+	// The claimant re-certifies against the current head and promotes.
+	waitFor(t, func() bool {
+		return countEventsOfType(t, h.events, lifecycle.CaughtUp{}.EventType()) == 2
+	})
+
+	if err := r2.Promote(t.Context()); err != nil {
+		t.Fatalf("promoting from the claimant: %v", err)
+	}
+
+	if got := countEventsOfType(t, h.events, lifecycle.RunnerClaimed{}.EventType()); got != 2 {
+		t.Errorf("want one claim per run (2 total), got %d", got)
+	}
+
+	cancel2()
+
+	if err := waitDone(t, done2); !errors.Is(err, context.Canceled) {
+		t.Errorf("want the claimant's tailing run to report cancellation, got %v", err)
+	}
+}
+
+// TestRun_ClaimSaveFailureStartsNothing pins the first claim outcome: a
+// pre-append failure recording the claim refuses the Run before any
+// processor exists, and nothing is durable.
+func TestRun_ClaimSaveFailureStartsNothing(t *testing.T) {
+	t.Parallel()
+
+	events := newEventStore(t)
+
+	inner, err := lifecycle.NewStore(events)
+	if err != nil {
+		t.Fatalf("creating lifecycle store: %v", err)
+	}
+
+	projections := &refusingStore{Store: inner}
+	h := buildHarness(t, events, projections)
+	h.appendDomain(3)
+
+	r := h.begin("claim save refused")
+
+	projections.armFailure()
+
+	if err := r.Run(t.Context()); err == nil {
+		t.Fatal("want the refused claim save to fail the run, got nil")
+	}
+
+	if got := countEventsOfType(t, events, lifecycle.RunnerClaimed{}.EventType()); got != 0 {
+		t.Errorf("want no claim durable after the refused save, got %d", got)
+	}
+
+	if got := countEventsOfType(t, events, lifecycle.BuildStarted{}.EventType()); got != 0 {
+		t.Errorf("want no start durable after the refused save, got %d", got)
+	}
+}
+
+// TestRun_UnobservedClaimStartsWhenWon pins the second claim outcome: a
+// claim that is durable but unobserved is reloaded, and the run proceeds
+// because this exact runner won it — without re-appending the claim.
+func TestRun_UnobservedClaimStartsWhenWon(t *testing.T) {
+	t.Parallel()
+
+	events := newEventStore(t)
+	writer := &truncatingWriter{Store: events}
+
+	projections, err := lifecycle.NewStore(writer)
+	if err != nil {
+		t.Fatalf("creating lifecycle store: %v", err)
+	}
+
+	h := buildHarness(t, events, projections)
+	h.appendDomain(3)
+
+	r := h.begin("unobserved claim, won")
+
+	writer.armFailure()
+
+	cancel, done := runAsync(t, r)
+	waitPhase(t, r, lifecycle.PhaseCaughtUp)
+
+	if got := countEventsOfType(t, events, lifecycle.RunnerClaimed{}.EventType()); got != 1 {
+		t.Errorf("want exactly the one durable claim, got %d", got)
+	}
+
+	if got := countEventsOfType(t, events, lifecycle.BuildStarted{}.EventType()); got != 1 {
+		t.Errorf("want exactly one durable start, got %d", got)
+	}
+
+	cancel()
+
+	if err := waitDone(t, done); !errors.Is(err, context.Canceled) {
+		t.Errorf("want the tailing run to report cancellation, got %v", err)
+	}
+}
+
+// TestRun_UnobservedClaimRefusedWhenSuperseded pins the third claim outcome:
+// a durable-but-unobserved claim that was superseded before the reload
+// observes it refuses the Run with ErrRunnerDisplaced — the claim is in the
+// stream, but this runner did not end up the recorded claimant, so it must
+// not start a processor. Reconciliation is effectively disabled, so the
+// refusal can only come from the reload check itself, before any processor
+// exists — not from the running loop noticing the displacement later.
+func TestRun_UnobservedClaimRefusedWhenSuperseded(t *testing.T) {
+	t.Parallel()
+
+	events := newEventStore(t)
+	writer := &truncatingWriter{Store: events}
+
+	inner, err := lifecycle.NewStore(writer)
+	if err != nil {
+		t.Fatalf("creating lifecycle store: %v", err)
+	}
+
+	projections := &interceptingStore{Store: inner}
+	h := buildHarness(t, events, projections, lifecycle.WithReconcileInterval(time.Hour))
+	h.appendDomain(3)
+	h.model.armGate()
+
+	r1 := h.begin("will crash mid-build")
+	cancel1, done1 := runAsync(t, r1)
+	waitPhase(t, r1, lifecycle.PhaseBuilding)
+	cancel1()
+
+	if err := waitDone(t, done1); !errors.Is(err, context.Canceled) {
+		t.Fatalf("crashing the first run: %v", err)
+	}
+
+	h.model.releaseGate()
+
+	resumed, err := h.orchestrator.Resume(t.Context(), "orders")
+	if err != nil {
+		t.Fatalf("resuming: %v", err)
+	}
+
+	// The resumed run's claim append is truncated — durable but unobserved —
+	// and a competing claim lands before the reload observes it: the entry
+	// refresh is the first hydration, the reload the second.
+	writer.armFailure()
+	projections.armHydrateBefore(1, func(ctx context.Context) error {
+		competing, err := json.Marshal(lifecycle.RunnerClaimed{
+			Runner: uuid.Must(uuid.NewV4()),
+			At:     time.Date(2026, 8, 18, 9, 0, 0, 0, time.UTC),
+		})
+		if err != nil {
+			return err
+		}
+
+		_, err = events.AppendStream(ctx, ordersLifecycleStreamID(), []*eventstore.WritableEvent{{
+			Type:            lifecycle.RunnerClaimed{}.EventType(),
+			Data:            competing,
+			DataContentType: "application/json",
+		}}, eventstore.AppendStreamOptions{})
+
+		return err
+	})
+
+	_, done := runAsync(t, resumed)
+
+	if err := waitDone(t, done); !errors.Is(err, lifecycle.ErrRunnerDisplaced) {
+		t.Fatalf("want the superseded claim to refuse the run with ErrRunnerDisplaced, got %v", err)
+	}
+
+	// Both claims are durable history — the refused runner appended nothing
+	// further and started nothing.
+	if got := countEventsOfType(t, events, lifecycle.RunnerClaimed{}.EventType()); got != 3 {
+		t.Errorf("want the first run's claim plus both racing claims durable (3 total), got %d", got)
+	}
+
+	if got := countEventsOfType(t, events, lifecycle.BuildStarted{}.EventType()); got != 1 {
+		t.Errorf("want only the first run's start durable, got %d", got)
 	}
 }
 
@@ -1924,7 +2234,7 @@ func TestRacingBegins_LoserRefused(t *testing.T) {
 }
 
 // TestResumeAfterCrash pins crash recovery: a new handle resumed by name
-// records BuildResumed and completes the build from the checkpoint.
+// records a fresh runner claim and completes the build from the checkpoint.
 func TestResumeAfterCrash(t *testing.T) {
 	t.Parallel()
 
@@ -1960,14 +2270,19 @@ func TestResumeAfterCrash(t *testing.T) {
 	v1 := projection.ID{Name: "orders", Version: 1}
 	waitFor(t, func() bool { return len(h.model.table(v1)) == 3 })
 
-	// The stream records the full story: initiated, started, resumed, caught up.
+	// The stream records the full story: initiated, the first run's claim and
+	// start, the resumed run's claim, and the catch-up.
 	loaded, err := h.projections.Load(t.Context(), lifecycle.StreamUUID("orders"), nil)
 	if err != nil {
 		t.Fatalf("loading lifecycle aggregate: %v", err)
 	}
 
-	if got := loaded.Version(); got != 4 {
-		t.Errorf("want 4 recorded transitions (initiated, started, resumed, caught up), got %d", got)
+	if got := loaded.Version(); got != 5 {
+		t.Errorf("want 5 recorded transitions (initiated, claimed, started, claimed again, caught up), got %d", got)
+	}
+
+	if got := countEventsOfType(t, h.events, lifecycle.RunnerClaimed{}.EventType()); got != 2 {
+		t.Errorf("want one claim per run (2 total), got %d", got)
 	}
 
 	cancelResumed()
@@ -1978,8 +2293,9 @@ func TestResumeAfterCrash(t *testing.T) {
 }
 
 // TestCompetingOrchestrators pins the coordination story: two handles racing
-// to promote are arbitrated by optimistic concurrency on the lifecycle
-// stream, and the loser observes the winner's transition after reloading.
+// to end the same attempt are arbitrated by optimistic concurrency on the
+// lifecycle stream, and the loser observes the winner's transition after
+// reloading.
 func TestCompetingOrchestrators(t *testing.T) {
 	t.Parallel()
 
@@ -1987,7 +2303,7 @@ func TestCompetingOrchestrators(t *testing.T) {
 	h.appendDomain(3)
 
 	r := h.begin("competing operators")
-	cancel, done := runAsync(t, r)
+	_, done := runAsync(t, r)
 	waitPhase(t, r, lifecycle.PhaseCaughtUp)
 
 	first, err := h.orchestrator.Resume(t.Context(), "orders")
@@ -2000,13 +2316,13 @@ func TestCompetingOrchestrators(t *testing.T) {
 		t.Fatalf("resuming second handle: %v", err)
 	}
 
-	if err := first.Promote(t.Context()); err != nil {
-		t.Fatalf("promoting from the first handle: %v", err)
+	if err := first.Abandon(t.Context(), "the winning abandon"); err != nil {
+		t.Fatalf("abandoning from the first handle: %v", err)
 	}
 
-	err = second.Promote(t.Context())
+	err = second.Abandon(t.Context(), "the losing abandon")
 	if !errors.Is(err, eventstore.StreamVersionMismatchError{}) {
-		t.Fatalf("want the losing promotion refused with a version mismatch, got %v", err)
+		t.Fatalf("want the losing abandonment refused with a version mismatch, got %v", err)
 	}
 
 	state, err := h.orchestrator.Get(t.Context(), "orders")
@@ -2014,14 +2330,16 @@ func TestCompetingOrchestrators(t *testing.T) {
 		t.Fatalf("reloading after losing: %v", err)
 	}
 
-	if got := state.Attempt.Phase; got != lifecycle.PhasePromoted {
-		t.Errorf("want the loser to observe %s after reloading, got %s", lifecycle.PhasePromoted, got)
+	if got := state.Attempt.Phase; got != lifecycle.PhaseNone {
+		t.Errorf("want the loser to observe the vacated slot after reloading, got %s", got)
 	}
 
-	cancel()
+	if got := countEventsOfType(t, h.events, lifecycle.Abandoned{}.EventType()); got != 1 {
+		t.Errorf("want exactly the winning abandonment recorded, got %d", got)
+	}
 
-	if err := waitDone(t, done); !errors.Is(err, context.Canceled) {
-		t.Errorf("want the tailing run to report cancellation, got %v", err)
+	if err := waitDone(t, done); err != nil {
+		t.Errorf("want the builder to wind itself down with nil, got %v", err)
 	}
 }
 
@@ -2374,6 +2692,7 @@ func foreignLifecycleState() lifecycle.State {
 			Previous:    customersV1,
 			Phase:       lifecycle.PhasePromoted,
 			Reason:      "foreign history",
+			Runner:      uuid.Must(uuid.NewV4()),
 			InitiatedAt: at,
 			PromotedAt:  at,
 		},
@@ -2481,13 +2800,13 @@ func TestRetainedHandle_RefusesForeignStateViaSnapshot(t *testing.T) {
 		_, done := runAsync(t, r)
 		waitPhase(t, r, lifecycle.PhaseCaughtUp)
 
-		// The stream holds admission, start, and catch-up; a snapshot at
-		// version 3 covers all of it, so the next reconcile hydration
+		// The stream holds admission, claim, start, and catch-up; a snapshot
+		// at version 4 covers all of it, so the next reconcile hydration
 		// installs the foreign state with no tail to fold. The foreign
 		// attempt ID also differs from the running one, so a check reduced
 		// to State validation would classify this as an ordinary benign
 		// wind-down instead of failing closed.
-		writeLifecycleSnapshot(t, snapshots, foreignLifecycleState(), 3)
+		writeLifecycleSnapshot(t, snapshots, foreignLifecycleState(), 4)
 
 		if err := waitDone(t, done); !errors.Is(err, lifecycle.ErrInvalidState) {
 			t.Errorf("want Run to fail closed with ErrInvalidState via reconciliation, got %v", err)
@@ -2506,8 +2825,8 @@ func TestResume_RefusesCoveredUpSequences(t *testing.T) {
 	at := time.Date(2026, 8, 17, 10, 0, 0, 0, time.UTC)
 
 	// promotedV1 lands a well-formed first-version history through Promoted:
-	// admitted, built, caught up, and promoted, all consistent with a
-	// projection that had never been live.
+	// admitted, claimed, built, caught up, and promoted, all consistent with
+	// a projection that had never been live.
 	promotedV1 := func(t *testing.T, events *esmemory.EventStore) {
 		t.Helper()
 
@@ -2517,6 +2836,7 @@ func TestResume_RefusesCoveredUpSequences(t *testing.T) {
 			Reason:  "first build",
 			At:      at,
 		})
+		appendRawLifecycleEvent(t, events, lifecycle.RunnerClaimed{Runner: uuid.Must(uuid.NewV4()), At: at})
 		appendRawLifecycleEvent(t, events, lifecycle.BuildStarted{})
 		appendRawLifecycleEvent(t, events, lifecycle.CaughtUp{Position: 1, At: at})
 		appendRawLifecycleEvent(t, events, lifecycle.Promoted{Next: v1, At: at})
@@ -3227,13 +3547,18 @@ func (s *refusingStore) Save(ctx context.Context, aggregate *aggregatestore.Aggr
 // interceptingStore delegates and, when armed, runs the configured function
 // in place of the next Hydrate call, signaling entry and then disarming.
 // Tests use it to park the reconcile loop inside a hydration or to fail one
-// deterministically at a chosen moment.
+// deterministically at a chosen moment. A before-hook variant runs a
+// function ahead of a delegated Hydrate instead of replacing it, after a
+// configured number of pass-through calls, so tests can land competing
+// events at the exact moment a reload begins.
 type interceptingStore struct {
 	aggregatestore.Store[lifecycle.State]
 
-	mu        sync.Mutex
-	intercept func(context.Context) error
-	entered   chan struct{}
+	mu         sync.Mutex
+	intercept  func(context.Context) error
+	entered    chan struct{}
+	before     func(context.Context) error
+	beforeSkip int
 }
 
 // armHydrateIntercept arms fn to run in place of the next Hydrate call; the
@@ -3248,19 +3573,46 @@ func (s *interceptingStore) armHydrateIntercept(fn func(context.Context) error) 
 	return s.entered
 }
 
+// armHydrateBefore arms fn to run ahead of a delegated Hydrate: the first
+// skip calls pass through untouched, then the next call runs fn, disarms,
+// and hydrates for real.
+func (s *interceptingStore) armHydrateBefore(skip int, fn func(context.Context) error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.before = fn
+	s.beforeSkip = skip
+}
+
 func (s *interceptingStore) Hydrate(ctx context.Context, aggregate *aggregatestore.Aggregate[lifecycle.State], opts *aggregatestore.HydrateOptions) error {
 	s.mu.Lock()
 	fn, entered := s.intercept, s.entered
 	s.intercept, s.entered = nil, nil
+
+	var before func(context.Context) error
+
+	if s.before != nil {
+		if s.beforeSkip > 0 {
+			s.beforeSkip--
+		} else {
+			before = s.before
+			s.before = nil
+		}
+	}
 	s.mu.Unlock()
 
-	if fn == nil {
-		return s.Store.Hydrate(ctx, aggregate, opts)
+	if fn != nil {
+		close(entered)
+		return fn(ctx)
 	}
 
-	close(entered)
+	if before != nil {
+		if err := before(ctx); err != nil {
+			return err
+		}
+	}
 
-	return fn(ctx)
+	return s.Store.Hydrate(ctx, aggregate, opts)
 }
 
 // truncatingWriter delegates appends and, when armed, truncates the next
