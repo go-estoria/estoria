@@ -15,10 +15,10 @@ import (
 // concurrent initiations conflict at the same stream version, so at most one
 // is admitted. Previous carries the live version at initiation for ledger
 // self-containment; the fold's own Live is the authority it is checked
-// against. An admission into an occupied slot, under a different projection
-// name, from a non-live previous, or outside the allocation sequence poisons
-// the fold; the projection name is immutable once set, and the allocation
-// high-water mark never lowers.
+// against. An admission with no attempt ID, into an occupied slot, under a
+// different projection name, from a non-live previous, or outside the
+// allocation sequence poisons the fold; the projection name is immutable
+// once set, and the allocation high-water mark never lowers.
 type RebuildInitiated struct {
 	Attempt  uuid.UUID
 	Target   projection.ID
@@ -36,6 +36,9 @@ func (RebuildInitiated) New() estoria.DomainEvent[State] { return &RebuildInitia
 // ApplyTo applies the event to state, returning the new state.
 func (e RebuildInitiated) ApplyTo(s State) State {
 	switch {
+	case e.Attempt.IsNil():
+		s = s.poison("rebuild initiated with no attempt ID",
+			"projection", e.Target.Name, "target", e.Target)
 	case s.Attempt.Phase != PhaseNone:
 		s = s.poison("rebuild initiated while the attempt slot is occupied",
 			"projection", e.Target.Name, "attempt", e.Attempt, "displaced_attempt", s.Attempt.ID)
@@ -182,7 +185,10 @@ func (e Promoted) ApplyTo(s State) State {
 // RolledBack records the reversion of reads to the previous version.
 // Terminal for the attempt: the slot is vacated, and a subsequent rebuild is
 // a new attempt targeting a new version number. From is defense in depth,
-// checked against the fold's own Live.
+// checked against the fold's own Live. A first rebuild has no previous
+// version and so no rollback target: a rollback recorded for an attempt with
+// no previous poisons the fold rather than passing the lineage check on two
+// zero values.
 type RolledBack struct {
 	From       projection.ID
 	RevertedTo projection.ID
@@ -204,6 +210,9 @@ func (e RolledBack) ApplyTo(s State) State {
 	case e.From != s.Live:
 		s = s.poison("rollback recorded from a version that was not live",
 			"projection", s.Name, "recorded_from", e.From, "live", s.Live)
+	case s.Attempt.Previous == (projection.ID{}):
+		s = s.poison("rollback recorded for an attempt with no previous version",
+			"projection", s.Name, "attempt", s.Attempt.ID)
 	case e.RevertedTo != s.Attempt.Previous:
 		s = s.poison("rollback recorded to a version that was not the attempt's previous",
 			"projection", s.Name, "recorded_reverted_to", e.RevertedTo, "previous", s.Attempt.Previous)
@@ -251,7 +260,11 @@ func (Abandoned) ApplyTo(s State) State {
 // refused — and nothing is destroyed before that arbitration: teardown runs
 // only after this event is durable, and rolling back is illegal from
 // PhaseRetiring, so retirement can never destroy a version that is about to
-// serve reads again. There is deliberately no un-retire.
+// serve reads again. There is deliberately no un-retire. A first rebuild has
+// no previous version and nothing to reserve: its completion is recorded
+// directly by PreviousRetired, and a reservation for an attempt with no
+// previous poisons the fold rather than passing the lineage check on two
+// zero values.
 type RetireStarted struct {
 	Retiring projection.ID
 	At       time.Time
@@ -269,6 +282,9 @@ func (e RetireStarted) ApplyTo(s State) State {
 	case s.Attempt.Phase != PhasePromoted:
 		s = s.poison("retirement reserved outside the promoted phase",
 			"projection", s.Name, "phase", s.Attempt.Phase)
+	case s.Attempt.Previous == (projection.ID{}):
+		s = s.poison("retirement reserved for an attempt with no previous version",
+			"projection", s.Name, "attempt", s.Attempt.ID)
 	case e.Retiring != s.Attempt.Previous:
 		s = s.poison("retirement reserved for a version that was not the attempt's previous",
 			"projection", s.Name, "recorded_retiring", e.Retiring, "previous", s.Attempt.Previous)
@@ -285,7 +301,10 @@ func (e RetireStarted) ApplyTo(s State) State {
 // checkpoint deleted. Terminal for the attempt: the slot is vacated and the
 // rebuild is complete; Live is unchanged. A first rebuild has no previous
 // version; its completion carries a zero Retired ID, recording that there
-// was nothing to retire.
+// was nothing to retire, and is recorded directly from PhasePromoted. The
+// two completion forms are exclusive: a reserved retirement completes only
+// from PhaseRetiring with a previous version recorded, so a completion
+// cannot vacate the evidence of a reservation that had nothing to reserve.
 type PreviousRetired struct {
 	Retired projection.ID
 }
@@ -298,11 +317,14 @@ func (PreviousRetired) New() estoria.DomainEvent[State] { return &PreviousRetire
 
 // ApplyTo applies the event to state, returning the new state.
 func (e PreviousRetired) ApplyTo(s State) State {
-	completable := s.Attempt.Phase == PhaseRetiring ||
-		(s.Attempt.Phase == PhasePromoted && s.Attempt.Previous == (projection.ID{}))
+	reserved := s.Attempt.Phase == PhaseRetiring && s.Attempt.Previous != (projection.ID{})
+	firstVersion := s.Attempt.Phase == PhasePromoted && s.Attempt.Previous == (projection.ID{})
 
 	switch {
-	case !completable:
+	case s.Attempt.Phase == PhaseRetiring && s.Attempt.Previous == (projection.ID{}):
+		s = s.poison("retirement completed for a reservation with no previous version",
+			"projection", s.Name, "attempt", s.Attempt.ID)
+	case !reserved && !firstVersion:
 		s = s.poison("retirement completed outside the retiring phase",
 			"projection", s.Name, "phase", s.Attempt.Phase)
 	case e.Retired != s.Attempt.Previous:

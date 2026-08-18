@@ -130,12 +130,16 @@ type State struct {
 	// is the audit record of past attempts.
 	Attempt AttemptState
 
-	// invalid records the first fold inconsistency, permanently. Final-state
-	// shape cannot prove historical consistency — a malformed event can
-	// assign both sides of any equality a validator would check — so the
-	// fold marks the state at the moment the inconsistency is observed, and
-	// no later event clears the mark. validate rejects a marked state.
-	invalid string
+	// InvalidReason records the first fold inconsistency, permanently; empty
+	// means none was observed. Final-state shape cannot prove historical
+	// consistency — a malformed event can assign both sides of any equality
+	// a validator would check — so the fold marks the state at the moment
+	// the inconsistency is observed, and no later event clears the mark.
+	// validate rejects a marked state. Exported so state codecs persist it:
+	// State re-enters the aggregate through snapshots, and a snapshot round
+	// trip must re-arm the refusal rather than launder a poisoned fold back
+	// to valid.
+	InvalidReason string
 }
 
 // AttemptState is an in-flight rebuild attempt: a child entity of the
@@ -192,8 +196,8 @@ func NewState(uuid.UUID) State { return State{} }
 func (s State) poison(msg string, args ...any) State {
 	estoria.GetLogger().WithGroup("lifecycle").Warn(msg, args...)
 
-	if s.invalid == "" {
-		s.invalid = msg
+	if s.InvalidReason == "" {
+		s.InvalidReason = msg
 	}
 
 	return s
@@ -207,8 +211,8 @@ func (s State) poison(msg string, args ...any) State {
 // trust boundary, so infrastructure state is rejected here rather than
 // assumed well-formed.
 func (s State) validate() error {
-	if s.invalid != "" {
-		return fmt.Errorf("the fold observed an inconsistent event: %s", s.invalid)
+	if s.InvalidReason != "" {
+		return fmt.Errorf("the fold observed an inconsistent event: %s", s.InvalidReason)
 	}
 
 	if s.Name == "" {

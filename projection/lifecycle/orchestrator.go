@@ -193,33 +193,40 @@ func (o *Orchestrator) loadAggregate(ctx context.Context, name string) (*aggrega
 	return aggregate, nil
 }
 
+// ErrInvalidState reports a refusal to act on a lifecycle aggregate whose
+// address, identity, or folded state failed validation. Every such refusal
+// wraps it, so fail-closed handling can be asserted with errors.Is instead
+// of by matching message text.
+var ErrInvalidState = errors.New("invalid lifecycle state")
+
 // checkLifecycleAggregate verifies that the aggregate is a lifecycle
 // aggregate at the stream the given projection name derives, that its
 // recorded name matches the name that addressed it, and that its folded
 // state is structurally sound. A failure means the store is wired with the
 // wrong stream type, or the stream holds tampered data — either way, no
-// command should act on it. Handles re-run this after every hydration
-// against the name they were addressed by: the folded name is mutable data,
-// and validating relative to it alone would let a malformed but internally
-// consistent history swap the projection out from under a retained handle.
+// command should act on it, and every refusal wraps ErrInvalidState.
+// Handles re-run this after every hydration against the name they were
+// addressed by: the folded name is mutable data, and validating relative to
+// it alone would let a malformed but internally consistent history swap the
+// projection out from under a retained handle.
 func checkLifecycleAggregate(aggregate *aggregatestore.Aggregate[State], name string) error {
 	id := aggregate.ID()
 
 	if id.Type != StreamType {
-		return fmt.Errorf("projection store manages %q streams, want %q; wire it with lifecycle.NewStore", id.Type, StreamType)
+		return fmt.Errorf("%w: projection store manages %q streams, want %q; wire it with lifecycle.NewStore", ErrInvalidState, id.Type, StreamType)
 	}
 
 	if want := StreamUUID(name); id.UUID != want {
-		return fmt.Errorf("lifecycle aggregate at stream %s does not derive from projection %q (want %s)", id.UUID, name, want)
+		return fmt.Errorf("%w: lifecycle aggregate at stream %s does not derive from projection %q (want %s)", ErrInvalidState, id.UUID, name, want)
 	}
 
 	state := aggregate.State()
 	if state.Name != "" && state.Name != name {
-		return fmt.Errorf("lifecycle stream addressed by projection %q holds state for %q", name, state.Name)
+		return fmt.Errorf("%w: lifecycle stream addressed by projection %q holds state for %q", ErrInvalidState, name, state.Name)
 	}
 
 	if err := state.validate(); err != nil {
-		return fmt.Errorf("lifecycle state for projection %q is invalid: %w", name, err)
+		return fmt.Errorf("%w for projection %q: %w", ErrInvalidState, name, err)
 	}
 
 	return nil

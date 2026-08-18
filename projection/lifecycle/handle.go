@@ -45,8 +45,9 @@ type Rebuild struct {
 	stopped bool
 
 	// failure records why the reconcile loop stopped the processor when the
-	// stop was fail-closed rather than benign — the hydrated lifecycle no
-	// longer passed validation — so Run surfaces the cause instead of nil.
+	// stop was fail-closed rather than benign — the lifecycle could not be
+	// rehydrated, or the hydrated state no longer passed validation — so Run
+	// surfaces the cause instead of nil.
 	failure error
 
 	// ran records that Run was called, successfully or not: a second call
@@ -97,8 +98,11 @@ func (r *Rebuild) Checkpoint(ctx context.Context) (checkpointstore.Checkpoint, e
 //
 // Run returns nil once the attempt reaches a terminal state — through this
 // handle's own commands or through transitions recorded elsewhere — and the
-// context's error on cancellation. A fully retired rebuild is complete:
-// steady-state processing of the live version is a plain
+// context's error on cancellation. A reconcile failure is terminal for the
+// Run: if the lifecycle cannot be rehydrated or no longer validates, the
+// processor is stopped and Run returns the cause; recovery is Resume and a
+// fresh handle once the fault is resolved. A fully retired rebuild is
+// complete: steady-state processing of the live version is a plain
 // processor.Processor, not a lifecycle concern. Run may be called at most
 // once per handle, successful or not; Resume the projection for a new handle
 // to run it again.
@@ -238,9 +242,14 @@ func (r *Rebuild) Run(ctx context.Context) error {
 
 // reconcile periodically rehydrates the lifecycle aggregate while the
 // processor runs, stopping the processor once the attempt it builds is no
-// longer the one in flight — or, fail-closed, once the hydrated lifecycle no
-// longer passes validation, in which case the cause is recorded for Run to
-// surface. A tailing processor appends nothing that would surface a terminal
+// longer the one in flight — or, fail-closed, once the lifecycle can no
+// longer vouch for the attempt, in which case the cause is recorded for Run
+// to surface. Both failure shapes are terminal: a hydrated state that fails
+// validation, and a rehydration that itself fails on anything but this
+// run's own cancellation. Hydration applies events incrementally, so an
+// error can strike after earlier events already mutated the aggregate;
+// retrying would tail the processor over state that was never revalidated.
+// A tailing processor appends nothing that would surface a terminal
 // transition recorded elsewhere; self-reconciliation is what bounds a
 // superseded builder's lifetime. Version numbers are never reused, so the
 // reconcile interval bounds waste, not correctness — a not-yet-reconciled
@@ -264,15 +273,20 @@ func (r *Rebuild) reconcile(ctx context.Context, attemptID uuid.UUID, stop conte
 		}
 
 		if err := r.orchestrator.config.Projections.Hydrate(ctx, r.aggregate, nil); err != nil {
-			r.mu.Unlock()
-
 			if ctx.Err() != nil {
+				r.mu.Unlock()
 				return
 			}
 
-			r.orchestrator.log.Error("reconciling lifecycle state", "attempt_id", attemptID, "error", err)
+			r.stopped = true
+			r.failure = fmt.Errorf("reconciling lifecycle state: %w", err)
+			r.mu.Unlock()
 
-			continue
+			r.orchestrator.log.Error("reconciling lifecycle state failed; stopping the processor",
+				"attempt_id", attemptID, "error", err)
+			stop()
+
+			return
 		}
 
 		// Validity precedes the attempt comparison: an inconsistent stream
@@ -349,11 +363,7 @@ func (r *Rebuild) runToCaughtUp(ctx context.Context, proc *processor.Processor, 
 		// can win the race against the catch-up transition; the outcome is
 		// recorded, so the lost append is not an error. A fail-closed stop
 		// surfaces its cause instead.
-		if r.isStopped() {
-			return false, r.stopFailure()
-		}
-
-		return false, err
+		return false, r.processorExit(err)
 	}
 
 	if r.orchestrator.autoPromote {
@@ -388,11 +398,7 @@ func (r *Rebuild) promoteAfterCatchUp(ctx context.Context, stop context.CancelFu
 	// An Abandon can win the race against auto-promotion; the abandonment is
 	// recorded, so the refused promotion is not an error. A fail-closed stop
 	// surfaces its cause instead.
-	if r.isStopped() {
-		return false, r.stopFailure()
-	}
-
-	return false, err
+	return false, r.processorExit(err)
 }
 
 // Promote cuts reads over to the target version by recording Promoted — the
@@ -703,33 +709,23 @@ func staleHandleError(action string, err error) error {
 	return fmt.Errorf("%s recorded, but the rebuild handle is stale; resume the projection before issuing further commands: %w", action, err)
 }
 
-// processorExit maps the processor's exit to Run's result: a processor
-// stopped deliberately — by a command or by the reconcile loop observing the
-// attempt's end — is not an error, but a fail-closed stop over an invalid
-// lifecycle surfaces its cause.
+// processorExit maps an exited processor to Run's result: a recorded
+// fail-closed cause is surfaced, a deliberate stop — by a command or by the
+// reconcile loop observing the attempt's end — is not an error, and anything
+// else reports err. Both fields are read in one critical section: reading
+// them separately would let the reconcile loop record a fail-closed stop
+// between the reads, and the exit would classify as deliberate and clean.
 func (r *Rebuild) processorExit(err error) error {
-	if failure := r.stopFailure(); failure != nil {
+	r.mu.Lock()
+	stopped, failure := r.stopped, r.failure
+	r.mu.Unlock()
+
+	switch {
+	case failure != nil:
 		return failure
-	}
-
-	if r.isStopped() {
+	case stopped:
 		return nil
+	default:
+		return err
 	}
-
-	return err
-}
-
-// stopFailure returns the reconcile loop's fail-closed stop cause, if any.
-func (r *Rebuild) stopFailure() error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	return r.failure
-}
-
-func (r *Rebuild) isStopped() bool {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	return r.stopped
 }
