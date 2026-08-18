@@ -7,6 +7,7 @@ import (
 	"math"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/go-estoria/estoria"
@@ -57,11 +58,20 @@ type Rebuild struct {
 	// so cleanup cannot race a final checkpoint save.
 	processorExited chan struct{}
 
-	// processorReturned is closed the instant the processor's Run returns,
-	// before its exit is published: publication serializes with promotion
-	// through the handle lock, so it cannot witness return order — failure
-	// attribution needs the unserialized fact of whether the processor had
-	// already returned before a wind-down stopped it.
+	// exitOrder arbitrates, atomically, whether the processor's return or a
+	// wind-down's stop came first: the return claims it the instant the
+	// processor's Run returns, a failure path claims it before initiating
+	// its stop, and attribution reads the winner. A check-then-stop sample
+	// would race the return and misattribute an independent processor
+	// failure to the stop; publication cannot arbitrate either — it
+	// serializes with promotion through the handle lock, so it observes
+	// lock order, not return order.
+	exitOrder atomic.Int32
+
+	// processorReturned is closed immediately after the processor's return
+	// claims its exit order, before publication takes the handle lock: an
+	// unserialized observation point for the return itself, used by tests
+	// that must order external actions after the claim.
 	processorReturned chan struct{}
 
 	// stopped records that the processor was stopped deliberately — by a
@@ -82,6 +92,14 @@ type Rebuild struct {
 	// able to stop only the newest of two running processors.
 	ran bool
 }
+
+// Exit-order arbitration states: the zero value means neither the
+// processor's return nor a wind-down's stop has claimed the order yet.
+const (
+	exitOrderRunning int32 = iota
+	exitOrderReturned
+	exitOrderStopped
+)
 
 // A certification is the in-process record that this handle's run drained
 // the build to the head. It binds everything the promotion license depends
@@ -311,6 +329,7 @@ func (r *Rebuild) Run(ctx context.Context) error {
 
 	go func() {
 		err := proc.Run(processorCtx)
+		r.exitOrder.CompareAndSwap(exitOrderRunning, exitOrderReturned)
 		close(returned)
 		r.publishProcessorExit()
 		done <- err
@@ -569,12 +588,11 @@ func cancellationOnly(err, target error) bool {
 func (r *Rebuild) runToCaughtUp(ctx context.Context, proc *processor.Processor, attemptID, runnerID uuid.UUID, stop context.CancelFunc, done <-chan error, reconcileExited <-chan struct{}, started time.Time) (bool, error) {
 	select {
 	case <-ctx.Done():
-		stop()
-		<-done
-
 		// Classification still applies on cancellation: a recorded
-		// fail-closed cause wins over the bare context error.
-		return false, r.classifyExit(reconcileExited, ctx.Err())
+		// fail-closed cause wins over the bare context error — and a result
+		// the processor returned before this stop, carrying more than the
+		// run's own cancellation, must not be discarded behind it.
+		return false, r.classifyExit(reconcileExited, r.windDown(ctx, stop, done, ctx.Err()))
 	case err := <-done:
 		stop()
 
@@ -594,10 +612,7 @@ func (r *Rebuild) runToCaughtUp(ctx context.Context, proc *processor.Processor, 
 
 		return false, r.classifyExit(reconcileExited, exitErr)
 	case err != nil:
-		returnedEarly := r.processorHasReturned()
-
-		stop()
-		exitErr := <-done
+		wound := r.windDown(ctx, stop, done, err)
 
 		// An Abandon — or the reconcile loop observing the attempt's end —
 		// can win the race against the catch-up transition; the outcome is
@@ -606,7 +621,7 @@ func (r *Rebuild) runToCaughtUp(ctx context.Context, proc *processor.Processor, 
 		// surfaces its cause instead.
 		r.recordLostAppend(ctx, attemptID, runnerID, err)
 
-		return false, r.classifyExit(reconcileExited, attributeExit(returnedEarly, exitErr, err))
+		return false, r.classifyExit(reconcileExited, wound)
 	}
 
 	if r.orchestrator.autoPromote {
@@ -676,10 +691,7 @@ func (r *Rebuild) promoteAfterCatchUp(ctx context.Context, attemptID, runnerID u
 		return true, nil
 	}
 
-	returnedEarly := r.processorHasReturned()
-
-	stop()
-	exitErr := <-done
+	wound := r.windDown(ctx, stop, done, err)
 
 	// An Abandon can win the race against auto-promotion; the abandonment is
 	// recorded, so the refused promotion is not an error, and a loss to a
@@ -687,37 +699,55 @@ func (r *Rebuild) promoteAfterCatchUp(ctx context.Context, attemptID, runnerID u
 	// its cause instead.
 	r.recordLostAppend(ctx, attemptID, runnerID, err)
 
-	return false, r.classifyExit(reconcileExited, attributeExit(returnedEarly, exitErr, err))
+	return false, r.classifyExit(reconcileExited, wound)
 }
 
-// processorHasReturned reports whether the processor's Run has already
-// returned — sampled by failure paths before they initiate their stop, so
-// attribution rests on ordering rather than on the shape of the result.
-func (r *Rebuild) processorHasReturned() bool {
-	select {
-	case <-r.processorReturned:
-		return true
-	default:
+// windDown ends a run's processor engagement on behalf of a failure or
+// cancellation path: it claims the exit order for this stop, stops the
+// processor, drains its result, and attributes the outcome against the
+// path's local failure — from the recorded facts, so a result the processor
+// returned first is never discarded behind the local story. Callers pass
+// the attribution through classifyExit, keeping recorded verdicts' precedence.
+func (r *Rebuild) windDown(ctx context.Context, stop context.CancelFunc, done <-chan error, local error) error {
+	returnedFirst := r.claimStopOrder()
+
+	stop()
+
+	return attributeExit(ctx.Err(), returnedFirst, <-done, local)
+}
+
+// claimStopOrder claims the exit order for a wind-down's stop, reporting
+// whether the processor's return had already claimed it. The compare-and-
+// swap is the arbitration: exactly one of the return and the stop
+// transitions the order out of running, so a return landing concurrently is
+// either visibly first or defined to be a consequence of the stop — never
+// sampled into a gap between checking and stopping.
+func (r *Rebuild) claimStopOrder() (returnedFirst bool) {
+	if r.exitOrder.CompareAndSwap(exitOrderRunning, exitOrderStopped) {
 		return false
 	}
+
+	return r.exitOrder.Load() == exitOrderReturned
 }
 
 // attributeExit decides what a failure path reports when a local failure and
-// the processor's result compete, by ordering rather than error shape: only
-// a processor that had already returned before the wind-down stopped it has
-// a result of its own — one stopped by the wind-down reports nothing but the
-// stop's echo, whatever shape its handler gave it, and the local failure
-// governs. An early result that is purely the run's cancellation subsumes
-// the local failure — everything after it is downstream of the dying
-// context; any other early result is a genuinely independent failure and
-// joins the local one.
-func attributeExit(returnedEarly bool, exitErr, local error) error {
-	if !returnedEarly || exitErr == nil {
+// the processor's result compete, from two explicitly recorded facts — exit
+// order and the run context's own state — never from the result's shape
+// alone: a processor whose stop won the order reports nothing but the stop's
+// echo, whatever shape its handler gave it, and the local failure governs. A
+// result that returned first is the processor's own; when the run's context
+// has ended and that result carries nothing but the same cancellation, the
+// documented context error is the story and the local failure is downstream
+// of it; any other first-returned result — including one that merely looks
+// like a cancellation this run never issued — is a genuinely independent
+// failure and joins the local one.
+func attributeExit(ctxErr error, returnedFirst bool, exitErr, local error) error {
+	if !returnedFirst || exitErr == nil {
 		return local
 	}
 
-	if cancellationOnly(exitErr, context.Canceled) || cancellationOnly(exitErr, context.DeadlineExceeded) {
-		return exitErr
+	if ctxErr != nil && cancellationOnly(exitErr, ctxErr) {
+		return ctxErr
 	}
 
 	if local == nil {
@@ -765,7 +795,12 @@ func displacedError(claimant, attemptID uuid.UUID) error {
 // slots are this run's own, durably recorded, even if a retried save's error
 // chain also carries a stale mismatch — and a mismatch naming a different
 // stream, a negative expectation, or one at the version ceiling identifies
-// no slot on this stream.
+// no slot on this stream. An expectation AHEAD of the reported actual
+// version identifies none either: no foreign event occupied the slot when
+// the append failed, so a stream that merely grows to it later would hand
+// classification an unrelated event. Equality stays admissible — a store
+// that cannot see the concurrent tip (PostgreSQL) reports the expectation
+// back as the actual.
 func defeatSlot(lost error, stream typeid.ID) (int64, bool) {
 	if errors.Is(lost, aggregatestore.ErrEventsAppended) {
 		return 0, false
@@ -781,6 +816,10 @@ func defeatSlot(lost error, stream typeid.ID) (int64, bool) {
 	}
 
 	if mismatch.ExpectedVersion < 0 || mismatch.ExpectedVersion == math.MaxInt64 {
+		return 0, false
+	}
+
+	if mismatch.ActualVersion < mismatch.ExpectedVersion {
 		return 0, false
 	}
 

@@ -2433,7 +2433,9 @@ func TestRun_ProcessorDeathDuringLostCatchUpSurfacesItsError(t *testing.T) {
 	}
 
 	// With the append parked, the processor dies on its own: its return is
-	// committed — and visible to attribution — before any stop.
+	// committed — and has claimed its exit order — before any stop, proven
+	// by the return observation rather than the in-handler signal, which
+	// closes before the processor's Run returns and orders nothing.
 	h.model.armHandleFailure()
 	h.appendDomain(1)
 
@@ -2441,6 +2443,12 @@ func TestRun_ProcessorDeathDuringLostCatchUpSurfacesItsError(t *testing.T) {
 	case <-h.model.handleFailed():
 	case <-time.After(waitTimeout):
 		t.Fatal("timed out waiting for the processor to fail")
+	}
+
+	select {
+	case <-lifecycle.ProcessorReturnedForTest(r):
+	case <-time.After(waitTimeout):
+		t.Fatal("timed out waiting for the processor's return")
 	}
 
 	// The parked append loses its slot to a verdict-neutral competitor:
@@ -2460,6 +2468,53 @@ func TestRun_ProcessorDeathDuringLostCatchUpSurfacesItsError(t *testing.T) {
 
 	if !errors.Is(runErr, eventstore.StreamVersionMismatchError{}) {
 		t.Errorf("want the independent unclassifiable loss joined alongside the death, got %v", runErr)
+	}
+}
+
+// TestRun_CancellationAfterProcessorDeathKeepsItsError pins that a
+// cancellation arriving after the processor died with a result of its own
+// does not displace that result. The already-ready result wins the catch-up
+// select here; the cancellation arm's equivalent protection — a first-
+// returned result surviving a dead context — is pinned directly on the
+// shared wind-down helper, whose both-ready select window no external
+// synchronization can hold open.
+func TestRun_CancellationAfterProcessorDeathKeepsItsError(t *testing.T) {
+	t.Parallel()
+
+	h := newHarness(t, lifecycle.WithReconcileInterval(time.Hour))
+	h.model.armGate()
+	h.appendDomain(3)
+
+	r := h.begin("canceled after the processor died")
+
+	cancel, done := runAsync(t, r)
+	waitPhase(t, r, lifecycle.PhaseBuilding)
+
+	// The gated handlers resume onto an armed failure: the processor dies
+	// mid-catch-up, on its own, with the run's context still alive.
+	h.model.armHandleFailure()
+	h.model.releaseGate()
+
+	select {
+	case <-h.model.handleFailed():
+	case <-time.After(waitTimeout):
+		t.Fatal("timed out waiting for the processor to fail")
+	}
+
+	select {
+	case <-lifecycle.ProcessorReturnedForTest(r):
+	case <-time.After(waitTimeout):
+		t.Fatal("timed out waiting for the processor's return")
+	}
+
+	// Both signals may now be ready at the catch-up select; the processor's
+	// own result must surface either way.
+	cancel()
+
+	runErr := waitDone(t, done)
+
+	if runErr == nil || !strings.Contains(runErr.Error(), "handler failure") {
+		t.Fatalf("want the dead processor's own result kept through the cancellation, got %v", runErr)
 	}
 }
 
@@ -2910,6 +2965,15 @@ func TestRun_ProcessorDeathAtCaughtUpSurfacesItsError(t *testing.T) {
 	case <-h.model.handleFailed():
 	case <-time.After(waitTimeout):
 		t.Fatal("timed out waiting for the processor to fail")
+	}
+
+	// The in-handler signal precedes the processor's return; the return
+	// observation orders the release strictly after the return has claimed
+	// its exit order, so attribution provably sees a first-returned result.
+	select {
+	case <-lifecycle.ProcessorReturnedForTest(r):
+	case <-time.After(waitTimeout):
+		t.Fatal("timed out waiting for the processor's return")
 	}
 
 	// The parked promotion loses its append to a competing raw CaughtUp:

@@ -580,12 +580,15 @@ func defeatedRebuildForTest(t *testing.T, toVersion int64) (*Rebuild, uuid.UUID,
 }
 
 // ordersMismatch fabricates the version-mismatch error an "orders" lifecycle
-// append loses with, expecting the given version.
+// append loses with, expecting the given version — in the unknown-tip shape
+// (actual echoing expected) a store that cannot see the concurrent winner
+// reports, so tests past defeatSlot's ahead-of-actual guard still prove the
+// hydration-side checks.
 func ordersMismatch(expected int64) error {
 	return fmt.Errorf("recording caughtup: %w", eventstore.StreamVersionMismatchError{
 		StreamID:        typeid.New(StreamType, StreamUUID("orders")),
 		ExpectedVersion: expected,
-		ActualVersion:   5,
+		ActualVersion:   expected,
 	})
 }
 
@@ -698,6 +701,31 @@ func TestRecordLostAppend_ClassifiesFromTheDefeatedSlot(t *testing.T) {
 			t.Fatalf("want the recorded cause kept over the displacement verdict, got %v", r.failure)
 		}
 	})
+
+	t.Run("an expectation ahead of the actual stream renders no verdict", func(t *testing.T) {
+		t.Parallel()
+
+		// No foreign event occupied the slot when this loss was reported —
+		// the stream has since grown past it, so classifying the now-present
+		// event would read an unrelated later fact as the defeat.
+		r, attempt, runner := defeatedRebuildForTest(t, 3)
+
+		lost := fmt.Errorf("recording caughtup: %w", eventstore.StreamVersionMismatchError{
+			StreamID:        typeid.New(StreamType, StreamUUID("orders")),
+			ExpectedVersion: 3,
+			ActualVersion:   2,
+		})
+
+		r.recordLostAppend(t.Context(), attempt, runner, lost)
+
+		if r.stopped || r.failure != nil {
+			t.Fatalf("want no verdict from an ahead-of-actual expectation, got stopped=%v failure=%v", r.stopped, r.failure)
+		}
+
+		if got := r.aggregate.Version(); got != 3 {
+			t.Errorf("want the handle's view untouched, got version %d", got)
+		}
+	})
 }
 
 // TestClaimDefeat_RequiresTheSlotFold pins the claim site's slot proof: when
@@ -748,13 +776,15 @@ func TestDefeatSlot(t *testing.T) {
 	}{
 		{name: "mismatch for this stream", lost: valid, wantSlot: 5, wantOK: true},
 		{name: "wrapped mismatch", lost: fmt.Errorf("recording caughtup: %w", valid), wantSlot: 5, wantOK: true},
+		{name: "unknown-tip mismatch echoing the expectation", lost: eventstore.StreamVersionMismatchError{StreamID: stream, ExpectedVersion: 4, ActualVersion: 4}, wantSlot: 5, wantOK: true},
 		{name: "no mismatch", lost: errors.New("save refused")},
 		{name: "durable append alone", lost: aggregatestore.ErrEventsAppended},
 		{name: "durable append with a stale mismatch riding along", lost: errors.Join(aggregatestore.ErrEventsAppended, valid)},
-		{name: "mismatch for a different stream", lost: eventstore.StreamVersionMismatchError{StreamID: foreign, ExpectedVersion: 4}},
-		{name: "mismatch with no stream identity", lost: eventstore.StreamVersionMismatchError{ExpectedVersion: 4}},
-		{name: "negative expectation", lost: eventstore.StreamVersionMismatchError{StreamID: stream, ExpectedVersion: -1}},
-		{name: "expectation at the version ceiling", lost: eventstore.StreamVersionMismatchError{StreamID: stream, ExpectedVersion: math.MaxInt64}},
+		{name: "mismatch for a different stream", lost: eventstore.StreamVersionMismatchError{StreamID: foreign, ExpectedVersion: 4, ActualVersion: 4}},
+		{name: "mismatch with no stream identity", lost: eventstore.StreamVersionMismatchError{ExpectedVersion: 4, ActualVersion: 4}},
+		{name: "negative expectation", lost: eventstore.StreamVersionMismatchError{StreamID: stream, ExpectedVersion: -1, ActualVersion: 4}},
+		{name: "expectation at the version ceiling", lost: eventstore.StreamVersionMismatchError{StreamID: stream, ExpectedVersion: math.MaxInt64, ActualVersion: math.MaxInt64}},
+		{name: "expectation ahead of the actual stream", lost: eventstore.StreamVersionMismatchError{StreamID: stream, ExpectedVersion: 4, ActualVersion: 3}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
@@ -768,11 +798,13 @@ func TestDefeatSlot(t *testing.T) {
 	}
 }
 
-// TestAttributeExit pins failure attribution's ordering rule: a processor
-// stopped by the wind-down has no story of its own no matter what shape its
-// handler gave the stop, an early return that is purely the run's
-// cancellation subsumes the local failure, and an early real result is an
-// independent failure joined with the local one.
+// TestAttributeExit pins failure attribution's contract, decided from the
+// two recorded facts — exit order and the run context's state — never from
+// the result's shape alone: a stop-owned exit has no story of its own, a
+// first-returned result that is nothing but the run's own ended context
+// yields the documented context error, and any other first-returned result
+// is an independent failure joined with the local one — including
+// cancellation-shaped results the run never issued.
 func TestAttributeExit(t *testing.T) {
 	t.Parallel()
 
@@ -781,52 +813,78 @@ func TestAttributeExit(t *testing.T) {
 
 	for _, tt := range []struct {
 		name          string
-		returnedEarly bool
+		ctxErr        error
+		returnedFirst bool
 		exitErr       error
 		local         error
 		want          []error
 		wantAbsent    []error
 	}{
 		{
-			name:    "not returned early: the local failure governs",
+			name:    "stop-owned exit: the local failure governs",
 			exitErr: errExit, local: errLocal,
 			want: []error{errLocal}, wantAbsent: []error{errExit},
 		},
 		{
-			name:          "returned early with a real result: independent failures join",
-			returnedEarly: true, exitErr: errExit, local: errLocal,
+			name:   "stop-owned exit on a dead context still yields the local failure",
+			ctxErr: context.Canceled, exitErr: errExit, local: errLocal,
+			want: []error{errLocal}, wantAbsent: []error{errExit},
+		},
+		{
+			name:          "first-returned real result: independent failures join",
+			returnedFirst: true, exitErr: errExit, local: errLocal,
 			want: []error{errExit, errLocal},
 		},
 		{
-			name:          "early pure cancellation subsumes the local failure",
-			returnedEarly: true, exitErr: fmt.Errorf("processing: %w", context.Canceled), local: errLocal,
+			name:          "the run's own cancellation subsumes the local failure",
+			ctxErr:        context.Canceled,
+			returnedFirst: true, exitErr: fmt.Errorf("processing: %w", context.Canceled), local: errLocal,
 			want: []error{context.Canceled}, wantAbsent: []error{errLocal},
 		},
 		{
-			name:          "early deadline expiry subsumes the local failure",
-			returnedEarly: true, exitErr: context.DeadlineExceeded, local: errLocal,
+			name:          "the run's own deadline expiry subsumes the local failure",
+			ctxErr:        context.DeadlineExceeded,
+			returnedFirst: true, exitErr: fmt.Errorf("processing: %w", context.DeadlineExceeded), local: errLocal,
 			want: []error{context.DeadlineExceeded}, wantAbsent: []error{errLocal},
 		},
 		{
-			name:          "early cancellation joined with a real cause is not pure",
-			returnedEarly: true, exitErr: errors.Join(context.Canceled, errExit), local: errLocal,
+			name:          "a cancellation-shaped result on a live context is independent",
+			returnedFirst: true, exitErr: fmt.Errorf("processing: %w", context.Canceled), local: errLocal,
+			want: []error{context.Canceled, errLocal},
+		},
+		{
+			name:          "a deadline result that is not the run's cancellation is independent",
+			ctxErr:        context.Canceled,
+			returnedFirst: true, exitErr: context.DeadlineExceeded, local: errLocal,
+			want: []error{context.DeadlineExceeded, errLocal},
+		},
+		{
+			name:          "a real result on a dead context joins rather than vanishing",
+			ctxErr:        context.Canceled,
+			returnedFirst: true, exitErr: errExit, local: errLocal,
 			want: []error{errExit, errLocal},
 		},
 		{
-			name:          "early nil result: the local failure governs",
-			returnedEarly: true, local: errLocal,
+			name:          "the run's cancellation joined with a real cause is not subsumed",
+			ctxErr:        context.Canceled,
+			returnedFirst: true, exitErr: errors.Join(context.Canceled, errExit), local: errLocal,
+			want: []error{errExit, errLocal},
+		},
+		{
+			name:          "first-returned nil result: the local failure governs",
+			returnedFirst: true, local: errLocal,
 			want: []error{errLocal},
 		},
 		{
-			name:          "early real result with no local failure",
-			returnedEarly: true, exitErr: errExit,
+			name:          "first-returned real result with no local failure",
+			returnedFirst: true, exitErr: errExit,
 			want: []error{errExit},
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			got := attributeExit(tt.returnedEarly, tt.exitErr, tt.local)
+			got := attributeExit(tt.ctxErr, tt.returnedFirst, tt.exitErr, tt.local)
 
 			for _, want := range tt.want {
 				if !errors.Is(got, want) {
@@ -843,20 +901,95 @@ func TestAttributeExit(t *testing.T) {
 	}
 }
 
-// TestPromoteAfterCatchUp_SamplesReturnOrderBeforeStopping pins the sampling
-// discipline behind attribution: the processor's return must be observed
-// BEFORE the wind-down initiates its stop. The fake stop here closes the
-// return signal — exactly what a real stop eventually causes — so a path
-// that sampled after stopping would misread its own stop as an early return
-// and let the fabricated result hijack the genuine local refusal.
-func TestPromoteAfterCatchUp_SamplesReturnOrderBeforeStopping(t *testing.T) {
+// TestWindDown pins the wind-down helper the cancellation, append-failure,
+// and auto-promotion paths share, directly: it must claim the exit order
+// before stopping and attribute the drained result from the recorded facts.
+// The first row is the cancellation arm's discard-prevention — a result the
+// processor returned before the stop, carrying more than the run's own
+// cancellation, survives a dead context instead of vanishing behind it; the
+// arm itself is a single call to this helper, exercised behaviorally by the
+// append-failure and promotion regressions.
+func TestWindDown(t *testing.T) {
+	t.Parallel()
+
+	errExit := errors.New("the processor's own failure")
+	errLocal := errors.New("the local failure")
+
+	canceled := func(t *testing.T) context.Context {
+		t.Helper()
+
+		ctx, cancel := context.WithCancel(t.Context())
+		cancel()
+
+		return ctx
+	}
+
+	t.Run("a first-returned real result survives a dead context", func(t *testing.T) {
+		t.Parallel()
+
+		r := &Rebuild{}
+		r.exitOrder.Store(exitOrderReturned)
+
+		done := make(chan error, 1)
+		done <- errExit
+
+		ctx := canceled(t)
+
+		got := r.windDown(ctx, func() {}, done, ctx.Err())
+
+		if !errors.Is(got, errExit) {
+			t.Fatalf("want the first-returned result kept through the cancellation, got %v", got)
+		}
+	})
+
+	t.Run("a first-returned pure cancellation yields the context error", func(t *testing.T) {
+		t.Parallel()
+
+		r := &Rebuild{}
+		r.exitOrder.Store(exitOrderReturned)
+
+		done := make(chan error, 1)
+		done <- fmt.Errorf("processing: %w", context.Canceled)
+
+		ctx := canceled(t)
+
+		got := r.windDown(ctx, func() {}, done, ctx.Err())
+
+		if !errors.Is(got, context.Canceled) || errors.Is(got, errExit) {
+			t.Fatalf("want the documented context error, got %v", got)
+		}
+	})
+
+	t.Run("a stop-owned result defers to the local failure", func(t *testing.T) {
+		t.Parallel()
+
+		r := &Rebuild{}
+
+		done := make(chan error, 1)
+		done <- errExit
+
+		stop := func() { r.exitOrder.CompareAndSwap(exitOrderRunning, exitOrderReturned) }
+
+		got := r.windDown(t.Context(), stop, done, errLocal)
+
+		if !errors.Is(got, errLocal) || errors.Is(got, errExit) {
+			t.Fatalf("want the local failure to govern a stop-owned exit, got %v", got)
+		}
+	})
+}
+
+// TestPromoteAfterCatchUp_ClaimsExitOrderBeforeStopping pins the arbitration
+// discipline behind attribution: the wind-down must claim the exit order
+// BEFORE initiating its stop. The fake stop here claims the return side —
+// exactly what a stop-caused return eventually does — so a path that claimed
+// after stopping would misread its own stop as a first return and let the
+// fabricated result hijack the genuine local refusal.
+func TestPromoteAfterCatchUp_ClaimsExitOrderBeforeStopping(t *testing.T) {
 	t.Parallel()
 
 	r, certificate := caughtUpRebuildForTest(t, nil)
 
 	// No certificate installed: the promotion refuses locally.
-	r.processorReturned = make(chan struct{})
-
 	fabricated := errors.New("laundered cancellation")
 	done := make(chan error, 1)
 	done <- fabricated
@@ -864,7 +997,7 @@ func TestPromoteAfterCatchUp_SamplesReturnOrderBeforeStopping(t *testing.T) {
 	reconcileExited := make(chan struct{})
 	close(reconcileExited)
 
-	stop := func() { close(r.processorReturned) }
+	stop := func() { r.exitOrder.CompareAndSwap(exitOrderRunning, exitOrderReturned) }
 
 	keepTailing, err := r.promoteAfterCatchUp(t.Context(), certificate.attempt, certificate.runner, stop, done, reconcileExited)
 
@@ -873,7 +1006,7 @@ func TestPromoteAfterCatchUp_SamplesReturnOrderBeforeStopping(t *testing.T) {
 	}
 
 	if !errors.Is(err, ErrNotCertified) {
-		t.Fatalf("want the local refusal to govern a stop-caused exit, got %v", err)
+		t.Fatalf("want the local refusal to govern a stop-owned exit, got %v", err)
 	}
 
 	if errors.Is(err, fabricated) {
