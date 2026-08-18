@@ -1127,7 +1127,7 @@ func TestCheckLifecycleAggregate_RejectsForeignAggregate(t *testing.T) {
 		RunnerClaimed{Attempt: foreignAttempt, Runner: uuid.Must(uuid.NewV4()), At: at},
 		BuildStarted{},
 		CaughtUp{Position: 1, At: at},
-		Promoted{Next: customersV1, At: at},
+		Promoted{Next: customersV1, Revision: 1, At: at},
 	)
 
 	if err := store.Save(t.Context(), aggregate, nil); err != nil {

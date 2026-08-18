@@ -191,13 +191,19 @@ func (e CaughtUp) ApplyTo(s State) State {
 }
 
 // Promoted records the cutover of reads from Previous to Next. This event is
-// the flip: routers and the effect worker derive or cache what it records.
+// the flip: routers and the cutover worker derive or cache what it records.
 // The payload carries both versions so the promotion history is
 // self-contained; Previous is defense in depth, checked against the fold's
 // own Live, not the arbiter — same-stream optimistic concurrency is.
+// Revision is the projection's cutover revision this flip records: the
+// fold's current revision plus one, stamped by the command under the same
+// append that wins the arbitration, so setters order deliveries by it. A
+// promotion recorded outside the revision sequence poisons the fold; the
+// revision never lowers.
 type Promoted struct {
 	Previous projection.ID
 	Next     projection.ID
+	Revision int64
 	At       time.Time
 }
 
@@ -219,9 +225,13 @@ func (e Promoted) ApplyTo(s State) State {
 	case e.Next != s.Attempt.Target:
 		s = s.poison("promotion recorded for a version that was not the attempt's target",
 			"projection", s.Name, "recorded_next", e.Next, "target", s.Attempt.Target)
+	case e.Revision != s.CutoverRevision+1:
+		s = s.poison("promotion recorded outside the cutover revision sequence",
+			"projection", s.Name, "recorded_revision", e.Revision, "revision", s.CutoverRevision)
 	}
 
 	s.Live = e.Next
+	s.CutoverRevision = max(s.CutoverRevision, e.Revision)
 	s.Attempt.Phase = PhasePromoted
 	s.Attempt.PromotedAt = e.At
 
@@ -234,10 +244,15 @@ func (e Promoted) ApplyTo(s State) State {
 // checked against the fold's own Live. A first rebuild has no previous
 // version and so no rollback target: a rollback recorded for an attempt with
 // no previous poisons the fold rather than passing the lineage check on two
-// zero values.
+// zero values. Revision is the projection's cutover revision this reversion
+// records — a rollback is a cutover, ordered by the same counter as
+// promotions, so a setter never mistakes a redelivered older flip for the
+// current route. A rollback recorded outside the revision sequence poisons
+// the fold; the revision never lowers.
 type RolledBack struct {
 	From       projection.ID
 	RevertedTo projection.ID
+	Revision   int64
 	At         time.Time
 }
 
@@ -262,9 +277,13 @@ func (e RolledBack) ApplyTo(s State) State {
 	case e.RevertedTo != s.Attempt.Previous:
 		s = s.poison("rollback recorded to a version that was not the attempt's previous",
 			"projection", s.Name, "recorded_reverted_to", e.RevertedTo, "previous", s.Attempt.Previous)
+	case e.Revision != s.CutoverRevision+1:
+		s = s.poison("rollback recorded outside the cutover revision sequence",
+			"projection", s.Name, "recorded_revision", e.Revision, "revision", s.CutoverRevision)
 	}
 
 	s.Live = e.RevertedTo
+	s.CutoverRevision = max(s.CutoverRevision, e.Revision)
 	s.Attempt = AttemptState{}
 
 	return s

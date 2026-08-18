@@ -44,14 +44,14 @@ func caughtUp() lifecycle.CaughtUp {
 }
 
 func promoted() lifecycle.Promoted {
-	return lifecycle.Promoted{Previous: previousID, Next: targetID, At: promotedAt}
+	return lifecycle.Promoted{Previous: previousID, Next: targetID, Revision: 2, At: promotedAt}
 }
 
 // priorState is the state a v7-over-v6 rebuild is initiated against: v6 live
-// and six versions allocated, so the initiation's lineage fields are
-// consistent with the fold.
+// at cutover revision 1 and six versions allocated, so the initiation's
+// lineage fields are consistent with the fold.
 func priorState() lifecycle.State {
-	return lifecycle.State{Name: "orders", Live: previousID, Allocated: 6}
+	return lifecycle.State{Name: "orders", Live: previousID, CutoverRevision: 1, Allocated: 6}
 }
 
 // fold applies events in order to the prior state, as hydration does.
@@ -94,9 +94,10 @@ func TestRebuildInitiated_ApplyTo(t *testing.T) {
 	got := initiated().ApplyTo(priorState())
 
 	want := lifecycle.State{
-		Name:      "orders",
-		Live:      previousID,
-		Allocated: 7,
+		Name:            "orders",
+		Live:            previousID,
+		CutoverRevision: 1,
+		Allocated:       7,
 		Attempt: lifecycle.AttemptState{
 			ID:          attemptID,
 			Target:      targetID,
@@ -212,6 +213,7 @@ func TestTransitions(t *testing.T) {
 			event: promoted(),
 			want: func(s lifecycle.State) lifecycle.State {
 				s.Live = targetID
+				s.CutoverRevision = 2
 				s.Attempt.Phase = lifecycle.PhasePromoted
 				s.Attempt.PromotedAt = promotedAt
 				return s
@@ -220,9 +222,10 @@ func TestTransitions(t *testing.T) {
 		{
 			name:  "RolledBack reverts the live version and vacates the slot",
 			prior: fold(initiated(), claimed(), lifecycle.BuildStarted{}, caughtUp(), promoted()),
-			event: lifecycle.RolledBack{From: targetID, RevertedTo: previousID, At: promotedAt},
+			event: lifecycle.RolledBack{From: targetID, RevertedTo: previousID, Revision: 3, At: promotedAt},
 			want: func(s lifecycle.State) lifecycle.State {
 				s.Live = previousID
+				s.CutoverRevision = 3
 				s.Attempt = lifecycle.AttemptState{}
 				return s
 			},
@@ -275,7 +278,7 @@ func TestFold_HappyPath(t *testing.T) {
 		lifecycle.RetireStarted{Retiring: previousID, At: retiringAt},
 		lifecycle.PreviousRetired{Retired: previousID})
 
-	want := lifecycle.State{Name: "orders", Live: targetID, Allocated: 7}
+	want := lifecycle.State{Name: "orders", Live: targetID, CutoverRevision: 2, Allocated: 7}
 	if state != want {
 		t.Errorf("want state %+v, got %+v", want, state)
 	}
@@ -287,9 +290,9 @@ func TestFold_NeverReuseAfterRollback(t *testing.T) {
 	t.Parallel()
 
 	state := fold(initiated(), claimed(), lifecycle.BuildStarted{}, caughtUp(), promoted(),
-		lifecycle.RolledBack{From: targetID, RevertedTo: previousID, At: promotedAt})
+		lifecycle.RolledBack{From: targetID, RevertedTo: previousID, Revision: 3, At: promotedAt})
 
-	want := lifecycle.State{Name: "orders", Live: previousID, Allocated: 7}
+	want := lifecycle.State{Name: "orders", Live: previousID, CutoverRevision: 3, Allocated: 7}
 	if state != want {
 		t.Errorf("want state %+v, got %+v", want, state)
 	}

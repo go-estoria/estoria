@@ -23,30 +23,24 @@ const iteratorCloseTimeout = 5 * time.Second
 // A Router answers which version of a named projection serves reads. A
 // read-model repository consults it in logical-cutover deployments, where it
 // composes physical storage names per query. Physical-cutover deployments —
-// a view repoint or alias swap applied by the effect worker — never read it.
+// a view repoint or alias swap applied by the cutover worker — never read it.
 type Router interface {
 	Live(ctx context.Context, name string) (projection.ID, error)
 }
 
-// A LiveSetter is the write side of the cutover. Pointer caches (a postgres
-// row, a redis key) implement it, and the effect worker invokes it for each
-// promotion or rollback, in stream order. The recorded event is
-// authoritative; setters are caches of it.
-type LiveSetter interface {
-	SetLive(ctx context.Context, id projection.ID) error
-}
-
-// A MemoryRouter is an in-memory live-version pointer, for tests and for
-// single-process deployments where the effect worker and the query side
-// share memory.
+// A MemoryRouter is an in-memory managed cutover setter and router, for
+// tests and for single-process deployments where the cutover worker and the
+// query side share memory. Its single mutex is the atomicity the setter
+// contract requires: the served route and the stored revision change
+// together or not at all.
 type MemoryRouter struct {
-	mu   sync.RWMutex
-	live map[string]projection.ID
+	mu      sync.RWMutex
+	applied map[string]Cutover
 }
 
 // NewMemoryRouter creates a new in-memory router.
 func NewMemoryRouter() *MemoryRouter {
-	return &MemoryRouter{live: map[string]projection.ID{}}
+	return &MemoryRouter{applied: map[string]Cutover{}}
 }
 
 // Live returns the live version of the named projection, or ErrNoLiveVersion.
@@ -55,33 +49,65 @@ func (r *MemoryRouter) Live(_ context.Context, name string) (projection.ID, erro
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
-	id, ok := r.live[name]
+	cutover, ok := r.applied[name]
 	if !ok {
 		return projection.ID{}, fmt.Errorf("%q: %w", name, ErrNoLiveVersion)
 	}
 
-	return id, nil
+	return cutover.Live, nil
 }
 
-// SetLive records id as the live version of its projection. The id must be
-// valid per projection.ID.Validate.
+// ApplyCutover applies the cutover if it is newer than the one currently
+// served, per the CutoverSetter contract: higher revisions apply, the same
+// revision must carry the same live version, and lower revisions are stale
+// no-ops. The cutover's live version must be valid per projection.ID.Validate
+// and its revision positive.
 // ctx is accepted for interface compatibility but is not used by this implementation.
-func (r *MemoryRouter) SetLive(_ context.Context, id projection.ID) error {
-	if err := id.Validate(); err != nil {
+func (r *MemoryRouter) ApplyCutover(_ context.Context, cutover Cutover) error {
+	if err := cutover.Live.Validate(); err != nil {
 		return fmt.Errorf("invalid live version: %w", err)
+	}
+
+	if cutover.Revision < 1 {
+		return fmt.Errorf("invalid cutover revision %d for %s", cutover.Revision, cutover.Live)
 	}
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	r.live[id.Name] = id
+	current, ok := r.applied[cutover.Live.Name]
+
+	switch {
+	case !ok || cutover.Revision > current.Revision:
+		r.applied[cutover.Live.Name] = cutover
+	case cutover.Revision == current.Revision && cutover.Live != current.Live:
+		return fmt.Errorf("conflicting cutovers claim revision %d of projection %q: serving %s, delivered %s",
+			cutover.Revision, cutover.Live.Name, current.Live, cutover.Live)
+	default:
+		// The same cutover redelivered, or an older one: already converged.
+	}
 
 	return nil
 }
 
+// AppliedCutover reports the cutover currently serving the named projection's
+// reads, or ErrNoLiveVersion if none was ever applied.
+// ctx is accepted for interface compatibility but is not used by this implementation.
+func (r *MemoryRouter) AppliedCutover(_ context.Context, name string) (Cutover, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	cutover, ok := r.applied[name]
+	if !ok {
+		return Cutover{}, fmt.Errorf("%q: %w", name, ErrNoLiveVersion)
+	}
+
+	return cutover, nil
+}
+
 var (
-	_ Router     = (*MemoryRouter)(nil)
-	_ LiveSetter = (*MemoryRouter)(nil)
+	_ Router        = (*MemoryRouter)(nil)
+	_ CutoverSetter = (*MemoryRouter)(nil)
 )
 
 // A StreamRouter derives the live version of every projection from the
@@ -157,7 +183,7 @@ func (r *StreamRouter) Refresh(ctx context.Context) error {
 }
 
 // advance folds cutover events recorded after the last folded position into
-// the cached live map, through the same semantic decoder the effect worker
+// the cached live map, through the same semantic decoder the cutover worker
 // uses. The fold commits only on success: a read, decode, or validation
 // failure leaves the cache and cursor untouched, so the next call retries
 // from the same position instead of serving a partial fold or silently
@@ -190,10 +216,10 @@ func (r *StreamRouter) advance(ctx context.Context) error {
 			return fmt.Errorf("reading event: %w", err)
 		}
 
-		if id, ok, err := decodeCutover(event); err != nil {
+		if cutover, ok, err := decodeCutover(event); err != nil {
 			return err
 		} else if ok {
-			live[id.Name] = id
+			live[cutover.Live.Name] = cutover.Live
 		}
 
 		if event.GlobalPosition != nil {

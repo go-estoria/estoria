@@ -129,18 +129,18 @@ func bareOrchestrator(t *testing.T, events *esmemory.EventStore, checkpoints che
 	return orchestrator
 }
 
-// startWorker runs an effect worker over the given store for the duration of
-// the test, applying recorded cutovers to the harness router. A worker exit
-// other than the test context's cancellation is a test failure.
+// startWorker runs a cutover worker over the given store for the duration of
+// the test, converging the harness router on recorded cutovers. A worker
+// exit other than the test context's cancellation is a test failure.
 func (h *harness) startWorker(events eventstore.GlobalReader) {
 	h.t.Helper()
 
 	worker, err := lifecycle.NewWorker(events, h.checkpoints,
-		lifecycle.WithLiveSetter(h.router),
+		lifecycle.WithCutoverSetter(h.router),
 		lifecycle.WithWorkerProcessorOptions(processor.WithPollInterval(2*time.Millisecond)),
 	)
 	if err != nil {
-		h.t.Fatalf("creating effect worker: %v", err)
+		h.t.Fatalf("creating cutover worker: %v", err)
 	}
 
 	runErr := make(chan error, 1)
@@ -149,7 +149,7 @@ func (h *harness) startWorker(events eventstore.GlobalReader) {
 
 	h.t.Cleanup(func() {
 		if err := <-runErr; !errors.Is(err, context.Canceled) {
-			h.t.Errorf("effect worker exited unexpectedly: %v", err)
+			h.t.Errorf("cutover worker exited unexpectedly: %v", err)
 		}
 	})
 }
@@ -907,7 +907,7 @@ func TestRetainedHandle_FailsClosedOnPoisonedStream(t *testing.T) {
 		})
 		appendRawLifecycleEvent(t, events, lifecycle.BuildStarted{})
 		appendRawLifecycleEvent(t, events, lifecycle.CaughtUp{Position: 1, At: at})
-		appendRawLifecycleEvent(t, events, lifecycle.Promoted{Previous: customersV1, Next: customersV2, At: at})
+		appendRawLifecycleEvent(t, events, lifecycle.Promoted{Previous: customersV1, Next: customersV2, Revision: 1, At: at})
 	}
 
 	t.Run("retire refused", func(t *testing.T) {
@@ -3451,11 +3451,11 @@ func TestSeparateLifecycleStore(t *testing.T) {
 	}
 
 	worker, err := lifecycle.NewWorker(lifecycleEvents, checkpoints,
-		lifecycle.WithLiveSetter(router),
+		lifecycle.WithCutoverSetter(router),
 		lifecycle.WithWorkerProcessorOptions(processor.WithPollInterval(2*time.Millisecond)),
 	)
 	if err != nil {
-		t.Fatalf("creating effect worker: %v", err)
+		t.Fatalf("creating cutover worker: %v", err)
 	}
 
 	workerErr := make(chan error, 1)
@@ -3464,7 +3464,7 @@ func TestSeparateLifecycleStore(t *testing.T) {
 
 	t.Cleanup(func() {
 		if err := <-workerErr; !errors.Is(err, context.Canceled) {
-			t.Errorf("effect worker exited unexpectedly: %v", err)
+			t.Errorf("cutover worker exited unexpectedly: %v", err)
 		}
 	})
 
@@ -3748,6 +3748,156 @@ func TestSnapshotRoundTrip_PreservesPoison(t *testing.T) {
 	}
 }
 
+// readCutoverRevisions decodes every cutover event in the store in global
+// order, returning each recorded (Live, Revision) pair.
+func readCutoverRevisions(t *testing.T, events *esmemory.EventStore) []lifecycle.Cutover {
+	t.Helper()
+
+	iter, err := events.ReadAll(t.Context(), eventstore.ReadAllOptions{})
+	if err != nil {
+		t.Fatalf("reading events: %v", err)
+	}
+
+	all, err := eventstore.Collect(t.Context(), iter)
+	if err != nil {
+		t.Fatalf("collecting events: %v", err)
+	}
+
+	var cutovers []lifecycle.Cutover
+
+	for _, event := range all {
+		switch event.ID.Type {
+		case lifecycle.Promoted{}.EventType():
+			var promoted lifecycle.Promoted
+			if err := json.Unmarshal(event.Data, &promoted); err != nil {
+				t.Fatalf("decoding promoted event: %v", err)
+			}
+
+			cutovers = append(cutovers, lifecycle.Cutover{Live: promoted.Next, Revision: promoted.Revision})
+		case lifecycle.RolledBack{}.EventType():
+			var rolledBack lifecycle.RolledBack
+			if err := json.Unmarshal(event.Data, &rolledBack); err != nil {
+				t.Fatalf("decoding rolledback event: %v", err)
+			}
+
+			cutovers = append(cutovers, lifecycle.Cutover{Live: rolledBack.RevertedTo, Revision: rolledBack.Revision})
+		}
+	}
+
+	return cutovers
+}
+
+// TestCutoverRevisions_StampAndFoldAcrossAttempts pins the revision as a
+// domain fact end to end: each promotion and rollback records the fold's
+// revision plus one under the arbitrating append — across attempts, with
+// rollback keeping the counter monotonic rather than the version — and the
+// worker converges the routing setter on the recorded pairs.
+func TestCutoverRevisions_StampAndFoldAcrossAttempts(t *testing.T) {
+	t.Parallel()
+
+	h := newHarness(t)
+	h.appendDomain(2)
+
+	v1 := h.promoteFirstVersion()
+
+	r := h.begin("second build, to be rolled back")
+
+	_, done := runAsync(t, r)
+	waitPhase(t, r, lifecycle.PhaseCaughtUp)
+
+	if err := r.Promote(t.Context()); err != nil {
+		t.Fatalf("promoting v2: %v", err)
+	}
+
+	if err := r.Rollback(t.Context()); err != nil {
+		t.Fatalf("rolling back v2: %v", err)
+	}
+
+	if err := waitDone(t, done); err != nil {
+		t.Fatalf("want the rolled-back run to wind down nil, got %v", err)
+	}
+
+	v2 := projection.ID{Name: "orders", Version: 2}
+
+	want := []lifecycle.Cutover{
+		{Live: v1, Revision: 1},
+		{Live: v2, Revision: 2},
+		{Live: v1, Revision: 3},
+	}
+
+	got := readCutoverRevisions(t, h.events)
+	if len(got) != len(want) {
+		t.Fatalf("want cutovers %v recorded, got %v", want, got)
+	}
+
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("want cutovers %v recorded, got %v", want, got)
+		}
+	}
+
+	state, err := h.orchestrator.Get(t.Context(), "orders")
+	if err != nil {
+		t.Fatalf("reloading state: %v", err)
+	}
+
+	if state.Live != v1 || state.CutoverRevision != 3 {
+		t.Errorf("want the fold at (live %s, revision 3), got (%s, %d)", v1, state.Live, state.CutoverRevision)
+	}
+
+	waitFor(t, func() bool {
+		applied, err := h.router.AppliedCutover(t.Context(), "orders")
+		return err == nil && applied == (lifecycle.Cutover{Live: v1, Revision: 3})
+	})
+}
+
+// TestSnapshotRoundTrip_PreservesCutoverRevision pins the revision's
+// persistence through the snapshot layer: a later attempt hydrated from a
+// snapshot must stamp its promotion against the revision the snapshot
+// carried — a payload that dropped it would restart the sequence and poison
+// the fold.
+func TestSnapshotRoundTrip_PreservesCutoverRevision(t *testing.T) {
+	t.Parallel()
+
+	events, snapshots, _, _, orchestrator := newSnapshottingOrchestrator(t,
+		snapshotstore.EventCountSnapshotPolicy{N: 1})
+
+	appendDomainTo(t, events, 2)
+
+	promoteAndComplete(t, orchestrator)
+
+	// The premise: a snapshot exists at the completed head, so the second
+	// attempt hydrates through it rather than replaying the whole stream.
+	if _, err := snapshots.ReadSnapshot(t.Context(), ordersLifecycleStreamID(), snapshotstore.ReadSnapshotOptions{}); err != nil {
+		t.Fatalf("want a snapshot at the completed head, got %v", err)
+	}
+
+	r, err := orchestrator.Begin(t.Context(), "orders", "second build over a snapshot")
+	if err != nil {
+		t.Fatalf("beginning the second rebuild: %v", err)
+	}
+
+	cancel, done := runAsync(t, r)
+	waitPhase(t, r, lifecycle.PhaseCaughtUp)
+
+	if err := r.Promote(t.Context()); err != nil {
+		t.Fatalf("promoting v2: %v", err)
+	}
+
+	got := readCutoverRevisions(t, events)
+
+	wantTail := lifecycle.Cutover{Live: projection.ID{Name: "orders", Version: 2}, Revision: 2}
+	if len(got) != 2 || got[1] != wantTail {
+		t.Fatalf("want the second promotion recorded at revision 2, got %v", got)
+	}
+
+	cancel()
+
+	if err := waitDone(t, done); !errors.Is(err, context.Canceled) {
+		t.Fatalf("want the tailing run to end on its cancellation, got %v", err)
+	}
+}
+
 // foreignLifecycleState returns a structurally valid "customers" lifecycle
 // state: a promoted v2-over-v1 attempt that satisfies every invariant on its
 // own terms. Hydrated at a stream addressed by "orders", only the check
@@ -3758,9 +3908,10 @@ func foreignLifecycleState() lifecycle.State {
 	at := time.Date(2026, 8, 17, 10, 0, 0, 0, time.UTC)
 
 	return lifecycle.State{
-		Name:      "customers",
-		Live:      customersV2,
-		Allocated: 2,
+		Name:            "customers",
+		Live:            customersV2,
+		CutoverRevision: 2,
+		Allocated:       2,
 		Attempt: lifecycle.AttemptState{
 			ID:          uuid.Must(uuid.NewV4()),
 			Target:      customersV2,
@@ -3916,7 +4067,7 @@ func TestResume_RefusesCoveredUpSequences(t *testing.T) {
 		appendRawLifecycleEvent(t, events, lifecycle.RunnerClaimed{Attempt: attempt, Runner: uuid.Must(uuid.NewV4()), At: at})
 		appendRawLifecycleEvent(t, events, lifecycle.BuildStarted{})
 		appendRawLifecycleEvent(t, events, lifecycle.CaughtUp{Position: 1, At: at})
-		appendRawLifecycleEvent(t, events, lifecycle.Promoted{Next: v1, At: at})
+		appendRawLifecycleEvent(t, events, lifecycle.Promoted{Next: v1, Revision: 1, At: at})
 	}
 
 	t.Run("nil-attempt admission then abandoned", func(t *testing.T) {
@@ -3944,8 +4095,9 @@ func TestResume_RefusesCoveredUpSequences(t *testing.T) {
 		promotedV1(t, events)
 
 		// No previous version exists, so RevertedTo's zero value equals the
-		// attempt's zero Previous, and the rollback vacates the slot.
-		appendRawLifecycleEvent(t, events, lifecycle.RolledBack{From: v1, At: at})
+		// attempt's zero Previous, and the rollback vacates the slot; every
+		// other field is coherent, so only the dedicated arm can refuse it.
+		appendRawLifecycleEvent(t, events, lifecycle.RolledBack{From: v1, Revision: 2, At: at})
 
 		if _, err := orchestrator.Resume(t.Context(), "orders"); !errors.Is(err, lifecycle.ErrInvalidState) {
 			t.Errorf("want the first-version rollback refused with ErrInvalidState, got %v", err)

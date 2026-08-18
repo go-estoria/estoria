@@ -26,30 +26,105 @@ func TestMemoryRouter(t *testing.T) {
 		t.Errorf("want ErrNoLiveVersion for a never-promoted projection, got %v", err)
 	}
 
+	if _, err := router.AppliedCutover(t.Context(), "orders"); !errors.Is(err, lifecycle.ErrNoLiveVersion) {
+		t.Errorf("want ErrNoLiveVersion before any cutover was applied, got %v", err)
+	}
+
 	v1 := projection.ID{Name: "orders", Version: 1}
-	if err := router.SetLive(t.Context(), v1); err != nil {
-		t.Fatalf("setting live version: %v", err)
+	if err := router.ApplyCutover(t.Context(), lifecycle.Cutover{Live: v1, Revision: 1}); err != nil {
+		t.Fatalf("applying cutover: %v", err)
 	}
 
 	if got, err := router.Live(t.Context(), "orders"); err != nil || got != v1 {
 		t.Errorf("want live version %s, got %s (%v)", v1, got, err)
 	}
 
+	if got, err := router.AppliedCutover(t.Context(), "orders"); err != nil || got != (lifecycle.Cutover{Live: v1, Revision: 1}) {
+		t.Errorf("want the applied cutover reported, got %+v (%v)", got, err)
+	}
+
 	v2 := projection.ID{Name: "orders", Version: 2}
-	if err := router.SetLive(t.Context(), v2); err != nil {
-		t.Fatalf("setting live version: %v", err)
+	if err := router.ApplyCutover(t.Context(), lifecycle.Cutover{Live: v2, Revision: 2}); err != nil {
+		t.Fatalf("applying cutover: %v", err)
 	}
 
 	if got, _ := router.Live(t.Context(), "orders"); got != v2 {
-		t.Errorf("want live version %s after overwrite, got %s", v2, got)
+		t.Errorf("want live version %s after the newer cutover, got %s", v2, got)
+	}
+}
+
+// TestMemoryRouter_ApplyCutoverContract pins the apply-if-newer semantics the
+// CutoverSetter contract requires: higher revisions apply, redelivered and
+// older cutovers are no-ops, an equal revision must carry the same live
+// version, and malformed cutovers are refused without touching the route.
+func TestMemoryRouter_ApplyCutoverContract(t *testing.T) {
+	t.Parallel()
+
+	v1 := projection.ID{Name: "orders", Version: 1}
+	v2 := projection.ID{Name: "orders", Version: 2}
+	served := lifecycle.Cutover{Live: v2, Revision: 2}
+
+	for _, tt := range []struct {
+		name    string
+		deliver lifecycle.Cutover
+		want    lifecycle.Cutover // the route after the delivery
+		wantErr bool
+	}{
+		{name: "a higher revision applies", deliver: lifecycle.Cutover{Live: v1, Revision: 3}, want: lifecycle.Cutover{Live: v1, Revision: 3}},
+		{name: "the served cutover redelivered is an idempotent no-op", deliver: served, want: served},
+		{name: "an older cutover is a stale no-op", deliver: lifecycle.Cutover{Live: v1, Revision: 1}, want: served},
+		{name: "a conflicting cutover at the served revision is corruption", deliver: lifecycle.Cutover{Live: v1, Revision: 2}, want: served, wantErr: true},
+		{name: "an invalid live version is refused", deliver: lifecycle.Cutover{Live: projection.ID{Name: "Bad Name", Version: 1}, Revision: 9}, want: served, wantErr: true},
+		{name: "a non-positive revision is refused", deliver: lifecycle.Cutover{Live: v1, Revision: 0}, want: served, wantErr: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			router := lifecycle.NewMemoryRouter()
+			if err := router.ApplyCutover(t.Context(), served); err != nil {
+				t.Fatalf("seeding the served cutover: %v", err)
+			}
+
+			err := router.ApplyCutover(t.Context(), tt.deliver)
+			if tt.wantErr && err == nil {
+				t.Fatal("want the delivery refused, got nil")
+			} else if !tt.wantErr && err != nil {
+				t.Fatalf("want the delivery absorbed, got %v", err)
+			}
+
+			if got, err := router.AppliedCutover(t.Context(), "orders"); err != nil || got != tt.want {
+				t.Errorf("want the route serving %+v, got %+v (%v)", tt.want, got, err)
+			}
+		})
+	}
+}
+
+// TestMemoryRouter_ConcurrentAppliesConverge exercises the setter's atomicity
+// under contention: interleaved deliveries of every revision in arbitrary
+// order must converge on the highest one, with the (Live, Revision) pair
+// changing together — the race detector patrols the mutex discipline.
+func TestMemoryRouter_ConcurrentAppliesConverge(t *testing.T) {
+	t.Parallel()
+
+	router := lifecycle.NewMemoryRouter()
+
+	const revisions = 32
+
+	var wg sync.WaitGroup
+	for rev := int64(1); rev <= revisions; rev++ {
+		wg.Go(func() {
+			cutover := lifecycle.Cutover{Live: projection.ID{Name: "orders", Version: int(rev)}, Revision: rev}
+			if err := router.ApplyCutover(t.Context(), cutover); err != nil {
+				t.Errorf("applying cutover %+v: %v", cutover, err)
+			}
+		})
 	}
 
-	if err := router.SetLive(t.Context(), projection.ID{Name: "Bad Name", Version: 1}); err == nil {
-		t.Error("want an invalid live version refused, got nil")
-	}
+	wg.Wait()
 
-	if got, _ := router.Live(t.Context(), "orders"); got != v2 {
-		t.Errorf("want the refused set to leave %s live, got %s", v2, got)
+	want := lifecycle.Cutover{Live: projection.ID{Name: "orders", Version: revisions}, Revision: revisions}
+	if got, err := router.AppliedCutover(t.Context(), "orders"); err != nil || got != want {
+		t.Errorf("want the route converged on %+v, got %+v (%v)", want, got, err)
 	}
 }
 
@@ -216,9 +291,9 @@ func TestStreamRouter_RefreshInterval(t *testing.T) {
 }
 
 // TestStreamRouter_RejectsInvalidCutovers pins the fold's semantic decode: a
-// cutover recording an invalid projection ID, or living on a stream its
-// projection's name does not derive, fails the fold on every attempt — and
-// the failed fold commits nothing.
+// cutover recording an invalid projection ID or a non-positive revision, or
+// living on a stream its projection's name does not derive, fails the fold
+// on every attempt — and the failed fold commits nothing.
 func TestStreamRouter_RejectsInvalidCutovers(t *testing.T) {
 	t.Parallel()
 
@@ -226,16 +301,25 @@ func TestStreamRouter_RejectsInvalidCutovers(t *testing.T) {
 		name     string
 		streamID func() typeid.ID
 		next     projection.ID
+		revision int64
 	}{
 		{
 			name:     "invalid live version",
 			streamID: func() typeid.ID { return typeid.ID{Type: lifecycle.StreamType, UUID: lifecycle.StreamUUID("orders")} },
 			next:     projection.ID{Name: "orders", Version: 0},
+			revision: 1,
+		},
+		{
+			name:     "invalid cutover revision",
+			streamID: func() typeid.ID { return typeid.ID{Type: lifecycle.StreamType, UUID: lifecycle.StreamUUID("orders")} },
+			next:     projection.ID{Name: "orders", Version: 1},
+			revision: 0,
 		},
 		{
 			name:     "foreignly addressed stream",
 			streamID: func() typeid.ID { return typeid.NewV4(lifecycle.StreamType) },
 			next:     projection.ID{Name: "orders", Version: 1},
+			revision: 1,
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
@@ -246,7 +330,7 @@ func TestStreamRouter_RejectsInvalidCutovers(t *testing.T) {
 				t.Fatalf("creating event store: %v", err)
 			}
 
-			data, err := json.Marshal(lifecycle.Promoted{Next: tt.next, At: promotedAt})
+			data, err := json.Marshal(lifecycle.Promoted{Next: tt.next, Revision: tt.revision, At: promotedAt})
 			if err != nil {
 				t.Fatalf("marshaling promoted event: %v", err)
 			}
@@ -357,7 +441,8 @@ func TestStreamRouter_ReportsCorruptCutoverEvent(t *testing.T) {
 
 // recordCutover appends a full promoted attempt to next's lifecycle stream —
 // creating the aggregate on the projection's first rebuild, loading it
-// afterwards — optionally rolled back to previous.
+// afterwards — optionally rolled back to previous. Revisions continue the
+// loaded fold's cutover sequence, as the commands stamp them.
 func recordCutover(t *testing.T, store aggregatestore.Store[lifecycle.State], next, previous projection.ID, rollBack bool) {
 	t.Helper()
 
@@ -368,15 +453,19 @@ func recordCutover(t *testing.T, store aggregatestore.Store[lifecycle.State], ne
 		t.Fatalf("loading lifecycle aggregate: %v", err)
 	}
 
+	attempt := uuid.Must(uuid.NewV4())
+	revision := aggregate.State().CutoverRevision
+
 	aggregate.Append(
-		lifecycle.RebuildInitiated{Attempt: uuid.Must(uuid.NewV4()), Target: next, Previous: previous, Reason: "router test", At: initiatedAt},
+		lifecycle.RebuildInitiated{Attempt: attempt, Target: next, Previous: previous, Reason: "router test", At: initiatedAt},
+		lifecycle.RunnerClaimed{Attempt: attempt, Runner: uuid.Must(uuid.NewV4()), At: initiatedAt},
 		lifecycle.BuildStarted{},
 		lifecycle.CaughtUp{Position: 1, At: caughtUpAt},
-		lifecycle.Promoted{Previous: previous, Next: next, At: promotedAt},
+		lifecycle.Promoted{Previous: previous, Next: next, Revision: revision + 1, At: promotedAt},
 	)
 
 	if rollBack {
-		aggregate.Append(lifecycle.RolledBack{From: next, RevertedTo: previous, At: promotedAt})
+		aggregate.Append(lifecycle.RolledBack{From: next, RevertedTo: previous, Revision: revision + 2, At: promotedAt})
 	}
 
 	if err := store.Save(t.Context(), aggregate, nil); err != nil {

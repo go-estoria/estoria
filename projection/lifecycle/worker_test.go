@@ -35,44 +35,60 @@ func startWorkerForTest(t *testing.T, worker *lifecycle.Worker) {
 	})
 }
 
-// recordingEffect captures every live version it is applied with, failing
-// while armed to fail.
-type recordingEffect struct {
+// recordingSetter captures every cutover delivered to it, in order, failing
+// while armed to fail. It deliberately does not de-duplicate: worker tests
+// assert the exact delivery sequence, and contract semantics are pinned on
+// MemoryRouter.
+type recordingSetter struct {
 	mu      sync.Mutex
-	applied []projection.ID
+	applied []lifecycle.Cutover
 	fail    bool
 }
 
-func (e *recordingEffect) apply(_ context.Context, live projection.ID) error {
-	e.mu.Lock()
-	defer e.mu.Unlock()
+func (s *recordingSetter) ApplyCutover(_ context.Context, cutover lifecycle.Cutover) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
-	if e.fail {
-		return errors.New("effect failed")
+	if s.fail {
+		return errors.New("delivery failed")
 	}
 
-	e.applied = append(e.applied, live)
+	s.applied = append(s.applied, cutover)
 
 	return nil
 }
 
-func (e *recordingEffect) setFail(fail bool) {
-	e.mu.Lock()
-	defer e.mu.Unlock()
+func (s *recordingSetter) AppliedCutover(_ context.Context, name string) (lifecycle.Cutover, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
-	e.fail = fail
+	for i := len(s.applied) - 1; i >= 0; i-- {
+		if s.applied[i].Live.Name == name {
+			return s.applied[i], nil
+		}
+	}
+
+	return lifecycle.Cutover{}, lifecycle.ErrNoLiveVersion
 }
 
-func (e *recordingEffect) seen() []projection.ID {
-	e.mu.Lock()
-	defer e.mu.Unlock()
+func (s *recordingSetter) setFail(fail bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
-	return append([]projection.ID(nil), e.applied...)
+	s.fail = fail
+}
+
+func (s *recordingSetter) seen() []lifecycle.Cutover {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return append([]lifecycle.Cutover(nil), s.applied...)
 }
 
 // TestWorker_AppliesCutoversInStreamOrder pins the worker's core guarantee:
-// every promotion and rollback is applied, in the order the lifecycle
-// streams recorded them, ending on the recorded truth.
+// every promotion and rollback is delivered with its recorded revision, in
+// the order the lifecycle streams recorded them, ending on the recorded
+// truth.
 func TestWorker_AppliesCutoversInStreamOrder(t *testing.T) {
 	t.Parallel()
 
@@ -89,12 +105,12 @@ func TestWorker_AppliesCutoversInStreamOrder(t *testing.T) {
 	recordCutover(t, projections, ordersV1, projection.ID{}, false)
 	recordCutover(t, projections, ordersV2, ordersV1, true)
 
-	effect := &recordingEffect{}
+	recorder := &recordingSetter{}
 	router := lifecycle.NewMemoryRouter()
 
 	worker, err := lifecycle.NewWorker(events, cpmemory.NewCheckpointStore(),
-		lifecycle.WithEffect(effect.apply),
-		lifecycle.WithLiveSetter(router),
+		lifecycle.WithCutoverSetter(recorder),
+		lifecycle.WithCutoverSetter(router),
 		lifecycle.WithWorkerProcessorOptions(processor.WithPollInterval(2*time.Millisecond)),
 	)
 	if err != nil {
@@ -103,24 +119,32 @@ func TestWorker_AppliesCutoversInStreamOrder(t *testing.T) {
 
 	startWorkerForTest(t, worker)
 
-	waitFor(t, func() bool { return len(effect.seen()) == 3 })
+	waitFor(t, func() bool { return len(recorder.seen()) == 3 })
 
-	want := []projection.ID{ordersV1, ordersV2, ordersV1}
-	for i, id := range effect.seen() {
-		if id != want[i] {
-			t.Fatalf("want cutovers applied in stream order %v, got %v", want, effect.seen())
+	want := []lifecycle.Cutover{
+		{Live: ordersV1, Revision: 1},
+		{Live: ordersV2, Revision: 2},
+		{Live: ordersV1, Revision: 3},
+	}
+	for i, cutover := range recorder.seen() {
+		if cutover != want[i] {
+			t.Fatalf("want cutovers delivered in stream order %v, got %v", want, recorder.seen())
 		}
 	}
 
 	if live, err := router.Live(t.Context(), "orders"); err != nil || live != ordersV1 {
 		t.Errorf("want the router ending on the recorded truth %s, got %s (%v)", ordersV1, live, err)
 	}
+
+	if applied, err := router.AppliedCutover(t.Context(), "orders"); err != nil || applied != (lifecycle.Cutover{Live: ordersV1, Revision: 3}) {
+		t.Errorf("want the router vouching for the final cutover, got %+v (%v)", applied, err)
+	}
 }
 
-// TestWorker_FailedEffectStopsAndResumes pins stop-on-error delivery: a
-// failed effect stops the worker with the cutover still ahead of the
+// TestWorker_FailedDeliveryStopsAndResumes pins stop-on-error delivery: a
+// failed delivery stops the worker with the cutover still ahead of the
 // checkpoint, and a fresh worker over the same checkpoint redelivers it.
-func TestWorker_FailedEffectStopsAndResumes(t *testing.T) {
+func TestWorker_FailedDeliveryStopsAndResumes(t *testing.T) {
 	t.Parallel()
 
 	events := newEventStore(t)
@@ -134,11 +158,11 @@ func TestWorker_FailedEffectStopsAndResumes(t *testing.T) {
 	recordCutover(t, projections, ordersV1, projection.ID{}, false)
 
 	checkpoints := cpmemory.NewCheckpointStore()
-	effect := &recordingEffect{}
-	effect.setFail(true)
+	setter := &recordingSetter{}
+	setter.setFail(true)
 
 	first, err := lifecycle.NewWorker(events, checkpoints,
-		lifecycle.WithEffect(effect.apply),
+		lifecycle.WithCutoverSetter(setter),
 		lifecycle.WithWorkerProcessorOptions(processor.WithPollInterval(2*time.Millisecond)),
 	)
 	if err != nil {
@@ -146,18 +170,18 @@ func TestWorker_FailedEffectStopsAndResumes(t *testing.T) {
 	}
 
 	if err := first.Run(t.Context()); err == nil {
-		t.Fatal("want the failed effect to stop the worker, got nil")
+		t.Fatal("want the failed delivery to stop the worker, got nil")
 	}
 
-	if got := len(effect.seen()); got != 0 {
-		t.Fatalf("want no effect applied while failing, got %d", got)
+	if got := len(setter.seen()); got != 0 {
+		t.Fatalf("want no cutover applied while failing, got %d", got)
 	}
 
 	// A fresh worker resumes from the checkpoint and redelivers the cutover.
-	effect.setFail(false)
+	setter.setFail(false)
 
 	second, err := lifecycle.NewWorker(events, checkpoints,
-		lifecycle.WithEffect(effect.apply),
+		lifecycle.WithCutoverSetter(setter),
 		lifecycle.WithWorkerProcessorOptions(processor.WithPollInterval(2*time.Millisecond)),
 	)
 	if err != nil {
@@ -166,16 +190,16 @@ func TestWorker_FailedEffectStopsAndResumes(t *testing.T) {
 
 	startWorkerForTest(t, second)
 
-	waitFor(t, func() bool { return len(effect.seen()) == 1 })
+	waitFor(t, func() bool { return len(setter.seen()) == 1 })
 
-	if got := effect.seen()[0]; got != ordersV1 {
-		t.Errorf("want the redelivered cutover for %s, got %s", ordersV1, got)
+	if got := setter.seen()[0]; got != (lifecycle.Cutover{Live: ordersV1, Revision: 1}) {
+		t.Errorf("want the redelivered cutover for %s at revision 1, got %+v", ordersV1, got)
 	}
 }
 
 // TestWorker_StopOnErrorCannotBeDisabled pins the retry-contract pin: a
 // caller-supplied WithContinueOnHandlerError(true) is overridden, so a
-// failed effect still stops the worker instead of being skipped, and the
+// failed delivery still stops the worker instead of being skipped, and the
 // unadvanced checkpoint redelivers the cutover to a fresh worker.
 func TestWorker_StopOnErrorCannotBeDisabled(t *testing.T) {
 	t.Parallel()
@@ -191,11 +215,11 @@ func TestWorker_StopOnErrorCannotBeDisabled(t *testing.T) {
 	recordCutover(t, projections, ordersV1, projection.ID{}, false)
 
 	checkpoints := cpmemory.NewCheckpointStore()
-	effect := &recordingEffect{}
-	effect.setFail(true)
+	setter := &recordingSetter{}
+	setter.setFail(true)
 
 	hostile, err := lifecycle.NewWorker(events, checkpoints,
-		lifecycle.WithEffect(effect.apply),
+		lifecycle.WithCutoverSetter(setter),
 		lifecycle.WithWorkerProcessorOptions(
 			processor.WithContinueOnHandlerError(true),
 			processor.WithPollInterval(2*time.Millisecond),
@@ -206,25 +230,25 @@ func TestWorker_StopOnErrorCannotBeDisabled(t *testing.T) {
 	}
 
 	// The deadline bounds the failure mode: were the forwarded option to
-	// win, the worker would skip the failed effect and tail until the
-	// deadline instead of returning the effect error.
+	// win, the worker would skip the failed delivery and tail until the
+	// deadline instead of returning the delivery error.
 	runCtx, cancel := context.WithTimeout(t.Context(), 250*time.Millisecond)
 	defer cancel()
 
 	if err := hostile.Run(runCtx); err == nil || errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("want the failed effect to stop the worker despite the forwarded option, got %v", err)
+		t.Fatalf("want the failed delivery to stop the worker despite the forwarded option, got %v", err)
 	}
 
-	if got := len(effect.seen()); got != 0 {
-		t.Fatalf("want no effect applied while failing, got %d", got)
+	if got := len(setter.seen()); got != 0 {
+		t.Fatalf("want no cutover applied while failing, got %d", got)
 	}
 
 	// The failed cutover stayed ahead of the checkpoint: a fresh worker
 	// redelivers it rather than resuming past it.
-	effect.setFail(false)
+	setter.setFail(false)
 
 	second, err := lifecycle.NewWorker(events, checkpoints,
-		lifecycle.WithEffect(effect.apply),
+		lifecycle.WithCutoverSetter(setter),
 		lifecycle.WithWorkerProcessorOptions(processor.WithPollInterval(2*time.Millisecond)),
 	)
 	if err != nil {
@@ -233,25 +257,26 @@ func TestWorker_StopOnErrorCannotBeDisabled(t *testing.T) {
 
 	startWorkerForTest(t, second)
 
-	waitFor(t, func() bool { return len(effect.seen()) == 1 })
+	waitFor(t, func() bool { return len(setter.seen()) == 1 })
 
-	if got := effect.seen()[0]; got != ordersV1 {
-		t.Errorf("want the redelivered cutover for %s, got %s", ordersV1, got)
+	if got := setter.seen()[0]; got != (lifecycle.Cutover{Live: ordersV1, Revision: 1}) {
+		t.Errorf("want the redelivered cutover for %s at revision 1, got %+v", ordersV1, got)
 	}
 }
 
 // TestWorker_RejectsInvalidCutovers pins the worker's semantic decode: a
-// cutover event that decodes but records an invalid projection ID, or that
-// lives on a stream its projection's name does not derive, stops the worker
-// — the reserved namespace is a guardrail, and effects must not act on
-// infrastructure state that fails its own scheme.
+// cutover event that decodes but records an invalid projection ID or a
+// non-positive revision, or that lives on a stream its projection's name
+// does not derive, stops the worker — the reserved namespace is a guardrail,
+// and setters must not act on infrastructure state that fails its own
+// scheme.
 func TestWorker_RejectsInvalidCutovers(t *testing.T) {
 	t.Parallel()
 
-	appendRawCutover := func(t *testing.T, events *esmemory.EventStore, streamID typeid.ID, next projection.ID) {
+	appendRawCutover := func(t *testing.T, events *esmemory.EventStore, streamID typeid.ID, next projection.ID, revision int64) {
 		t.Helper()
 
-		data, err := json.Marshal(lifecycle.Promoted{Next: next, At: promotedAt})
+		data, err := json.Marshal(lifecycle.Promoted{Next: next, Revision: revision, At: promotedAt})
 		if err != nil {
 			t.Fatalf("marshaling promoted event: %v", err)
 		}
@@ -269,28 +294,37 @@ func TestWorker_RejectsInvalidCutovers(t *testing.T) {
 		name     string
 		streamID typeid.ID
 		next     projection.ID
+		revision int64
 	}{
 		{
 			name:     "invalid live version",
 			streamID: typeid.ID{Type: lifecycle.StreamType, UUID: lifecycle.StreamUUID("orders")},
 			next:     projection.ID{Name: "orders", Version: 0},
+			revision: 1,
+		},
+		{
+			name:     "invalid cutover revision",
+			streamID: typeid.ID{Type: lifecycle.StreamType, UUID: lifecycle.StreamUUID("orders")},
+			next:     projection.ID{Name: "orders", Version: 1},
+			revision: 0,
 		},
 		{
 			name:     "foreignly addressed stream",
 			streamID: typeid.NewV4(lifecycle.StreamType),
 			next:     projection.ID{Name: "orders", Version: 1},
+			revision: 1,
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
 			events := newEventStore(t)
-			appendRawCutover(t, events, tt.streamID, tt.next)
+			appendRawCutover(t, events, tt.streamID, tt.next, tt.revision)
 
-			effect := &recordingEffect{}
+			setter := &recordingSetter{}
 
 			worker, err := lifecycle.NewWorker(events, cpmemory.NewCheckpointStore(),
-				lifecycle.WithEffect(effect.apply),
+				lifecycle.WithCutoverSetter(setter),
 				lifecycle.WithWorkerProcessorOptions(processor.WithPollInterval(2*time.Millisecond)),
 			)
 			if err != nil {
@@ -307,8 +341,8 @@ func TestWorker_RejectsInvalidCutovers(t *testing.T) {
 				t.Fatalf("want the invalid cutover to stop the worker, got %v", err)
 			}
 
-			if got := effect.seen(); len(got) != 0 {
-				t.Errorf("want no effects from an invalid cutover, got %v", got)
+			if got := setter.seen(); len(got) != 0 {
+				t.Errorf("want no deliveries from an invalid cutover, got %v", got)
 			}
 		})
 	}
@@ -343,11 +377,11 @@ func TestWorker_IgnoresNonCutoverEvents(t *testing.T) {
 		t.Fatalf("appending domain event: %v", err)
 	}
 
-	effect := &recordingEffect{}
+	setter := &recordingSetter{}
 	checkpoints := cpmemory.NewCheckpointStore()
 
 	worker, err := lifecycle.NewWorker(events, checkpoints,
-		lifecycle.WithEffect(effect.apply),
+		lifecycle.WithCutoverSetter(setter),
 		lifecycle.WithWorkerProcessorOptions(processor.WithPollInterval(2*time.Millisecond)),
 	)
 	if err != nil {
@@ -362,8 +396,8 @@ func TestWorker_IgnoresNonCutoverEvents(t *testing.T) {
 		return err == nil
 	})
 
-	if got := effect.seen(); len(got) != 0 {
-		t.Errorf("want no effects for non-cutover events, got %v", got)
+	if got := setter.seen(); len(got) != 0 {
+		t.Errorf("want no deliveries for non-cutover events, got %v", got)
 	}
 }
 
@@ -385,10 +419,10 @@ func TestWorker_CustomCheckpointIdentity(t *testing.T) {
 
 	custom := projection.ID{Name: "alias_swapper", Version: 1}
 	checkpoints := cpmemory.NewCheckpointStore()
-	effect := &recordingEffect{}
+	setter := &recordingSetter{}
 
 	worker, err := lifecycle.NewWorker(events, checkpoints,
-		lifecycle.WithEffect(effect.apply),
+		lifecycle.WithCutoverSetter(setter),
 		lifecycle.WithCheckpointIdentity(custom),
 		lifecycle.WithWorkerProcessorOptions(processor.WithPollInterval(2*time.Millisecond)),
 	)
@@ -398,7 +432,7 @@ func TestWorker_CustomCheckpointIdentity(t *testing.T) {
 
 	startWorkerForTest(t, worker)
 
-	waitFor(t, func() bool { return len(effect.seen()) == 1 })
+	waitFor(t, func() bool { return len(setter.seen()) == 1 })
 
 	if _, err := checkpoints.Load(t.Context(), custom); err != nil {
 		t.Errorf("want the worker checkpointed under %s, got %v", custom, err)
@@ -406,6 +440,71 @@ func TestWorker_CustomCheckpointIdentity(t *testing.T) {
 
 	if _, err := checkpoints.Load(t.Context(), lifecycle.DefaultWorkerCheckpointID); !errors.Is(err, checkpointstore.ErrCheckpointNotFound) {
 		t.Errorf("want no checkpoint under the default identity, got %v", err)
+	}
+}
+
+// TestWorker_RedeliveryConvergesWithoutError pins the delivery half of the
+// apply-if-newer contract end to end: a second worker with no progress of
+// its own replays the entire cutover history against an already-converged
+// setter, every delivery is a stale or idempotent no-op, and the worker
+// tails on rather than wedging — redelivery is never an error.
+func TestWorker_RedeliveryConvergesWithoutError(t *testing.T) {
+	t.Parallel()
+
+	events := newEventStore(t)
+
+	projections, err := lifecycle.NewStore(events)
+	if err != nil {
+		t.Fatalf("creating lifecycle store: %v", err)
+	}
+
+	ordersV1 := projection.ID{Name: "orders", Version: 1}
+	ordersV2 := projection.ID{Name: "orders", Version: 2}
+
+	recordCutover(t, projections, ordersV1, projection.ID{}, false)
+	recordCutover(t, projections, ordersV2, ordersV1, true)
+
+	router := lifecycle.NewMemoryRouter()
+	recorder := &recordingSetter{}
+
+	first, err := lifecycle.NewWorker(events, cpmemory.NewCheckpointStore(),
+		lifecycle.WithCutoverSetter(router),
+		lifecycle.WithCutoverSetter(recorder),
+		lifecycle.WithWorkerProcessorOptions(processor.WithPollInterval(2*time.Millisecond)),
+	)
+	if err != nil {
+		t.Fatalf("creating worker: %v", err)
+	}
+
+	startWorkerForTest(t, first)
+
+	waitFor(t, func() bool { return len(recorder.seen()) == 3 })
+
+	converged, err := router.AppliedCutover(t.Context(), "orders")
+	if err != nil || converged != (lifecycle.Cutover{Live: ordersV1, Revision: 3}) {
+		t.Fatalf("want the router converged on the final cutover, got %+v (%v)", converged, err)
+	}
+
+	// The second worker has a fresh checkpoint store: it replays the whole
+	// history against the converged router. A delivery error would stop it
+	// before the tally below completes.
+	tally := &recordingSetter{}
+
+	second, err := lifecycle.NewWorker(events, cpmemory.NewCheckpointStore(),
+		lifecycle.WithCutoverSetter(router),
+		lifecycle.WithCutoverSetter(tally),
+		lifecycle.WithWorkerProcessorOptions(processor.WithPollInterval(2*time.Millisecond)),
+	)
+	if err != nil {
+		t.Fatalf("creating second worker: %v", err)
+	}
+
+	startWorkerForTest(t, second)
+
+	waitFor(t, func() bool { return len(tally.seen()) == 3 })
+
+	if applied, err := router.AppliedCutover(t.Context(), "orders"); err != nil || applied != converged {
+		t.Errorf("want the redelivered history to leave the converged route %+v untouched, got %+v (%v)", converged, applied, err)
 	}
 }
 
@@ -419,15 +518,14 @@ func TestNewWorker_Validation(t *testing.T) {
 		name string
 		opts []lifecycle.WorkerOption
 	}{
-		{"rejects a worker with no effects", nil},
-		{"rejects a nil effect", []lifecycle.WorkerOption{lifecycle.WithEffect(nil)}},
-		{"rejects a nil live setter", []lifecycle.WorkerOption{lifecycle.WithLiveSetter(nil)}},
+		{"rejects a worker with no setters", nil},
+		{"rejects a nil cutover setter", []lifecycle.WorkerOption{lifecycle.WithCutoverSetter(nil)}},
 		{"rejects a nil processor option", []lifecycle.WorkerOption{
-			lifecycle.WithEffect((&recordingEffect{}).apply),
+			lifecycle.WithCutoverSetter(&recordingSetter{}),
 			lifecycle.WithWorkerProcessorOptions(nil),
 		}},
 		{"rejects an invalid checkpoint identity", []lifecycle.WorkerOption{
-			lifecycle.WithEffect((&recordingEffect{}).apply),
+			lifecycle.WithCutoverSetter(&recordingSetter{}),
 			lifecycle.WithCheckpointIdentity(projection.ID{Name: "Bad Name", Version: 1}),
 		}},
 		{"rejects a nil option", []lifecycle.WorkerOption{nil}},

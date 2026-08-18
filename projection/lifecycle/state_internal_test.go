@@ -23,9 +23,10 @@ var (
 // cut over to the target; every phase past created records a claimed runner.
 func stateInPhase(phase Phase) State {
 	s := State{
-		Name:      "orders",
-		Live:      ordersV6,
-		Allocated: 7,
+		Name:            "orders",
+		Live:            ordersV6,
+		CutoverRevision: 1,
+		Allocated:       7,
 		Attempt: AttemptState{
 			ID:          internalAttemptID,
 			Target:      ordersV7,
@@ -40,6 +41,7 @@ func stateInPhase(phase Phase) State {
 		s.Attempt = AttemptState{}
 	case PhasePromoted, PhaseRetiring:
 		s.Live = ordersV7
+		s.CutoverRevision = 2
 	case PhaseCreated, PhaseBuilding, PhaseCaughtUp:
 	}
 
@@ -68,6 +70,7 @@ func firstVersionInPhase(phase Phase) State {
 
 	if phase == PhasePromoted || phase == PhaseRetiring {
 		s.Live = v1
+		s.CutoverRevision = 1
 	}
 
 	if phase != PhaseNone && phase != PhaseCreated {
@@ -393,6 +396,58 @@ func TestFold_PoisonBranches(t *testing.T) {
 			applied:    func(*testing.T, State) {},
 		},
 		{
+			name:       "promotion outside the cutover revision sequence",
+			prior:      stateInPhase(PhaseCaughtUp),
+			event:      Promoted{Previous: ordersV6, Next: ordersV7, Revision: 3, At: internalAt},
+			wantReason: "outside the cutover revision sequence",
+			applied: func(t *testing.T, got State) {
+				t.Helper()
+
+				if got.Live != ordersV7 || got.CutoverRevision != 3 {
+					t.Errorf("want the promotion applied with its recorded revision, got %+v", got)
+				}
+			},
+		},
+		{
+			name:       "promotion with a revision that would lower the counter",
+			prior:      stateInPhase(PhaseCaughtUp),
+			event:      Promoted{Previous: ordersV6, Next: ordersV7, Revision: 0, At: internalAt},
+			wantReason: "outside the cutover revision sequence",
+			applied: func(t *testing.T, got State) {
+				t.Helper()
+
+				if got.CutoverRevision != 1 {
+					t.Errorf("want the revision never lowered, got %d", got.CutoverRevision)
+				}
+			},
+		},
+		{
+			name:       "rollback outside the cutover revision sequence",
+			prior:      stateInPhase(PhasePromoted),
+			event:      RolledBack{From: ordersV7, RevertedTo: ordersV6, Revision: 9, At: internalAt},
+			wantReason: "outside the cutover revision sequence",
+			applied: func(t *testing.T, got State) {
+				t.Helper()
+
+				if got.Live != ordersV6 || got.CutoverRevision != 9 {
+					t.Errorf("want the rollback applied with its recorded revision, got %+v", got)
+				}
+			},
+		},
+		{
+			name:       "rollback with a revision that would lower the counter",
+			prior:      stateInPhase(PhasePromoted),
+			event:      RolledBack{From: ordersV7, RevertedTo: ordersV6, Revision: 1, At: internalAt},
+			wantReason: "outside the cutover revision sequence",
+			applied: func(t *testing.T, got State) {
+				t.Helper()
+
+				if got.CutoverRevision != 2 {
+					t.Errorf("want the revision never lowered, got %d", got.CutoverRevision)
+				}
+			},
+		},
+		{
 			name:       "abandonment outside the pre-promotion phases",
 			prior:      stateInPhase(PhasePromoted),
 			event:      Abandoned{Cause: "too late"},
@@ -633,6 +688,47 @@ func TestValidate_ClaimedRunnerRequiredPastCreated(t *testing.T) {
 	}
 }
 
+// TestValidate_CutoverRevisionPairsWithLive pins the pairing invariant: every
+// cutover flips Live to a non-zero version and the first promotion records
+// revision 1, so a live version and a positive revision exist together or
+// not at all — either alone can only come from tampered or reset
+// persistence.
+func TestValidate_CutoverRevisionPairsWithLive(t *testing.T) {
+	t.Parallel()
+
+	t.Run("live version with no revision", func(t *testing.T) {
+		t.Parallel()
+
+		s := stateInPhase(PhaseNone)
+		s.CutoverRevision = 0
+
+		if err := s.validate(); err == nil {
+			t.Error("want a live version without a cutover revision rejected, got nil")
+		}
+	})
+
+	t.Run("revision with no live version", func(t *testing.T) {
+		t.Parallel()
+
+		s := State{Name: "orders", Allocated: 1, CutoverRevision: 1}
+
+		if err := s.validate(); err == nil {
+			t.Error("want a cutover revision without a live version rejected, got nil")
+		}
+	})
+
+	t.Run("negative revision", func(t *testing.T) {
+		t.Parallel()
+
+		s := stateInPhase(PhaseNone)
+		s.CutoverRevision = -1
+
+		if err := s.validate(); err == nil {
+			t.Error("want a negative cutover revision rejected, got nil")
+		}
+	})
+}
+
 // TestValidateSnapshotState_Contract pins the decode-boundary contract
 // directly, independent of what fallback replay would reconstruct: a
 // poisoned payload is accepted — it is valid testimony of a poisoned fold,
@@ -660,6 +756,11 @@ func TestValidateSnapshotState_Contract(t *testing.T) {
 		{name: "clean building payload without a claimed runner is rejected", state: func() State {
 			s := stateInPhase(PhaseBuilding)
 			s.Attempt.Runner = uuid.UUID{}
+			return s
+		}(), accept: false},
+		{name: "clean live payload without a cutover revision is rejected", state: func() State {
+			s := stateInPhase(PhaseNone)
+			s.CutoverRevision = 0
 			return s
 		}(), accept: false},
 	} {

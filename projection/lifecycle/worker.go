@@ -19,24 +19,23 @@ import (
 //nolint:gochecknoglobals // A fixed default identity; Go cannot declare struct constants.
 var DefaultWorkerCheckpointID = projection.ID{Name: "estoria_cutover_effects", Version: 1}
 
-// An Effect applies one physical consequence of a cutover — repointing a
-// view, swapping an alias, updating a pointer cache — for the now-live
-// version. Effects must be idempotent: the worker delivers at least once.
-type Effect func(ctx context.Context, live projection.ID) error
-
-// A Worker applies cutover effects. It is a checkpointed processor folding
-// the lifecycle streams' Promoted and RolledBack events in global order,
-// invoking every registered effect with the now-live version — ordered,
-// durable, and retried, where an inline hook would be none of the three. A
-// failed effect stops the worker with the failed cutover still ahead of its
-// checkpoint, so a restart redelivers it: a persistently failing effect
-// blocks later cutovers rather than being skipped, because silently skipping
-// a flip is how physical storage diverges from the recorded truth.
+// A Worker converges cutover setters onto the recorded routing truth. It is
+// a checkpointed processor folding the lifecycle streams' Promoted and
+// RolledBack events in global order, delivering each recorded cutover — the
+// live version and its revision — to every registered setter through the
+// apply-if-newer contract: ordered, durable, and retried, where an inline
+// hook would be none of the three. A failed delivery stops the worker with
+// the failed cutover still ahead of its checkpoint, so a restart redelivers
+// it: a persistently failing setter blocks later cutovers rather than being
+// skipped, because silently skipping a flip is how routing diverges from the
+// recorded truth. Redelivery is safe by contract — a setter already at or
+// past the delivered revision treats it as a stale no-op.
 //
-// Run at most one worker per checkpoint identity at a time: two workers
-// sharing an identity can interleave competing cutovers out of order and
-// rewind each other's progress, leaving physical state divergent from the
-// recorded truth.
+// Run at most one worker per checkpoint identity at a time: workers sharing
+// an identity rewind each other's progress, so deliveries repeat
+// arbitrarily. The setter contract absorbs the repetition — revisions make
+// every replayed delivery a no-op — but shared progress is meaningless as a
+// convergence signal.
 //
 // The worker assumes the lifecycle store's default JSON domain event codec.
 // It reads the same global sequence the lifecycle streams are appended to.
@@ -46,7 +45,7 @@ type Worker struct {
 
 // NewWorker creates a Worker that folds cutover events from the store
 // holding the lifecycle streams, checkpointing its progress in checkpoints.
-// At least one effect must be registered via WithEffect or WithLiveSetter.
+// At least one setter must be registered via WithCutoverSetter.
 func NewWorker(events eventstore.GlobalReader, checkpoints checkpointstore.Store, opts ...WorkerOption) (*Worker, error) {
 	config := workerConfig{checkpoint: DefaultWorkerCheckpointID}
 
@@ -61,17 +60,17 @@ func NewWorker(events eventstore.GlobalReader, checkpoints checkpointstore.Store
 	switch {
 	case config.optionErr != nil:
 		return nil, config.optionErr
-	case len(config.effects) == 0:
-		return nil, errors.New("at least one effect is required")
+	case len(config.setters) == 0:
+		return nil, errors.New("at least one cutover setter is required")
 	}
 
 	// Stop-on-error is pinned after the forwarded options: a processor that
-	// logged and advanced past a failed effect would checkpoint beyond a
+	// logged and advanced past a failed delivery would checkpoint beyond a
 	// cutover that was never applied, permanently skipping the flip.
 	config.processorOptions = append(config.processorOptions, processor.WithContinueOnHandlerError(false))
 
 	proc, err := processor.New(events, checkpoints, config.checkpoint,
-		effectHandler(config.effects), config.processorOptions...)
+		cutoverHandler(config.setters), config.processorOptions...)
 	if err != nil {
 		return nil, fmt.Errorf("creating processor: %w", err)
 	}
@@ -79,7 +78,7 @@ func NewWorker(events eventstore.GlobalReader, checkpoints checkpointstore.Store
 	return &Worker{processor: proc}, nil
 }
 
-// Run blocks, applying cutover effects: it replays cutover history from the
+// Run blocks, delivering cutovers: it replays cutover history from the
 // worker's checkpoint, then tails the global event sequence. It returns the
 // context's error on cancellation and a non-nil error on any failure to
 // read, apply, or checkpoint. Run may be called at most once; a stopped
@@ -89,22 +88,23 @@ func (w *Worker) Run(ctx context.Context) error {
 	return w.processor.Run(ctx)
 }
 
-// effectHandler returns the event handler driving the worker's effects: it
-// decodes each cutover event from the lifecycle streams, validates it, and
-// applies every effect, in registration order, with the now-live version. A
-// cutover that decodes but is not a valid projection ID on its own name's
-// stream is an error, not a skip: the reserved namespace is a guardrail, and
-// effects must not act on infrastructure state that fails its own scheme.
-func effectHandler(effects []Effect) projection.EventHandlerFunc {
+// cutoverHandler returns the event handler driving the worker's deliveries:
+// it decodes each cutover event from the lifecycle streams, validates it,
+// and applies it through every registered setter, in registration order. A
+// cutover that decodes but fails its own scheme — an invalid live version,
+// a non-positive revision, a stream its projection's name does not derive —
+// is an error, not a skip: the reserved namespace is a guardrail, and
+// setters must not act on infrastructure state that fails it.
+func cutoverHandler(setters []CutoverSetter) projection.EventHandlerFunc {
 	return func(ctx context.Context, event *eventstore.Event) error {
-		live, ok, err := decodeCutover(event)
+		cutover, ok, err := decodeCutover(event)
 		if err != nil || !ok {
 			return err
 		}
 
-		for _, effect := range effects {
-			if err := effect(ctx, live); err != nil {
-				return fmt.Errorf("applying cutover effect for %s: %w", live, err)
+		for _, setter := range setters {
+			if err := setter.ApplyCutover(ctx, cutover); err != nil {
+				return fmt.Errorf("applying cutover for %s: %w", cutover.Live, err)
 			}
 		}
 
@@ -112,52 +112,57 @@ func effectHandler(effects []Effect) projection.EventHandlerFunc {
 	}
 }
 
-// decodeCutover decodes a Promoted or RolledBack event into the now-live
-// version it records, reporting ok=false for events that are not cutovers. A
-// cutover must carry a valid projection ID, and it must live on the stream
-// the projection's name derives — the same address every lifecycle command
-// writes through.
-func decodeCutover(event *eventstore.Event) (projection.ID, bool, error) {
+// decodeCutover decodes a Promoted or RolledBack event into the cutover it
+// records — the now-live version and its revision — reporting ok=false for
+// events that are not cutovers. A cutover must carry a valid projection ID
+// and a positive revision, and it must live on the stream the projection's
+// name derives — the same address every lifecycle command writes through.
+func decodeCutover(event *eventstore.Event) (Cutover, bool, error) {
 	if event.StreamID.Type != StreamType {
-		return projection.ID{}, false, nil
+		return Cutover{}, false, nil
 	}
 
-	var live projection.ID
+	var cutover Cutover
 
 	switch event.ID.Type {
 	case Promoted{}.EventType():
 		var promoted Promoted
 		if err := json.Unmarshal(event.Data, &promoted); err != nil {
-			return projection.ID{}, false, fmt.Errorf("decoding %s event: %w", event.ID.Type, err)
+			return Cutover{}, false, fmt.Errorf("decoding %s event: %w", event.ID.Type, err)
 		}
 
-		live = promoted.Next
+		cutover = Cutover{Live: promoted.Next, Revision: promoted.Revision}
 	case RolledBack{}.EventType():
 		var rolledBack RolledBack
 		if err := json.Unmarshal(event.Data, &rolledBack); err != nil {
-			return projection.ID{}, false, fmt.Errorf("decoding %s event: %w", event.ID.Type, err)
+			return Cutover{}, false, fmt.Errorf("decoding %s event: %w", event.ID.Type, err)
 		}
 
-		live = rolledBack.RevertedTo
+		cutover = Cutover{Live: rolledBack.RevertedTo, Revision: rolledBack.Revision}
 	default:
-		return projection.ID{}, false, nil
+		return Cutover{}, false, nil
 	}
 
-	if err := live.Validate(); err != nil {
-		return projection.ID{}, false, fmt.Errorf("%s event on stream %s records an invalid live version: %w", event.ID.Type, event.StreamID, err)
+	if err := cutover.Live.Validate(); err != nil {
+		return Cutover{}, false, fmt.Errorf("%s event on stream %s records an invalid live version: %w", event.ID.Type, event.StreamID, err)
 	}
 
-	if want := StreamUUID(live.Name); event.StreamID.UUID != want {
-		return projection.ID{}, false, fmt.Errorf("%s event for projection %q on stream %s, want the name-derived stream %s",
-			event.ID.Type, live.Name, event.StreamID.UUID, want)
+	if cutover.Revision < 1 {
+		return Cutover{}, false, fmt.Errorf("%s event on stream %s records an invalid cutover revision %d",
+			event.ID.Type, event.StreamID, cutover.Revision)
 	}
 
-	return live, true, nil
+	if want := StreamUUID(cutover.Live.Name); event.StreamID.UUID != want {
+		return Cutover{}, false, fmt.Errorf("%s event for projection %q on stream %s, want the name-derived stream %s",
+			event.ID.Type, cutover.Live.Name, event.StreamID.UUID, want)
+	}
+
+	return cutover, true, nil
 }
 
 // workerConfig collects a Worker's options before construction.
 type workerConfig struct {
-	effects          []Effect
+	setters          []CutoverSetter
 	checkpoint       projection.ID
 	processorOptions []processor.Option
 	optionErr        error
@@ -166,29 +171,16 @@ type workerConfig struct {
 // A WorkerOption configures a Worker.
 type WorkerOption func(*workerConfig)
 
-// WithEffect registers an effect to apply for every promotion or rollback.
-// Repeatable; effects run in registration order.
-func WithEffect(effect Effect) WorkerOption {
-	return func(c *workerConfig) {
-		if effect == nil {
-			c.optionErr = errors.Join(c.optionErr, errors.New("effect must not be nil"))
-			return
-		}
-
-		c.effects = append(c.effects, effect)
-	}
-}
-
-// WithLiveSetter registers a pointer cache to update for every promotion or
-// rollback. Repeatable. Equivalent to WithEffect(setter.SetLive).
-func WithLiveSetter(setter LiveSetter) WorkerOption {
+// WithCutoverSetter registers a managed setter to converge on every recorded
+// cutover. Repeatable; setters are applied in registration order.
+func WithCutoverSetter(setter CutoverSetter) WorkerOption {
 	return func(c *workerConfig) {
 		if setter == nil {
-			c.optionErr = errors.Join(c.optionErr, errors.New("live setter must not be nil"))
+			c.optionErr = errors.Join(c.optionErr, errors.New("cutover setter must not be nil"))
 			return
 		}
 
-		c.effects = append(c.effects, setter.SetLive)
+		c.setters = append(c.setters, setter)
 	}
 }
 

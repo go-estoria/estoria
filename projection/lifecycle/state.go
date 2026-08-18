@@ -119,6 +119,15 @@ type State struct {
 	// Live is the version serving reads. It is zero until a first promotion.
 	Live projection.ID
 
+	// CutoverRevision counts this projection's recorded cutovers — Promoted
+	// and RolledBack events — monotonically: 1-based from the first
+	// promotion, zero when reads have never been cut over. The revision is a
+	// domain fact, incremented under the same stream CAS that arbitrates the
+	// transition, so setters and retirement witnesses compare the exact
+	// (Live, CutoverRevision) pair rather than inferring order from version
+	// identity, which rollback makes non-monotonic.
+	CutoverRevision int64
+
 	// Allocated is the highest version number ever allocated to a rebuild of
 	// this projection — not the live version. After v3 is rolled back to v2,
 	// Live is v2 while Allocated remains 3, and the next rebuild targets v4:
@@ -253,7 +262,7 @@ func (s State) validate() error {
 	}
 
 	if s.Name == "" {
-		if s.Allocated != 0 || s.Live != (projection.ID{}) || s.Attempt != (AttemptState{}) {
+		if s.Allocated != 0 || s.Live != (projection.ID{}) || s.CutoverRevision != 0 || s.Attempt != (AttemptState{}) {
 			return errors.New("state records no projection name but is not empty")
 		}
 
@@ -284,6 +293,17 @@ func (s State) validate() error {
 		case s.Live.Version > s.Allocated:
 			return fmt.Errorf("live version %s exceeds the allocation high-water mark %d", s.Live, s.Allocated)
 		}
+	}
+
+	// Every cutover flips Live to a non-zero version — a first rebuild has no
+	// rollback target, so no legitimate history returns Live to zero — and
+	// the first promotion records revision 1: a live version and a positive
+	// revision exist together or not at all.
+	switch {
+	case s.Live == (projection.ID{}) && s.CutoverRevision != 0:
+		return fmt.Errorf("cutover revision %d recorded with no live version", s.CutoverRevision)
+	case s.Live != (projection.ID{}) && s.CutoverRevision < 1:
+		return errors.New("live version recorded with no cutover revision")
 	}
 
 	return s.validateAttempt()
