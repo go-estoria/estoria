@@ -31,7 +31,7 @@ jobs:
 
       - name: Tag New Version
         id: bump
-        uses: jefflinse/pr-semver-bump@v1.7.1
+        uses: jefflinse/pr-semver-bump@v1.7.4
         with:
           mode: bump
           repo-token: ${{ secrets.GITHUB_TOKEN }}
