@@ -229,6 +229,13 @@ func VersionPtr(v int64) *int64 {
 // itself. Callers and backends must not write keys carrying it.
 const ReservedMetadataPrefix = "estoria."
 
+// ReservedStreamTypePrefix is the stream type prefix reserved for estoria's
+// own infrastructure streams, such as projection rebuild aggregates. User
+// aggregate types must not carry it; aggregatestore enforces this. The
+// enforcement is a guardrail against accidental collision, not a trust
+// boundary: callers own their event store and can write to any stream in it.
+const ReservedStreamTypePrefix = "estoria."
+
 // An Event is an event that has been read from an event store.
 type Event struct {
 	ID             typeid.ID

@@ -2,11 +2,13 @@ package aggregatestore_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strconv"
 	"testing"
 	"time"
+	"unsafe"
 
 	"github.com/go-estoria/estoria"
 	"github.com/go-estoria/estoria/aggregatestore"
@@ -1122,5 +1124,603 @@ func TestSnapshottingStore_Hydrate_PartialSnapshotDoesNotCorruptEntity(t *testin
 	}
 	if owner := got.State().Owner; owner != "" {
 		t.Errorf("state leaked from a failed snapshot unmarshal: want empty owner, got %q", owner)
+	}
+}
+
+// validatedEntity is a state type that vouches for its snapshots: payloads
+// marked Fabricated are ones no fold produces.
+type validatedEntity struct {
+	Applied    int
+	Fabricated bool
+}
+
+func (e validatedEntity) ValidateSnapshotState() error {
+	if e.Fabricated {
+		return errors.New("fabricated state")
+	}
+
+	return nil
+}
+
+type validatedEntityEvent struct{}
+
+func (validatedEntityEvent) EventType() string { return "validatedentityevent" }
+
+func (validatedEntityEvent) New() estoria.DomainEvent[validatedEntity] {
+	return &validatedEntityEvent{}
+}
+
+func (validatedEntityEvent) ApplyTo(s validatedEntity) validatedEntity {
+	s.Applied++
+	return s
+}
+
+// pointerValidatedEntity is validatedEntity's pointer-state twin: the store's
+// state type is *pointerValidatedEntity and the validator reads through its
+// receiver, so a typed-nil state decoded from a null payload panics if it is
+// ever consulted.
+type pointerValidatedEntity struct {
+	Applied    int
+	Fabricated bool
+}
+
+func (e *pointerValidatedEntity) ValidateSnapshotState() error {
+	if e.Fabricated {
+		return errors.New("fabricated state")
+	}
+
+	return nil
+}
+
+type pointerValidatedEntityEvent struct{}
+
+func (pointerValidatedEntityEvent) EventType() string { return "pointervalidatedentityevent" }
+
+func (pointerValidatedEntityEvent) New() estoria.DomainEvent[*pointerValidatedEntity] {
+	return &pointerValidatedEntityEvent{}
+}
+
+func (pointerValidatedEntityEvent) ApplyTo(s *pointerValidatedEntity) *pointerValidatedEntity {
+	s.Applied++
+	return s
+}
+
+// addressValidatedEntity declares its validator on the pointer receiver while
+// the store's state type is the value: only the decoded state's address
+// satisfies the interface.
+type addressValidatedEntity struct {
+	Applied    int
+	Fabricated bool
+}
+
+func (e *addressValidatedEntity) ValidateSnapshotState() error {
+	if e.Fabricated {
+		return errors.New("fabricated state")
+	}
+
+	return nil
+}
+
+type addressValidatedEntityEvent struct{}
+
+func (addressValidatedEntityEvent) EventType() string { return "addressvalidatedentityevent" }
+
+func (addressValidatedEntityEvent) New() estoria.DomainEvent[addressValidatedEntity] {
+	return &addressValidatedEntityEvent{}
+}
+
+func (addressValidatedEntityEvent) ApplyTo(s addressValidatedEntity) addressValidatedEntity {
+	s.Applied++
+	return s
+}
+
+// plainPointerEntity has no validator at all: the nil-state guard must
+// protect it anyway, or a null payload installs a nil state that the first
+// tail event dereferences.
+type plainPointerEntity struct {
+	Applied int
+}
+
+type plainPointerEntityEvent struct{}
+
+func (plainPointerEntityEvent) EventType() string { return "plainpointerentityevent" }
+
+func (plainPointerEntityEvent) New() estoria.DomainEvent[*plainPointerEntity] {
+	return &plainPointerEntityEvent{}
+}
+
+func (plainPointerEntityEvent) ApplyTo(s *plainPointerEntity) *plainPointerEntity {
+	s.Applied++
+	return s
+}
+
+// mapEntityEvent folds map state by assignment, the shape that panics if a
+// nil map is ever installed beneath it.
+type mapEntityEvent struct{}
+
+func (mapEntityEvent) EventType() string { return "mapentityevent" }
+
+func (mapEntityEvent) New() estoria.DomainEvent[map[string]int] { return &mapEntityEvent{} }
+
+func (mapEntityEvent) ApplyTo(s map[string]int) map[string]int {
+	s["applied"]++
+	return s
+}
+
+type sliceEntityEvent struct{}
+
+func (sliceEntityEvent) EventType() string { return "sliceentityevent" }
+
+func (sliceEntityEvent) New() estoria.DomainEvent[[]int] { return &sliceEntityEvent{} }
+
+func (sliceEntityEvent) ApplyTo(s []int) []int { return append(s, 1) }
+
+// entityIface is an interface state type: assertions on the state and on
+// its address see only the interface, so the dynamic value's
+// pointer-receiver validator is reachable only through an addressable copy.
+type entityIface interface{ isEntityIface() }
+
+type ifaceValidatedEntity struct {
+	Applied    int
+	Fabricated bool
+	Vouched    bool
+}
+
+func (ifaceValidatedEntity) isEntityIface() {}
+
+// ValidateSnapshotState marks the copy it accepts, so a test can prove the
+// installed state is the exact value the validator vouched for.
+func (e *ifaceValidatedEntity) ValidateSnapshotState() error {
+	if e.Fabricated {
+		return errors.New("fabricated state")
+	}
+
+	e.Vouched = true
+
+	return nil
+}
+
+type ifaceEntityEvent struct{}
+
+func (ifaceEntityEvent) EventType() string { return "ifaceentityevent" }
+
+func (ifaceEntityEvent) New() estoria.DomainEvent[entityIface] { return &ifaceEntityEvent{} }
+
+func (ifaceEntityEvent) ApplyTo(s entityIface) entityIface {
+	c, _ := s.(ifaceValidatedEntity)
+	c.Applied++
+
+	return c
+}
+
+// ifaceEntityCodec decodes into the concrete type and assigns it to the
+// interface; the stock JSON codec cannot decode into an interface.
+type ifaceEntityCodec struct{}
+
+func (ifaceEntityCodec) MarshalState(s entityIface) ([]byte, error) { return json.Marshal(s) }
+
+func (ifaceEntityCodec) UnmarshalState(data []byte, dest *entityIface) error {
+	var c ifaceValidatedEntity
+	if err := json.Unmarshal(data, &c); err != nil {
+		return err
+	}
+
+	*dest = c
+
+	return nil
+}
+
+func (ifaceEntityCodec) ContentType() string { return estoria.ContentTypeJSON }
+
+// nilingMapEntity is a named map whose pointer-receiver validator accepts
+// while nilling the very state it vouches for: unless nil is rechecked after
+// validation, the store installs nil and the first tail event panics on map
+// assignment.
+type nilingMapEntity map[string]int
+
+func (m *nilingMapEntity) ValidateSnapshotState() error {
+	*m = nil
+	return nil
+}
+
+type nilingMapEntityEvent struct{}
+
+func (nilingMapEntityEvent) EventType() string { return "nilingmapentityevent" }
+
+func (nilingMapEntityEvent) New() estoria.DomainEvent[nilingMapEntity] {
+	return &nilingMapEntityEvent{}
+}
+
+func (nilingMapEntityEvent) ApplyTo(s nilingMapEntity) nilingMapEntity {
+	s["applied"]++
+	return s
+}
+
+// newValidatedSnapshotStore seeds a three-event stream for a state type that
+// implements SnapshotStateValidator and wraps its store in a snapshotting
+// store whose snapshot store serves snapshotData at version 2.
+func newValidatedSnapshotStore[S any](
+	t *testing.T,
+	streamType string,
+	factory func(uuid.UUID) S,
+	event estoria.DomainEvent[S],
+	snapshotData []byte,
+	opts ...aggregatestore.SnapshottingStoreOption[S],
+) *aggregatestore.SnapshottingStore[S] {
+	t.Helper()
+
+	eventStore, err := memory.NewEventStore()
+	if err != nil {
+		t.Fatalf("creating event store: %v", err)
+	}
+
+	inner, err := aggregatestore.New(eventStore, streamType, factory,
+		aggregatestore.WithEventTypes[S](event))
+	if err != nil {
+		t.Fatalf("creating inner store: %v", err)
+	}
+
+	seed := inner.New(uuid.NewV5(uuid.NamespaceOID, streamType))
+	seed.Append(event, event, event)
+
+	if err := inner.Save(t.Context(), seed, nil); err != nil {
+		t.Fatalf("seeding stream: %v", err)
+	}
+
+	snapshotting, err := aggregatestore.NewSnapshottingStore(
+		inner,
+		&mockSnapshotStore{
+			ReadSnapshotFn: func(_ context.Context, aggregateID typeid.ID, _ snapshotstore.ReadSnapshotOptions) (*snapshotstore.AggregateSnapshot, error) {
+				return &snapshotstore.AggregateSnapshot{
+					AggregateID:      aggregateID,
+					AggregateVersion: 2,
+					Data:             snapshotData,
+				}, nil
+			},
+		},
+		&mockSnapshotPolicy{ShouldSnapshotFn: func(typeid.ID, int64, time.Time) bool { return false }},
+		opts...,
+	)
+	if err != nil {
+		t.Fatalf("creating snapshotting store: %v", err)
+	}
+
+	return snapshotting
+}
+
+// TestSnapshottingStore_Hydrate_ValidatesSnapshotState pins the
+// SnapshotStateValidator contract: a decoded payload the state type rejects
+// is skipped exactly like an undecodable one — the aggregate hydrates fully
+// from its events and the fabricated state is never installed — while an
+// accepted payload is installed and only the tail is folded on top. The
+// validator is honored on whichever receiver form declares it, and a null
+// payload for a pointer state type falls back to full hydration rather than
+// reaching the validator or the aggregate as a typed nil.
+func TestSnapshottingStore_Hydrate_ValidatesSnapshotState(t *testing.T) {
+	t.Parallel()
+
+	newValueStore := func(t *testing.T, snapshotData []byte) *aggregatestore.SnapshottingStore[validatedEntity] {
+		t.Helper()
+		return newValidatedSnapshotStore(t, "validatedentity",
+			func(uuid.UUID) validatedEntity { return validatedEntity{} },
+			validatedEntityEvent{}, snapshotData)
+	}
+
+	newPointerStore := func(t *testing.T, snapshotData []byte) *aggregatestore.SnapshottingStore[*pointerValidatedEntity] {
+		t.Helper()
+		return newValidatedSnapshotStore(t, "pointervalidatedentity",
+			func(uuid.UUID) *pointerValidatedEntity { return &pointerValidatedEntity{} },
+			pointerValidatedEntityEvent{}, snapshotData)
+	}
+
+	newAddressStore := func(t *testing.T, snapshotData []byte) *aggregatestore.SnapshottingStore[addressValidatedEntity] {
+		t.Helper()
+		return newValidatedSnapshotStore(t, "addressvalidatedentity",
+			func(uuid.UUID) addressValidatedEntity { return addressValidatedEntity{} },
+			addressValidatedEntityEvent{}, snapshotData)
+	}
+
+	t.Run("rejected payload falls back to full hydration", func(t *testing.T) {
+		t.Parallel()
+
+		snapshotting := newValueStore(t, []byte(`{"Applied":99,"Fabricated":true}`))
+
+		got, err := snapshotting.Load(t.Context(), uuid.NewV5(uuid.NamespaceOID, "validatedentity"), nil)
+		if err != nil {
+			t.Fatalf("loading aggregate: %v", err)
+		}
+
+		if state := got.State(); state.Applied != 3 || state.Fabricated {
+			t.Errorf("want the full replay of 3 events with nothing installed from the snapshot, got %+v", state)
+		}
+	})
+
+	t.Run("accepted payload is installed", func(t *testing.T) {
+		t.Parallel()
+
+		snapshotting := newValueStore(t, []byte(`{"Applied":50}`))
+
+		got, err := snapshotting.Load(t.Context(), uuid.NewV5(uuid.NamespaceOID, "validatedentity"), nil)
+		if err != nil {
+			t.Fatalf("loading aggregate: %v", err)
+		}
+
+		if state := got.State(); state.Applied != 51 {
+			t.Errorf("want the snapshot installed at version 2 with one tail event folded, got %+v", state)
+		}
+	})
+
+	t.Run("null payload for pointer state falls back instead of panicking", func(t *testing.T) {
+		t.Parallel()
+
+		snapshotting := newPointerStore(t, []byte(`null`))
+
+		got, err := snapshotting.Load(t.Context(), uuid.NewV5(uuid.NamespaceOID, "pointervalidatedentity"), nil)
+		if err != nil {
+			t.Fatalf("loading aggregate: %v", err)
+		}
+
+		state := got.State()
+		if state == nil {
+			t.Fatal("want the full replay, got the null snapshot's nil state installed")
+		}
+
+		if state.Applied != 3 {
+			t.Errorf("want the full replay of 3 events, got %+v", state)
+		}
+	})
+
+	t.Run("valid payload for pointer state is installed", func(t *testing.T) {
+		t.Parallel()
+
+		snapshotting := newPointerStore(t, []byte(`{"Applied":50}`))
+
+		got, err := snapshotting.Load(t.Context(), uuid.NewV5(uuid.NamespaceOID, "pointervalidatedentity"), nil)
+		if err != nil {
+			t.Fatalf("loading aggregate: %v", err)
+		}
+
+		if state := got.State(); state == nil || state.Applied != 51 {
+			t.Errorf("want the snapshot installed at version 2 with one tail event folded, got %+v", state)
+		}
+	})
+
+	t.Run("pointer-receiver validator rejects through the value state's address", func(t *testing.T) {
+		t.Parallel()
+
+		snapshotting := newAddressStore(t, []byte(`{"Applied":99,"Fabricated":true}`))
+
+		got, err := snapshotting.Load(t.Context(), uuid.NewV5(uuid.NamespaceOID, "addressvalidatedentity"), nil)
+		if err != nil {
+			t.Fatalf("loading aggregate: %v", err)
+		}
+
+		if state := got.State(); state.Applied != 3 || state.Fabricated {
+			t.Errorf("want the pointer-receiver validator found and the fabricated payload replaced by the full replay, got %+v", state)
+		}
+	})
+
+	t.Run("pointer-receiver validator accepts through the value state's address", func(t *testing.T) {
+		t.Parallel()
+
+		snapshotting := newAddressStore(t, []byte(`{"Applied":50}`))
+
+		got, err := snapshotting.Load(t.Context(), uuid.NewV5(uuid.NamespaceOID, "addressvalidatedentity"), nil)
+		if err != nil {
+			t.Fatalf("loading aggregate: %v", err)
+		}
+
+		if state := got.State(); state.Applied != 51 {
+			t.Errorf("want the snapshot installed at version 2 with one tail event folded, got %+v", state)
+		}
+	})
+
+	t.Run("fabricated payload for pointer state is rejected", func(t *testing.T) {
+		t.Parallel()
+
+		snapshotting := newPointerStore(t, []byte(`{"Applied":99,"Fabricated":true}`))
+
+		got, err := snapshotting.Load(t.Context(), uuid.NewV5(uuid.NamespaceOID, "pointervalidatedentity"), nil)
+		if err != nil {
+			t.Fatalf("loading aggregate: %v", err)
+		}
+
+		if state := got.State(); state.Applied != 3 || state.Fabricated {
+			t.Errorf("want the fabricated payload replaced by the full replay, got %+v", state)
+		}
+	})
+
+	t.Run("null payload without a validator falls back", func(t *testing.T) {
+		t.Parallel()
+
+		snapshotting := newValidatedSnapshotStore(t, "plainpointerentity",
+			func(uuid.UUID) *plainPointerEntity { return &plainPointerEntity{} },
+			plainPointerEntityEvent{}, []byte(`null`))
+
+		got, err := snapshotting.Load(t.Context(), uuid.NewV5(uuid.NamespaceOID, "plainpointerentity"), nil)
+		if err != nil {
+			t.Fatalf("loading aggregate: %v", err)
+		}
+
+		state := got.State()
+		if state == nil || state.Applied != 3 {
+			t.Errorf("want the full replay of 3 events, got %+v", state)
+		}
+	})
+
+	t.Run("null payload for map state falls back instead of installing nil", func(t *testing.T) {
+		t.Parallel()
+
+		snapshotting := newValidatedSnapshotStore(t, "mapentity",
+			func(uuid.UUID) map[string]int { return map[string]int{} },
+			mapEntityEvent{}, []byte(`null`))
+
+		got, err := snapshotting.Load(t.Context(), uuid.NewV5(uuid.NamespaceOID, "mapentity"), nil)
+		if err != nil {
+			t.Fatalf("loading aggregate: %v", err)
+		}
+
+		if state := got.State(); state["applied"] != 3 {
+			t.Errorf("want the full replay of 3 events, got %+v", state)
+		}
+	})
+
+	t.Run("valid payload for map state is installed", func(t *testing.T) {
+		t.Parallel()
+
+		snapshotting := newValidatedSnapshotStore(t, "mapentity",
+			func(uuid.UUID) map[string]int { return map[string]int{} },
+			mapEntityEvent{}, []byte(`{"applied":50}`))
+
+		got, err := snapshotting.Load(t.Context(), uuid.NewV5(uuid.NamespaceOID, "mapentity"), nil)
+		if err != nil {
+			t.Fatalf("loading aggregate: %v", err)
+		}
+
+		if state := got.State(); state["applied"] != 51 {
+			t.Errorf("want the snapshot installed at version 2 with one tail event folded, got %+v", state)
+		}
+	})
+
+	t.Run("null payload for slice state falls back", func(t *testing.T) {
+		t.Parallel()
+
+		snapshotting := newValidatedSnapshotStore(t, "sliceentity",
+			func(uuid.UUID) []int { return []int{} },
+			sliceEntityEvent{}, []byte(`null`))
+
+		got, err := snapshotting.Load(t.Context(), uuid.NewV5(uuid.NamespaceOID, "sliceentity"), nil)
+		if err != nil {
+			t.Fatalf("loading aggregate: %v", err)
+		}
+
+		if state := got.State(); len(state) != 3 {
+			t.Errorf("want the full replay of 3 events, got %+v", state)
+		}
+	})
+
+	t.Run("pointer-receiver validator on an interface state's dynamic value rejects", func(t *testing.T) {
+		t.Parallel()
+
+		snapshotting := newValidatedSnapshotStore(t, "ifaceentity",
+			func(uuid.UUID) entityIface { return ifaceValidatedEntity{} },
+			ifaceEntityEvent{}, []byte(`{"Applied":99,"Fabricated":true}`),
+			aggregatestore.WithStateCodec[entityIface](ifaceEntityCodec{}))
+
+		got, err := snapshotting.Load(t.Context(), uuid.NewV5(uuid.NamespaceOID, "ifaceentity"), nil)
+		if err != nil {
+			t.Fatalf("loading aggregate: %v", err)
+		}
+
+		state, ok := got.State().(ifaceValidatedEntity)
+		if !ok || state.Applied != 3 || state.Fabricated {
+			t.Errorf("want the fabricated payload replaced by the full replay, got %+v", got.State())
+		}
+	})
+
+	t.Run("interface state accepted payload installs the validated copy", func(t *testing.T) {
+		t.Parallel()
+
+		snapshotting := newValidatedSnapshotStore(t, "ifaceentity",
+			func(uuid.UUID) entityIface { return ifaceValidatedEntity{} },
+			ifaceEntityEvent{}, []byte(`{"Applied":50}`),
+			aggregatestore.WithStateCodec[entityIface](ifaceEntityCodec{}))
+
+		got, err := snapshotting.Load(t.Context(), uuid.NewV5(uuid.NamespaceOID, "ifaceentity"), nil)
+		if err != nil {
+			t.Fatalf("loading aggregate: %v", err)
+		}
+
+		state, ok := got.State().(ifaceValidatedEntity)
+		if !ok || state.Applied != 51 || !state.Vouched {
+			t.Errorf("want the copy the validator vouched for installed at version 2 with one tail event folded, got %+v", got.State())
+		}
+	})
+
+	t.Run("valid payload for slice state is installed", func(t *testing.T) {
+		t.Parallel()
+
+		snapshotting := newValidatedSnapshotStore(t, "sliceentity",
+			func(uuid.UUID) []int { return []int{} },
+			sliceEntityEvent{}, []byte(`[5,5]`))
+
+		got, err := snapshotting.Load(t.Context(), uuid.NewV5(uuid.NamespaceOID, "sliceentity"), nil)
+		if err != nil {
+			t.Fatalf("loading aggregate: %v", err)
+		}
+
+		state := got.State()
+		if len(state) != 3 || state[0] != 5 || state[1] != 5 || state[2] != 1 {
+			t.Errorf("want the snapshot installed at version 2 with one tail event appended, got %+v", state)
+		}
+	})
+
+	t.Run("state nilled by an accepting validator falls back", func(t *testing.T) {
+		t.Parallel()
+
+		snapshotting := newValidatedSnapshotStore(t, "nilingmapentity",
+			func(uuid.UUID) nilingMapEntity { return nilingMapEntity{} },
+			nilingMapEntityEvent{}, []byte(`{"applied":50}`))
+
+		got, err := snapshotting.Load(t.Context(), uuid.NewV5(uuid.NamespaceOID, "nilingmapentity"), nil)
+		if err != nil {
+			t.Fatalf("loading aggregate: %v", err)
+		}
+
+		if state := got.State(); state == nil || state["applied"] != 3 {
+			t.Errorf("want the full replay of 3 events, got %+v", state)
+		}
+	})
+}
+
+// TestNilState pins the nil guard's coverage directly — every nilable kind
+// is rejected when nil, and nothing else is — so the "every nilable kind"
+// claim behind the null-payload fallbacks holds by enumeration rather than
+// by the store harnesses alone.
+func TestNilState(t *testing.T) {
+	t.Parallel()
+
+	var (
+		nilChan   chan int
+		nilFunc   func()
+		nilIface  error
+		nilMap    map[string]int
+		nilPtr    *int
+		nilSlice  []int
+		nilUnsafe unsafe.Pointer
+	)
+
+	typedNilInIface := error((*strconv.NumError)(nil))
+	n := 5
+
+	for _, tt := range []struct {
+		name  string
+		state any
+		want  bool
+	}{
+		{name: "nil interface", state: nilIface, want: true},
+		{name: "typed nil pointer in an interface", state: typedNilInIface, want: true},
+		{name: "nil channel", state: nilChan, want: true},
+		{name: "nil function", state: nilFunc, want: true},
+		{name: "nil map", state: nilMap, want: true},
+		{name: "nil pointer", state: nilPtr, want: true},
+		{name: "nil slice", state: nilSlice, want: true},
+		{name: "nil unsafe pointer", state: nilUnsafe, want: true},
+		{name: "non-nil channel", state: make(chan int), want: false},
+		{name: "non-nil function", state: func() {}, want: false},
+		{name: "non-nil map", state: map[string]int{}, want: false},
+		{name: "non-nil pointer", state: &n, want: false},
+		{name: "non-nil slice", state: []int{}, want: false},
+		{name: "non-nil unsafe pointer", state: unsafe.Pointer(&n), want: false},
+		{name: "integer zero", state: 0, want: false},
+		{name: "struct value", state: struct{}{}, want: false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			if got := aggregatestore.NilStateForTest(tt.state); got != tt.want {
+				t.Errorf("want %v, got %v", tt.want, got)
+			}
+		})
 	}
 }
