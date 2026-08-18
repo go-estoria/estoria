@@ -21,11 +21,13 @@ type SnapshotPolicy interface {
 // A SnapshotStateValidator is implemented by state types that can vouch for
 // what their snapshots legitimately claim. SnapshottingStore consults it
 // after decoding a snapshot and before installing the state on the
-// aggregate — on the decoded state itself, or on its address when only the
-// pointer receiver implements it: a rejected payload is skipped in favor of
-// full hydration, exactly like an undecodable one, so tampered or truncated
-// snapshot storage degrades to replaying the events rather than seeding the
-// fold with fabricated state.
+// aggregate — on the decoded state itself; on its address when only the
+// pointer receiver implements it; or, when the state type is an interface,
+// on an addressable copy of the dynamic value, which replaces the decoded
+// state on acceptance: a rejected payload is skipped in favor of full
+// hydration, exactly like an undecodable one, so tampered or truncated
+// snapshot storage degrades to replaying the events rather than seeding
+// the fold with fabricated state.
 type SnapshotStateValidator interface {
 	ValidateSnapshotState() error
 }
@@ -172,33 +174,26 @@ func (s *SnapshottingStore[S]) Hydrate(ctx context.Context, aggregate *Aggregate
 		return s.inner.Hydrate(ctx, aggregate, opts)
 	}
 
-	// A JSON null decodes into a typed nil pointer without error. No factory
-	// constructs nil state, so nothing legitimate ever snapshots as one, and
-	// nil state can be neither validated nor installed — a validator method
-	// would dereference its nil receiver — so the payload is treated exactly
+	// An encoded null decodes into a nil pointer, map, or slice without
+	// error — any nilable kind, under a pluggable codec. Nil state can be
+	// neither validated nor installed: a validator method would dereference
+	// its nil receiver, and a nil map or slice would stand in for folded
+	// history the events never produced, while full replay reproduces any
+	// legitimately nil state on its own. The payload is treated exactly
 	// like an undecodable one.
-	if v := reflect.ValueOf(state); !v.IsValid() || (v.Kind() == reflect.Pointer && v.IsNil()) {
+	if v := reflect.ValueOf(state); !v.IsValid() || (nilableKind(v.Kind()) && v.IsNil()) {
 		log.Warn("snapshot decoded to nil state, falling back to full hydration")
 		return s.inner.Hydrate(ctx, aggregate, opts)
 	}
 
 	// A state type that implements SnapshotStateValidator vouches for what
-	// snapshots of it can legitimately claim. The decoded value is consulted
-	// first, then its address, so a validator declared on either receiver
-	// form is honored. A rejected payload is treated exactly like an
-	// undecodable one, because installing it would seed the tail's fold with
-	// fabricated state — the one thing full event replay can never produce
-	// on its own.
-	validator, ok := any(state).(SnapshotStateValidator)
-	if !ok {
-		validator, ok = any(&state).(SnapshotStateValidator)
-	}
-
-	if ok {
-		if err := validator.ValidateSnapshotState(); err != nil {
-			log.Warn("snapshot state failed validation, falling back to full hydration", "error", err)
-			return s.inner.Hydrate(ctx, aggregate, opts)
-		}
+	// snapshots of it can legitimately claim. A rejected payload is treated
+	// exactly like an undecodable one, because installing it would seed the
+	// tail's fold with fabricated state — the one thing full event replay
+	// can never produce on its own.
+	if err := validateSnapshotState(&state); err != nil {
+		log.Warn("snapshot state failed validation, falling back to full hydration", "error", err)
+		return s.inner.Hydrate(ctx, aggregate, opts)
 	}
 
 	log.Debug("loaded snapshot", "version", snap.AggregateVersion)
@@ -209,6 +204,55 @@ func (s *SnapshottingStore[S]) Hydrate(ctx context.Context, aggregate *Aggregate
 	}
 
 	return s.inner.Hydrate(ctx, aggregate, opts)
+}
+
+// nilableKind reports whether a value of kind k can hold nil — the shapes a
+// codec can produce from an encoded null.
+func nilableKind(k reflect.Kind) bool {
+	return k == reflect.Chan || k == reflect.Func || k == reflect.Interface ||
+		k == reflect.Map || k == reflect.Pointer || k == reflect.Slice ||
+		k == reflect.UnsafePointer
+}
+
+// validateSnapshotState consults the state's SnapshotStateValidator, if it
+// declares one, and reports whether the decoded payload may be installed.
+// The state value is consulted first, then its address, then — when the
+// state type is an interface, which hides its dynamic value's
+// pointer-receiver validator from both — the address of a copy of the
+// dynamic value; an accepted copy replaces the state, so the value the
+// validator vouched for is the value installed. At most one validator is
+// invoked; without one, every decoded payload is accepted.
+func validateSnapshotState[S any](state *S) error {
+	if validator, ok := any(*state).(SnapshotStateValidator); ok {
+		return validator.ValidateSnapshotState()
+	}
+
+	if validator, ok := any(state).(SnapshotStateValidator); ok {
+		return validator.ValidateSnapshotState()
+	}
+
+	dynamic := reflect.ValueOf(*state)
+	if !dynamic.IsValid() || dynamic.Type() == reflect.TypeFor[S]() {
+		return nil
+	}
+
+	addressable := reflect.New(dynamic.Type())
+	addressable.Elem().Set(dynamic)
+
+	validator, ok := addressable.Interface().(SnapshotStateValidator)
+	if !ok {
+		return nil
+	}
+
+	if err := validator.ValidateSnapshotState(); err != nil {
+		return err
+	}
+
+	if accepted, ok := addressable.Elem().Interface().(S); ok {
+		*state = accepted
+	}
+
+	return nil
 }
 
 // Save saves an aggregate, taking snapshots as needed.

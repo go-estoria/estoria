@@ -538,6 +538,9 @@ func TestValidate_NamedStateRequiresAllocation(t *testing.T) {
 func TestValidateSnapshotState_Contract(t *testing.T) {
 	t.Parallel()
 
+	poisonedLegitimate := stateInPhase(PhaseBuilding)
+	poisonedLegitimate.InvalidReason = "two lifecycles claim the same slot"
+
 	for _, tt := range []struct {
 		name   string
 		state  State
@@ -545,6 +548,7 @@ func TestValidateSnapshotState_Contract(t *testing.T) {
 	}{
 		{name: "poisoned uninitialized payload is accepted as testimony", state: State{InvalidReason: "two lifecycles claim the same slot"}, accept: true},
 		{name: "poisoned structurally invalid payload is accepted as testimony", state: State{Name: "orders", InvalidReason: "two lifecycles claim the same slot"}, accept: true},
+		{name: "poisoned initialized payload is accepted as testimony", state: poisonedLegitimate, accept: true},
 		{name: "legitimate payload is accepted", state: stateInPhase(PhaseBuilding), accept: true},
 		{name: "clean uninitialized payload is rejected", state: State{}, accept: false},
 		{name: "clean named payload without allocations is rejected", state: State{Name: "orders"}, accept: false},

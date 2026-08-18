@@ -2,6 +2,7 @@ package aggregatestore_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strconv"
@@ -1212,6 +1213,104 @@ func (addressValidatedEntityEvent) ApplyTo(s addressValidatedEntity) addressVali
 	return s
 }
 
+// plainPointerEntity has no validator at all: the nil-state guard must
+// protect it anyway, or a null payload installs a nil state that the first
+// tail event dereferences.
+type plainPointerEntity struct {
+	Applied int
+}
+
+type plainPointerEntityEvent struct{}
+
+func (plainPointerEntityEvent) EventType() string { return "plainpointerentityevent" }
+
+func (plainPointerEntityEvent) New() estoria.DomainEvent[*plainPointerEntity] {
+	return &plainPointerEntityEvent{}
+}
+
+func (plainPointerEntityEvent) ApplyTo(s *plainPointerEntity) *plainPointerEntity {
+	s.Applied++
+	return s
+}
+
+// mapEntityEvent folds map state by assignment, the shape that panics if a
+// nil map is ever installed beneath it.
+type mapEntityEvent struct{}
+
+func (mapEntityEvent) EventType() string { return "mapentityevent" }
+
+func (mapEntityEvent) New() estoria.DomainEvent[map[string]int] { return &mapEntityEvent{} }
+
+func (mapEntityEvent) ApplyTo(s map[string]int) map[string]int {
+	s["applied"]++
+	return s
+}
+
+type sliceEntityEvent struct{}
+
+func (sliceEntityEvent) EventType() string { return "sliceentityevent" }
+
+func (sliceEntityEvent) New() estoria.DomainEvent[[]int] { return &sliceEntityEvent{} }
+
+func (sliceEntityEvent) ApplyTo(s []int) []int { return append(s, 1) }
+
+// entityIface is an interface state type: assertions on the state and on
+// its address see only the interface, so the dynamic value's
+// pointer-receiver validator is reachable only through an addressable copy.
+type entityIface interface{ isEntityIface() }
+
+type ifaceValidatedEntity struct {
+	Applied    int
+	Fabricated bool
+	Vouched    bool
+}
+
+func (ifaceValidatedEntity) isEntityIface() {}
+
+// ValidateSnapshotState marks the copy it accepts, so a test can prove the
+// installed state is the exact value the validator vouched for.
+func (e *ifaceValidatedEntity) ValidateSnapshotState() error {
+	if e.Fabricated {
+		return errors.New("fabricated state")
+	}
+
+	e.Vouched = true
+
+	return nil
+}
+
+type ifaceEntityEvent struct{}
+
+func (ifaceEntityEvent) EventType() string { return "ifaceentityevent" }
+
+func (ifaceEntityEvent) New() estoria.DomainEvent[entityIface] { return &ifaceEntityEvent{} }
+
+func (ifaceEntityEvent) ApplyTo(s entityIface) entityIface {
+	c, _ := s.(ifaceValidatedEntity)
+	c.Applied++
+
+	return c
+}
+
+// ifaceEntityCodec decodes into the concrete type and assigns it to the
+// interface; the stock JSON codec cannot decode into an interface.
+type ifaceEntityCodec struct{}
+
+func (ifaceEntityCodec) MarshalState(s entityIface) ([]byte, error) { return json.Marshal(s) }
+
+func (ifaceEntityCodec) UnmarshalState(data []byte, dest *entityIface) error {
+	var c ifaceValidatedEntity
+	if err := json.Unmarshal(data, &c); err != nil {
+		return err
+	}
+
+	*dest = c
+
+	return nil
+}
+
+func (ifaceEntityCodec) ContentType() string { return estoria.ContentTypeJSON }
+
 // newValidatedSnapshotStore seeds a three-event stream for a state type that
 // implements SnapshotStateValidator and wraps its store in a snapshotting
 // store whose snapshot store serves snapshotData at version 2.
@@ -1221,6 +1320,7 @@ func newValidatedSnapshotStore[S any](
 	factory func(uuid.UUID) S,
 	event estoria.DomainEvent[S],
 	snapshotData []byte,
+	opts ...aggregatestore.SnapshottingStoreOption[S],
 ) *aggregatestore.SnapshottingStore[S] {
 	t.Helper()
 
@@ -1254,6 +1354,7 @@ func newValidatedSnapshotStore[S any](
 			},
 		},
 		&mockSnapshotPolicy{ShouldSnapshotFn: func(typeid.ID, int64, time.Time) bool { return false }},
+		opts...,
 	)
 	if err != nil {
 		t.Fatalf("creating snapshotting store: %v", err)
@@ -1386,6 +1487,128 @@ func TestSnapshottingStore_Hydrate_ValidatesSnapshotState(t *testing.T) {
 
 		if state := got.State(); state.Applied != 51 {
 			t.Errorf("want the snapshot installed at version 2 with one tail event folded, got %+v", state)
+		}
+	})
+
+	t.Run("fabricated payload for pointer state is rejected", func(t *testing.T) {
+		t.Parallel()
+
+		snapshotting := newPointerStore(t, []byte(`{"Applied":99,"Fabricated":true}`))
+
+		got, err := snapshotting.Load(t.Context(), uuid.NewV5(uuid.NamespaceOID, "pointervalidatedentity"), nil)
+		if err != nil {
+			t.Fatalf("loading aggregate: %v", err)
+		}
+
+		if state := got.State(); state.Applied != 3 || state.Fabricated {
+			t.Errorf("want the fabricated payload replaced by the full replay, got %+v", state)
+		}
+	})
+
+	t.Run("null payload without a validator falls back", func(t *testing.T) {
+		t.Parallel()
+
+		snapshotting := newValidatedSnapshotStore(t, "plainpointerentity",
+			func(uuid.UUID) *plainPointerEntity { return &plainPointerEntity{} },
+			plainPointerEntityEvent{}, []byte(`null`))
+
+		got, err := snapshotting.Load(t.Context(), uuid.NewV5(uuid.NamespaceOID, "plainpointerentity"), nil)
+		if err != nil {
+			t.Fatalf("loading aggregate: %v", err)
+		}
+
+		state := got.State()
+		if state == nil || state.Applied != 3 {
+			t.Errorf("want the full replay of 3 events, got %+v", state)
+		}
+	})
+
+	t.Run("null payload for map state falls back instead of installing nil", func(t *testing.T) {
+		t.Parallel()
+
+		snapshotting := newValidatedSnapshotStore(t, "mapentity",
+			func(uuid.UUID) map[string]int { return map[string]int{} },
+			mapEntityEvent{}, []byte(`null`))
+
+		got, err := snapshotting.Load(t.Context(), uuid.NewV5(uuid.NamespaceOID, "mapentity"), nil)
+		if err != nil {
+			t.Fatalf("loading aggregate: %v", err)
+		}
+
+		if state := got.State(); state["applied"] != 3 {
+			t.Errorf("want the full replay of 3 events, got %+v", state)
+		}
+	})
+
+	t.Run("valid payload for map state is installed", func(t *testing.T) {
+		t.Parallel()
+
+		snapshotting := newValidatedSnapshotStore(t, "mapentity",
+			func(uuid.UUID) map[string]int { return map[string]int{} },
+			mapEntityEvent{}, []byte(`{"applied":50}`))
+
+		got, err := snapshotting.Load(t.Context(), uuid.NewV5(uuid.NamespaceOID, "mapentity"), nil)
+		if err != nil {
+			t.Fatalf("loading aggregate: %v", err)
+		}
+
+		if state := got.State(); state["applied"] != 51 {
+			t.Errorf("want the snapshot installed at version 2 with one tail event folded, got %+v", state)
+		}
+	})
+
+	t.Run("null payload for slice state falls back", func(t *testing.T) {
+		t.Parallel()
+
+		snapshotting := newValidatedSnapshotStore(t, "sliceentity",
+			func(uuid.UUID) []int { return []int{} },
+			sliceEntityEvent{}, []byte(`null`))
+
+		got, err := snapshotting.Load(t.Context(), uuid.NewV5(uuid.NamespaceOID, "sliceentity"), nil)
+		if err != nil {
+			t.Fatalf("loading aggregate: %v", err)
+		}
+
+		if state := got.State(); len(state) != 3 {
+			t.Errorf("want the full replay of 3 events, got %+v", state)
+		}
+	})
+
+	t.Run("pointer-receiver validator on an interface state's dynamic value rejects", func(t *testing.T) {
+		t.Parallel()
+
+		snapshotting := newValidatedSnapshotStore(t, "ifaceentity",
+			func(uuid.UUID) entityIface { return ifaceValidatedEntity{} },
+			ifaceEntityEvent{}, []byte(`{"Applied":99,"Fabricated":true}`),
+			aggregatestore.WithStateCodec[entityIface](ifaceEntityCodec{}))
+
+		got, err := snapshotting.Load(t.Context(), uuid.NewV5(uuid.NamespaceOID, "ifaceentity"), nil)
+		if err != nil {
+			t.Fatalf("loading aggregate: %v", err)
+		}
+
+		state, ok := got.State().(ifaceValidatedEntity)
+		if !ok || state.Applied != 3 || state.Fabricated {
+			t.Errorf("want the fabricated payload replaced by the full replay, got %+v", got.State())
+		}
+	})
+
+	t.Run("interface state accepted payload installs the validated copy", func(t *testing.T) {
+		t.Parallel()
+
+		snapshotting := newValidatedSnapshotStore(t, "ifaceentity",
+			func(uuid.UUID) entityIface { return ifaceValidatedEntity{} },
+			ifaceEntityEvent{}, []byte(`{"Applied":50}`),
+			aggregatestore.WithStateCodec[entityIface](ifaceEntityCodec{}))
+
+		got, err := snapshotting.Load(t.Context(), uuid.NewV5(uuid.NamespaceOID, "ifaceentity"), nil)
+		if err != nil {
+			t.Fatalf("loading aggregate: %v", err)
+		}
+
+		state, ok := got.State().(ifaceValidatedEntity)
+		if !ok || state.Applied != 51 || !state.Vouched {
+			t.Errorf("want the copy the validator vouched for installed at version 2 with one tail event folded, got %+v", got.State())
 		}
 	})
 }

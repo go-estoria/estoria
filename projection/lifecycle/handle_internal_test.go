@@ -59,8 +59,12 @@ func (e leafCancellationError) Is(target error) bool { return e.cancel && target
 func (e leafCancellationError) Unwrap() error { return nil }
 
 // emptyJoinCancellationError is leafCancellationError's multi-error twin: its
-// child list is empty.
-type emptyJoinCancellationError struct{ cancel bool }
+// child list yields no children — nil by default, or the non-nil empty list
+// a case supplies, which must read identically.
+type emptyJoinCancellationError struct {
+	cancel   bool
+	children []error
+}
 
 func (e emptyJoinCancellationError) Error() string { return "empty-join cancellation" }
 
@@ -68,7 +72,7 @@ func (e emptyJoinCancellationError) Is(target error) bool {
 	return e.cancel && target == context.Canceled
 }
 
-func (e emptyJoinCancellationError) Unwrap() []error { return nil }
+func (e emptyJoinCancellationError) Unwrap() []error { return e.children }
 
 // TestCancellationOnly pins the leaf semantics of the reconcile loop's benign
 // arm: every leaf must match the cancellation, a node whose unwrapping yields
@@ -82,9 +86,10 @@ func TestCancellationOnly(t *testing.T) {
 	errBoom := errors.New("boom")
 
 	for _, tt := range []struct {
-		name string
-		err  error
-		want bool
+		name   string
+		err    error
+		target error // matched against context.Canceled when nil
+		want   bool
 	}{
 		{name: "nil error is not a cancellation", err: nil, want: false},
 		{name: "the cancellation itself", err: context.Canceled, want: true},
@@ -96,13 +101,23 @@ func TestCancellationOnly(t *testing.T) {
 		{name: "non-cancellation leaf with a nil Unwrap", err: leafCancellationError{}, want: false},
 		{name: "cancellation-aware empty join", err: emptyJoinCancellationError{cancel: true}, want: true},
 		{name: "non-cancellation empty join", err: emptyJoinCancellationError{}, want: false},
+		{name: "cancellation-aware non-nil empty join", err: emptyJoinCancellationError{cancel: true, children: []error{}}, want: true},
+		{name: "non-cancellation non-nil empty join", err: emptyJoinCancellationError{children: []error{}}, want: false},
 		{name: "wrapped cancellation-aware leaf", err: fmt.Errorf("tick: %w", leafCancellationError{cancel: true}), want: true},
 		{name: "cancellation-aware leaf joined with a failure", err: errors.Join(leafCancellationError{cancel: true}, errBoom), want: false},
+		{name: "deadline exceeded matched against itself", err: context.DeadlineExceeded, target: context.DeadlineExceeded, want: true},
+		{name: "wrapped deadline exceeded", err: fmt.Errorf("tick: %w", context.DeadlineExceeded), target: context.DeadlineExceeded, want: true},
+		{name: "deadline exceeded is not the canceled target", err: context.DeadlineExceeded, want: false},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			if got := cancellationOnly(tt.err, context.Canceled); got != tt.want {
+			target := tt.target
+			if target == nil {
+				target = context.Canceled
+			}
+
+			if got := cancellationOnly(tt.err, target); got != tt.want {
 				t.Errorf("want %v, got %v", tt.want, got)
 			}
 		})
