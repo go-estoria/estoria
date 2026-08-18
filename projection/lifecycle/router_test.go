@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-estoria/estoria"
 	"github.com/go-estoria/estoria/aggregatestore"
 	"github.com/go-estoria/estoria/eventstore"
 	esmemory "github.com/go-estoria/estoria/eventstore/memory"
@@ -357,6 +358,109 @@ func TestStreamRouter_RejectsInvalidCutovers(t *testing.T) {
 	}
 }
 
+// appendRawCutoverEvent marshals a cutover event straight onto the "orders"
+// lifecycle stream, bypassing the aggregate: the shape tampered or foreign
+// histories arrive in.
+func appendRawCutoverEvent(t *testing.T, events *esmemory.EventStore, event estoria.DomainEvent[lifecycle.State]) {
+	t.Helper()
+
+	data, err := json.Marshal(event)
+	if err != nil {
+		t.Fatalf("marshaling %s event: %v", event.EventType(), err)
+	}
+
+	streamID := typeid.ID{Type: lifecycle.StreamType, UUID: lifecycle.StreamUUID("orders")}
+
+	if _, err := events.AppendStream(t.Context(), streamID, []*eventstore.WritableEvent{{
+		Type:            event.EventType(),
+		Data:            data,
+		DataContentType: "application/json",
+	}}, eventstore.AppendStreamOptions{}); err != nil {
+		t.Fatalf("appending raw %s event: %v", event.EventType(), err)
+	}
+}
+
+// TestStreamRouter_RejectsDiscontinuousHistories pins the fold's continuity
+// validation: the authoritative record is one stream per name under
+// optimistic concurrency, so a decoded history whose revisions skip, repeat,
+// or regress, whose lineage misreports the previously live version, or that
+// opens with a rollback is tampered or foreign — the fold fails closed on
+// every attempt instead of serving last-write-wins.
+func TestStreamRouter_RejectsDiscontinuousHistories(t *testing.T) {
+	t.Parallel()
+
+	v1 := projection.ID{Name: "orders", Version: 1}
+	v2 := projection.ID{Name: "orders", Version: 2}
+	v3 := projection.ID{Name: "orders", Version: 3}
+
+	for _, tt := range []struct {
+		name   string
+		events []estoria.DomainEvent[lifecycle.State]
+	}{
+		{
+			name: "a revision gap",
+			events: []estoria.DomainEvent[lifecycle.State]{
+				lifecycle.Promoted{Next: v1, Revision: 1, At: promotedAt},
+				lifecycle.Promoted{Previous: v1, Next: v2, Revision: 3, At: promotedAt},
+			},
+		},
+		{
+			name: "a duplicated revision",
+			events: []estoria.DomainEvent[lifecycle.State]{
+				lifecycle.Promoted{Next: v1, Revision: 1, At: promotedAt},
+				lifecycle.Promoted{Previous: v1, Next: v2, Revision: 1, At: promotedAt},
+			},
+		},
+		{
+			name: "a regressed revision",
+			events: []estoria.DomainEvent[lifecycle.State]{
+				lifecycle.Promoted{Next: v1, Revision: 1, At: promotedAt},
+				lifecycle.Promoted{Previous: v1, Next: v2, Revision: 2, At: promotedAt},
+				lifecycle.Promoted{Previous: v2, Next: v3, Revision: 1, At: promotedAt},
+			},
+		},
+		{
+			name: "false lineage",
+			events: []estoria.DomainEvent[lifecycle.State]{
+				lifecycle.Promoted{Next: v1, Revision: 1, At: promotedAt},
+				lifecycle.Promoted{Previous: projection.ID{Name: "orders", Version: 9}, Next: v2, Revision: 2, At: promotedAt},
+			},
+		},
+		{
+			name: "an opening rollback",
+			events: []estoria.DomainEvent[lifecycle.State]{
+				lifecycle.RolledBack{RevertedTo: v1, Revision: 1, At: promotedAt},
+			},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			events, err := esmemory.NewEventStore()
+			if err != nil {
+				t.Fatalf("creating event store: %v", err)
+			}
+
+			for _, event := range tt.events {
+				appendRawCutoverEvent(t, events, event)
+			}
+
+			router, err := lifecycle.NewStreamRouter(events)
+			if err != nil {
+				t.Fatalf("creating stream router: %v", err)
+			}
+
+			if _, err := router.Live(t.Context(), "orders"); err == nil {
+				t.Fatal("want the discontinuous history reported, got nil")
+			}
+
+			if _, err := router.Live(t.Context(), "orders"); err == nil {
+				t.Error("want the discontinuous history reported again, not skipped, got nil")
+			}
+		})
+	}
+}
+
 // flakyReader fails ReadAll a fixed number of times before delegating.
 type flakyReader struct {
 	inner eventstore.GlobalReader
@@ -439,10 +543,13 @@ func TestStreamRouter_ReportsCorruptCutoverEvent(t *testing.T) {
 	}
 }
 
-// recordCutover appends a full promoted attempt to next's lifecycle stream —
-// creating the aggregate on the projection's first rebuild, loading it
-// afterwards — optionally rolled back to previous. Revisions continue the
-// loaded fold's cutover sequence, as the commands stamp them.
+// recordCutover appends a full attempt to next's lifecycle stream — creating
+// the aggregate on the projection's first rebuild, loading it afterwards —
+// promoted and completed, or rolled back to previous when rollBack is set.
+// Every form ends with the attempt slot vacant, so successive calls admit
+// cleanly; revisions continue the loaded fold's cutover sequence, as the
+// commands stamp them. The fixture refuses to record a history the fold
+// itself marks inconsistent.
 func recordCutover(t *testing.T, store aggregatestore.Store[lifecycle.State], next, previous projection.ID, rollBack bool) {
 	t.Helper()
 
@@ -464,11 +571,23 @@ func recordCutover(t *testing.T, store aggregatestore.Store[lifecycle.State], ne
 		lifecycle.Promoted{Previous: previous, Next: next, Revision: revision + 1, At: promotedAt},
 	)
 
-	if rollBack {
+	switch {
+	case rollBack:
 		aggregate.Append(lifecycle.RolledBack{From: next, RevertedTo: previous, Revision: revision + 2, At: promotedAt})
+	case previous == (projection.ID{}):
+		aggregate.Append(lifecycle.PreviousRetired{})
+	default:
+		aggregate.Append(
+			lifecycle.RetireStarted{Retiring: previous, At: promotedAt},
+			lifecycle.PreviousRetired{Retired: previous},
+		)
 	}
 
 	if err := store.Save(t.Context(), aggregate, nil); err != nil {
 		t.Fatalf("saving lifecycle aggregate: %v", err)
+	}
+
+	if state := aggregate.State(); state.InvalidReason != "" {
+		t.Fatalf("recordCutover produced a poisoned history: %s", state.InvalidReason)
 	}
 }

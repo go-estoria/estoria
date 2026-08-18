@@ -16,6 +16,7 @@ import (
 	"github.com/go-estoria/estoria/projection/lifecycle"
 	"github.com/go-estoria/estoria/projection/processor"
 	"github.com/go-estoria/estoria/typeid"
+	"github.com/gofrs/uuid/v5"
 )
 
 // startWorkerForTest runs the worker in the background for the duration of
@@ -360,15 +361,23 @@ func TestWorker_IgnoresNonCutoverEvents(t *testing.T) {
 		t.Fatalf("creating lifecycle store: %v", err)
 	}
 
-	// An admitted, started build — no cutover yet — alongside a domain event.
+	// An admitted, claimed, started build — no cutover yet — alongside a
+	// domain event.
+	attempt := uuid.Must(uuid.NewV4())
+
 	aggregate := projections.New(lifecycle.StreamUUID("orders"))
 	aggregate.Append(
-		lifecycle.RebuildInitiated{Target: projection.ID{Name: "orders", Version: 1}, Reason: "no cutover", At: initiatedAt},
+		lifecycle.RebuildInitiated{Attempt: attempt, Target: projection.ID{Name: "orders", Version: 1}, Reason: "no cutover", At: initiatedAt},
+		lifecycle.RunnerClaimed{Attempt: attempt, Runner: uuid.Must(uuid.NewV4()), At: initiatedAt},
 		lifecycle.BuildStarted{},
 	)
 
 	if err := projections.Save(t.Context(), aggregate, nil); err != nil {
 		t.Fatalf("saving lifecycle aggregate: %v", err)
+	}
+
+	if state := aggregate.State(); state.InvalidReason != "" {
+		t.Fatalf("fixture produced a poisoned history: %s", state.InvalidReason)
 	}
 
 	if _, err := events.AppendStream(t.Context(), typeid.NewV4("order"),

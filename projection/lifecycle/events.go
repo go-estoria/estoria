@@ -1,6 +1,7 @@
 package lifecycle
 
 import (
+	"math"
 	"time"
 
 	"github.com/go-estoria/estoria"
@@ -225,6 +226,12 @@ func (e Promoted) ApplyTo(s State) State {
 	case e.Next != s.Attempt.Target:
 		s = s.poison("promotion recorded for a version that was not the attempt's target",
 			"projection", s.Name, "recorded_next", e.Next, "target", s.Attempt.Target)
+	case s.CutoverRevision == math.MaxInt64:
+		// The ceiling arm must precede the sequence arm: the increment below
+		// would wrap, and the wrapped stamp would satisfy the wrapped
+		// comparison — overflow reading as continuity.
+		s = s.poison("promotion recorded past an exhausted cutover revision",
+			"projection", s.Name, "recorded_revision", e.Revision)
 	case e.Revision != s.CutoverRevision+1:
 		s = s.poison("promotion recorded outside the cutover revision sequence",
 			"projection", s.Name, "recorded_revision", e.Revision, "revision", s.CutoverRevision)
@@ -277,6 +284,9 @@ func (e RolledBack) ApplyTo(s State) State {
 	case e.RevertedTo != s.Attempt.Previous:
 		s = s.poison("rollback recorded to a version that was not the attempt's previous",
 			"projection", s.Name, "recorded_reverted_to", e.RevertedTo, "previous", s.Attempt.Previous)
+	case s.CutoverRevision == math.MaxInt64:
+		s = s.poison("rollback recorded past an exhausted cutover revision",
+			"projection", s.Name, "recorded_revision", e.Revision)
 	case e.Revision != s.CutoverRevision+1:
 		s = s.poison("rollback recorded outside the cutover revision sequence",
 			"projection", s.Name, "recorded_revision", e.Revision, "revision", s.CutoverRevision)

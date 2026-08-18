@@ -97,14 +97,14 @@ func (w *Worker) Run(ctx context.Context) error {
 // setters must not act on infrastructure state that fails it.
 func cutoverHandler(setters []CutoverSetter) projection.EventHandlerFunc {
 	return func(ctx context.Context, event *eventstore.Event) error {
-		cutover, ok, err := decodeCutover(event)
+		raw, ok, err := decodeCutover(event)
 		if err != nil || !ok {
 			return err
 		}
 
 		for _, setter := range setters {
-			if err := setter.ApplyCutover(ctx, cutover); err != nil {
-				return fmt.Errorf("applying cutover for %s: %w", cutover.Live, err)
+			if err := setter.ApplyCutover(ctx, raw.cutover); err != nil {
+				return fmt.Errorf("applying cutover for %s: %w", raw.cutover.Live, err)
 			}
 		}
 
@@ -112,52 +112,63 @@ func cutoverHandler(setters []CutoverSetter) projection.EventHandlerFunc {
 	}
 }
 
+// rawCutover is one decoded cutover event: the flip it records and the
+// lineage it claims — the version it reports as previously live, and whether
+// it is a rollback — for folds that verify the history's continuity.
+type rawCutover struct {
+	cutover  Cutover
+	from     projection.ID
+	rollback bool
+}
+
 // decodeCutover decodes a Promoted or RolledBack event into the cutover it
-// records — the now-live version and its revision — reporting ok=false for
-// events that are not cutovers. A cutover must carry a valid projection ID
-// and a positive revision, and it must live on the stream the projection's
-// name derives — the same address every lifecycle command writes through.
-func decodeCutover(event *eventstore.Event) (Cutover, bool, error) {
+// records — the now-live version, its revision, and its claimed lineage —
+// reporting ok=false for events that are not cutovers. A cutover must carry
+// a valid projection ID and a positive revision, and it must live on the
+// stream the projection's name derives — the same address every lifecycle
+// command writes through. The claimed lineage is not validated here: it is
+// checked against a fold's own state by folds that maintain one.
+func decodeCutover(event *eventstore.Event) (rawCutover, bool, error) {
 	if event.StreamID.Type != StreamType {
-		return Cutover{}, false, nil
+		return rawCutover{}, false, nil
 	}
 
-	var cutover Cutover
+	var raw rawCutover
 
 	switch event.ID.Type {
 	case Promoted{}.EventType():
 		var promoted Promoted
 		if err := json.Unmarshal(event.Data, &promoted); err != nil {
-			return Cutover{}, false, fmt.Errorf("decoding %s event: %w", event.ID.Type, err)
+			return rawCutover{}, false, fmt.Errorf("decoding %s event: %w", event.ID.Type, err)
 		}
 
-		cutover = Cutover{Live: promoted.Next, Revision: promoted.Revision}
+		raw = rawCutover{cutover: Cutover{Live: promoted.Next, Revision: promoted.Revision}, from: promoted.Previous}
 	case RolledBack{}.EventType():
 		var rolledBack RolledBack
 		if err := json.Unmarshal(event.Data, &rolledBack); err != nil {
-			return Cutover{}, false, fmt.Errorf("decoding %s event: %w", event.ID.Type, err)
+			return rawCutover{}, false, fmt.Errorf("decoding %s event: %w", event.ID.Type, err)
 		}
 
-		cutover = Cutover{Live: rolledBack.RevertedTo, Revision: rolledBack.Revision}
+		raw = rawCutover{cutover: Cutover{Live: rolledBack.RevertedTo, Revision: rolledBack.Revision}, from: rolledBack.From, rollback: true}
 	default:
-		return Cutover{}, false, nil
+		return rawCutover{}, false, nil
 	}
 
-	if err := cutover.Live.Validate(); err != nil {
-		return Cutover{}, false, fmt.Errorf("%s event on stream %s records an invalid live version: %w", event.ID.Type, event.StreamID, err)
+	if err := raw.cutover.Live.Validate(); err != nil {
+		return rawCutover{}, false, fmt.Errorf("%s event on stream %s records an invalid live version: %w", event.ID.Type, event.StreamID, err)
 	}
 
-	if cutover.Revision < 1 {
-		return Cutover{}, false, fmt.Errorf("%s event on stream %s records an invalid cutover revision %d",
-			event.ID.Type, event.StreamID, cutover.Revision)
+	if raw.cutover.Revision < 1 {
+		return rawCutover{}, false, fmt.Errorf("%s event on stream %s records an invalid cutover revision %d",
+			event.ID.Type, event.StreamID, raw.cutover.Revision)
 	}
 
-	if want := StreamUUID(cutover.Live.Name); event.StreamID.UUID != want {
-		return Cutover{}, false, fmt.Errorf("%s event for projection %q on stream %s, want the name-derived stream %s",
-			event.ID.Type, cutover.Live.Name, event.StreamID.UUID, want)
+	if want := StreamUUID(raw.cutover.Live.Name); event.StreamID.UUID != want {
+		return rawCutover{}, false, fmt.Errorf("%s event for projection %q on stream %s, want the name-derived stream %s",
+			event.ID.Type, raw.cutover.Live.Name, event.StreamID.UUID, want)
 	}
 
-	return cutover, true, nil
+	return raw, true, nil
 }
 
 // workerConfig collects a Worker's options before construction.

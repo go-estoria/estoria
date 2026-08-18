@@ -997,6 +997,14 @@ func (r *Rebuild) Promote(ctx context.Context) error {
 		return fmt.Errorf("cannot promote a rebuild in unknown phase %s", state.Attempt.Phase)
 	}
 
+	// At the ceiling the increment would wrap negative — and the fold's own
+	// wrapped comparison would accept it as continuity, splitting routing
+	// (which refuses negative revisions) from the lifecycle.
+	if state.CutoverRevision == math.MaxInt64 {
+		r.mu.Unlock()
+		return fmt.Errorf("cannot promote %s: the projection's cutover revision is exhausted", state.Attempt.Target)
+	}
+
 	certificate := r.certificate
 
 	switch {
@@ -1113,6 +1121,11 @@ func (r *Rebuild) Rollback(ctx context.Context) error {
 	if state.Attempt.Previous.Version == 0 {
 		r.mu.Unlock()
 		return errors.New("rebuild has no previous version to roll back to")
+	}
+
+	if state.CutoverRevision == math.MaxInt64 {
+		r.mu.Unlock()
+		return errors.New("cannot roll back: the projection's cutover revision is exhausted")
 	}
 
 	appendErr := r.appendLocked(ctx, RolledBack{

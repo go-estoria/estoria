@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"strings"
 	"sync"
 	"testing"
@@ -3817,12 +3818,26 @@ func TestCutoverRevisions_StampAndFoldAcrossAttempts(t *testing.T) {
 		t.Fatalf("want the rolled-back run to wind down nil, got %v", err)
 	}
 
+	// A third attempt after the rollback: v3 promotes at revision 4, so the
+	// version and the revision diverge — a stamp aliased to the version
+	// would poison the fold here.
+	r3 := h.begin("third build after the rollback")
+
+	cancel3, done3 := runAsync(t, r3)
+	waitPhase(t, r3, lifecycle.PhaseCaughtUp)
+
+	if err := r3.Promote(t.Context()); err != nil {
+		t.Fatalf("promoting v3: %v", err)
+	}
+
 	v2 := projection.ID{Name: "orders", Version: 2}
+	v3 := projection.ID{Name: "orders", Version: 3}
 
 	want := []lifecycle.Cutover{
 		{Live: v1, Revision: 1},
 		{Live: v2, Revision: 2},
 		{Live: v1, Revision: 3},
+		{Live: v3, Revision: 4},
 	}
 
 	got := readCutoverRevisions(t, h.events)
@@ -3841,61 +3856,207 @@ func TestCutoverRevisions_StampAndFoldAcrossAttempts(t *testing.T) {
 		t.Fatalf("reloading state: %v", err)
 	}
 
-	if state.Live != v1 || state.CutoverRevision != 3 {
-		t.Errorf("want the fold at (live %s, revision 3), got (%s, %d)", v1, state.Live, state.CutoverRevision)
+	if state.Live != v3 || state.CutoverRevision != 4 {
+		t.Errorf("want the fold at (live %s, revision 4), got (%s, %d)", v3, state.Live, state.CutoverRevision)
 	}
 
 	waitFor(t, func() bool {
 		applied, err := h.router.AppliedCutover(t.Context(), "orders")
-		return err == nil && applied == (lifecycle.Cutover{Live: v1, Revision: 3})
+		return err == nil && applied == (lifecycle.Cutover{Live: v3, Revision: 4})
 	})
+
+	cancel3()
+
+	if err := waitDone(t, done3); !errors.Is(err, context.Canceled) {
+		t.Fatalf("want the tailing third run to end on its cancellation, got %v", err)
+	}
 }
 
 // TestSnapshotRoundTrip_PreservesCutoverRevision pins the revision's
-// persistence through the snapshot layer: a later attempt hydrated from a
-// snapshot must stamp its promotion against the revision the snapshot
-// carried — a payload that dropped it would restart the sequence and poison
-// the fold.
+// persistence through the snapshot layer, on both sides of the vacuity trap:
+// fallback replay reconstructs the revision, so a behavioral round trip
+// alone cannot catch a codec that drops the field. The payload is asserted
+// directly, and hydration is proven to use it with a divergent-but-valid
+// crafted snapshot whose revision disagrees with what replay would rebuild —
+// the stamp on the next promotion reveals which source fed the command.
 func TestSnapshotRoundTrip_PreservesCutoverRevision(t *testing.T) {
 	t.Parallel()
 
-	events, snapshots, _, _, orchestrator := newSnapshottingOrchestrator(t,
-		snapshotstore.EventCountSnapshotPolicy{N: 1})
+	t.Run("the payload carries the revision", func(t *testing.T) {
+		t.Parallel()
 
-	appendDomainTo(t, events, 2)
+		events, snapshots, _, _, orchestrator := newSnapshottingOrchestrator(t,
+			snapshotstore.EventCountSnapshotPolicy{N: 1})
 
-	promoteAndComplete(t, orchestrator)
+		appendDomainTo(t, events, 2)
 
-	// The premise: a snapshot exists at the completed head, so the second
-	// attempt hydrates through it rather than replaying the whole stream.
-	if _, err := snapshots.ReadSnapshot(t.Context(), ordersLifecycleStreamID(), snapshotstore.ReadSnapshotOptions{}); err != nil {
-		t.Fatalf("want a snapshot at the completed head, got %v", err)
-	}
+		promoteAndComplete(t, orchestrator)
 
-	r, err := orchestrator.Begin(t.Context(), "orders", "second build over a snapshot")
-	if err != nil {
-		t.Fatalf("beginning the second rebuild: %v", err)
-	}
+		snap, err := snapshots.ReadSnapshot(t.Context(), ordersLifecycleStreamID(), snapshotstore.ReadSnapshotOptions{})
+		if err != nil {
+			t.Fatalf("reading the snapshot: %v", err)
+		}
 
-	cancel, done := runAsync(t, r)
-	waitPhase(t, r, lifecycle.PhaseCaughtUp)
+		var persisted lifecycle.State
+		if err := json.Unmarshal(snap.Data, &persisted); err != nil {
+			t.Fatalf("unmarshaling the snapshot payload: %v", err)
+		}
 
-	if err := r.Promote(t.Context()); err != nil {
-		t.Fatalf("promoting v2: %v", err)
-	}
+		if persisted.CutoverRevision != 1 {
+			t.Fatalf("want the snapshot payload to carry cutover revision 1, got %d", persisted.CutoverRevision)
+		}
+	})
 
-	got := readCutoverRevisions(t, events)
+	t.Run("hydration installs the payload's revision", func(t *testing.T) {
+		t.Parallel()
 
-	wantTail := lifecycle.Cutover{Live: projection.ID{Name: "orders", Version: 2}, Revision: 2}
-	if len(got) != 2 || got[1] != wantTail {
-		t.Fatalf("want the second promotion recorded at revision 2, got %v", got)
-	}
+		// No organic snapshots: the crafted one below is the only candidate,
+		// valid but at revision 5 — replay of the six recorded events would
+		// rebuild revision 1, so a promotion stamped 6 proves the snapshot
+		// fed the command and a promotion stamped 2 proves it was silently
+		// discarded for replay.
+		events, snapshots, projections, _, orchestrator := newSnapshottingOrchestrator(t,
+			snapshotstore.EventCountSnapshotPolicy{})
 
-	cancel()
+		appendDomainTo(t, events, 2)
 
-	if err := waitDone(t, done); !errors.Is(err, context.Canceled) {
-		t.Fatalf("want the tailing run to end on its cancellation, got %v", err)
-	}
+		promoteAndComplete(t, orchestrator)
+
+		loaded, err := projections.Load(t.Context(), lifecycle.StreamUUID("orders"), nil)
+		if err != nil {
+			t.Fatalf("loading the completed lifecycle: %v", err)
+		}
+
+		writeLifecycleSnapshot(t, snapshots, lifecycle.State{
+			Name:            "orders",
+			Live:            projection.ID{Name: "orders", Version: 1},
+			CutoverRevision: 5,
+			Allocated:       1,
+		}, loaded.Version())
+
+		r, err := orchestrator.Begin(t.Context(), "orders", "second build over the crafted snapshot")
+		if err != nil {
+			t.Fatalf("beginning the second rebuild: %v", err)
+		}
+
+		cancel, done := runAsync(t, r)
+		waitPhase(t, r, lifecycle.PhaseCaughtUp)
+
+		if err := r.Promote(t.Context()); err != nil {
+			t.Fatalf("promoting v2: %v", err)
+		}
+
+		got := readCutoverRevisions(t, events)
+
+		wantTail := lifecycle.Cutover{Live: projection.ID{Name: "orders", Version: 2}, Revision: 6}
+		if len(got) != 2 || got[1] != wantTail {
+			t.Fatalf("want the promotion stamped from the snapshot's revision (%+v), got %v", wantTail, got)
+		}
+
+		cancel()
+
+		if err := waitDone(t, done); !errors.Is(err, context.Canceled) {
+			t.Fatalf("want the tailing run to end on its cancellation, got %v", err)
+		}
+	})
+}
+
+// TestCutoverCommands_RefuseAnExhaustedRevision pins the overflow guard: at
+// the revision ceiling, the increment would wrap negative, the fold's own
+// wrapped comparison would accept it as continuity, and the worker's decode
+// would then refuse the negative event — routing frozen while the lifecycle
+// advances. No legitimate history reaches the ceiling; persisted state is
+// trusted if it validates, so the states arrive through the snapshot layer.
+func TestCutoverCommands_RefuseAnExhaustedRevision(t *testing.T) {
+	t.Parallel()
+
+	ordersV1 := projection.ID{Name: "orders", Version: 1}
+	ordersV2 := projection.ID{Name: "orders", Version: 2}
+	at := time.Date(2026, 8, 18, 16, 0, 0, 0, time.UTC)
+
+	t.Run("promote", func(t *testing.T) {
+		t.Parallel()
+
+		events, snapshots, _, _, orchestrator := newSnapshottingOrchestrator(t,
+			snapshotstore.EventCountSnapshotPolicy{})
+
+		if _, err := orchestrator.Begin(t.Context(), "orders", "exhausted promote"); err != nil {
+			t.Fatalf("beginning: %v", err)
+		}
+
+		// A caught-up attempt whose projection has exhausted its revisions,
+		// installed over the admission's single event.
+		writeLifecycleSnapshot(t, snapshots, lifecycle.State{
+			Name:            "orders",
+			Live:            ordersV1,
+			CutoverRevision: math.MaxInt64,
+			Allocated:       2,
+			Attempt: lifecycle.AttemptState{
+				ID:          uuid.Must(uuid.NewV4()),
+				Target:      ordersV2,
+				Previous:    ordersV1,
+				Phase:       lifecycle.PhaseCaughtUp,
+				Runner:      uuid.Must(uuid.NewV4()),
+				InitiatedAt: at,
+				CaughtUpAt:  at,
+			},
+		}, 1)
+
+		handle, err := orchestrator.Resume(t.Context(), "orders")
+		if err != nil {
+			t.Fatalf("resuming over the exhausted state: %v", err)
+		}
+
+		err = handle.Promote(t.Context())
+		if err == nil || !strings.Contains(err.Error(), "cutover revision is exhausted") {
+			t.Fatalf("want the promotion refused on revision exhaustion, got %v", err)
+		}
+
+		if got := countEventsOfType(t, events, lifecycle.Promoted{}.EventType()); got != 0 {
+			t.Errorf("want no promotion recorded at the exhausted revision, got %d", got)
+		}
+	})
+
+	t.Run("rollback", func(t *testing.T) {
+		t.Parallel()
+
+		events, snapshots, _, _, orchestrator := newSnapshottingOrchestrator(t,
+			snapshotstore.EventCountSnapshotPolicy{})
+
+		if _, err := orchestrator.Begin(t.Context(), "orders", "exhausted rollback"); err != nil {
+			t.Fatalf("beginning: %v", err)
+		}
+
+		writeLifecycleSnapshot(t, snapshots, lifecycle.State{
+			Name:            "orders",
+			Live:            ordersV2,
+			CutoverRevision: math.MaxInt64,
+			Allocated:       2,
+			Attempt: lifecycle.AttemptState{
+				ID:          uuid.Must(uuid.NewV4()),
+				Target:      ordersV2,
+				Previous:    ordersV1,
+				Phase:       lifecycle.PhasePromoted,
+				Runner:      uuid.Must(uuid.NewV4()),
+				InitiatedAt: at,
+				PromotedAt:  at,
+			},
+		}, 1)
+
+		handle, err := orchestrator.Resume(t.Context(), "orders")
+		if err != nil {
+			t.Fatalf("resuming over the exhausted state: %v", err)
+		}
+
+		err = handle.Rollback(t.Context())
+		if err == nil || !strings.Contains(err.Error(), "cutover revision is exhausted") {
+			t.Fatalf("want the rollback refused on revision exhaustion, got %v", err)
+		}
+
+		if got := countEventsOfType(t, events, lifecycle.RolledBack{}.EventType()); got != 0 {
+			t.Errorf("want no rollback recorded at the exhausted revision, got %d", got)
+		}
+	})
 }
 
 // foreignLifecycleState returns a structurally valid "customers" lifecycle

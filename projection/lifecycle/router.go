@@ -115,6 +115,14 @@ var (
 // authoritative record, and this router is a fold of them. It assumes the
 // lifecycle store's default JSON domain event codec.
 //
+// The fold validates the history it consumes: per name, revisions must
+// advance by exactly one from 1, a rollback can never open a history, and
+// each event's claimed lineage — the version it records as previously live —
+// must match the fold. The authoritative record is one stream per name under
+// optimistic concurrency, so a history that skips, repeats, regresses, or
+// misreports lineage is tampered or foreign, and the fold fails closed
+// rather than serving last-write-wins.
+//
 // The fold is computed lazily on first use, cached, and advanced
 // incrementally from the last folded global position. Refresh advances it on
 // demand, and WithRefreshInterval advances it automatically when the cache is
@@ -124,7 +132,7 @@ type StreamRouter struct {
 	refreshInterval time.Duration
 
 	mu          sync.Mutex
-	live        map[string]projection.ID
+	live        map[string]Cutover
 	position    int64
 	refreshedAt time.Time
 }
@@ -165,12 +173,12 @@ func (r *StreamRouter) Live(ctx context.Context, name string) (projection.ID, er
 		}
 	}
 
-	id, ok := r.live[name]
+	cutover, ok := r.live[name]
 	if !ok {
 		return projection.ID{}, fmt.Errorf("%q: %w", name, ErrNoLiveVersion)
 	}
 
-	return id, nil
+	return cutover.Live, nil
 }
 
 // Refresh advances the fold past any cutover events recorded since the last
@@ -203,7 +211,7 @@ func (r *StreamRouter) advance(ctx context.Context) error {
 
 	live := maps.Clone(r.live)
 	if live == nil {
-		live = map[string]projection.ID{}
+		live = map[string]Cutover{}
 	}
 
 	position := r.position
@@ -216,10 +224,14 @@ func (r *StreamRouter) advance(ctx context.Context) error {
 			return fmt.Errorf("reading event: %w", err)
 		}
 
-		if cutover, ok, err := decodeCutover(event); err != nil {
+		if raw, ok, err := decodeCutover(event); err != nil {
 			return err
 		} else if ok {
-			live[cutover.Live.Name] = cutover.Live
+			if err := checkCutoverContinuity(live[raw.cutover.Live.Name], raw); err != nil {
+				return err
+			}
+
+			live[raw.cutover.Live.Name] = raw.cutover
 		}
 
 		if event.GlobalPosition != nil {
@@ -230,6 +242,29 @@ func (r *StreamRouter) advance(ctx context.Context) error {
 	r.live = live
 	r.position = position
 	r.refreshedAt = time.Now()
+
+	return nil
+}
+
+// checkCutoverContinuity verifies that a decoded cutover extends the fold's
+// current per-name state: the revision advances by exactly one, a rollback
+// never opens a name's history, and the lineage the event claims matches the
+// version the fold holds live. A fold at the revision ceiling refuses every
+// successor through the same arithmetic — no positive revision extends it,
+// and decoding already refused non-positive ones.
+func checkCutoverContinuity(current Cutover, raw rawCutover) error {
+	name := raw.cutover.Live.Name
+
+	switch {
+	case raw.rollback && current.Revision == 0:
+		return fmt.Errorf("the cutover history for projection %q opens with a rollback", name)
+	case raw.cutover.Revision != current.Revision+1:
+		return fmt.Errorf("the cutover history for projection %q records revision %d after revision %d",
+			name, raw.cutover.Revision, current.Revision)
+	case raw.from != current.Live:
+		return fmt.Errorf("the cutover history for projection %q records a flip from %s while %s was live",
+			name, raw.from, current.Live)
+	}
 
 	return nil
 }

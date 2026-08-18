@@ -1,6 +1,7 @@
 package lifecycle
 
 import (
+	"math"
 	"strings"
 	"testing"
 	"time"
@@ -444,6 +445,43 @@ func TestFold_PoisonBranches(t *testing.T) {
 
 				if got.CutoverRevision != 2 {
 					t.Errorf("want the revision never lowered, got %d", got.CutoverRevision)
+				}
+			},
+		},
+		{
+			name: "promotion past an exhausted cutover revision",
+			prior: func() State {
+				s := stateInPhase(PhaseCaughtUp)
+				s.CutoverRevision = math.MaxInt64
+				return s
+			}(),
+			// The wrapped stamp an unguarded increment would record: the
+			// sequence arm's own wrapped arithmetic accepts it as continuity,
+			// so only a dedicated ceiling arm can mark it.
+			event:      Promoted{Previous: ordersV6, Next: ordersV7, Revision: math.MinInt64, At: internalAt},
+			wantReason: "exhausted cutover revision",
+			applied: func(t *testing.T, got State) {
+				t.Helper()
+
+				if got.CutoverRevision != math.MaxInt64 {
+					t.Errorf("want the revision held at its ceiling, got %d", got.CutoverRevision)
+				}
+			},
+		},
+		{
+			name: "rollback past an exhausted cutover revision",
+			prior: func() State {
+				s := stateInPhase(PhasePromoted)
+				s.CutoverRevision = math.MaxInt64
+				return s
+			}(),
+			event:      RolledBack{From: ordersV7, RevertedTo: ordersV6, Revision: math.MinInt64, At: internalAt},
+			wantReason: "exhausted cutover revision",
+			applied: func(t *testing.T, got State) {
+				t.Helper()
+
+				if got.CutoverRevision != math.MaxInt64 {
+					t.Errorf("want the revision held at its ceiling, got %d", got.CutoverRevision)
 				}
 			},
 		},
