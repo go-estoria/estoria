@@ -74,6 +74,16 @@ type Rebuild struct {
 	// that must order external actions after the claim.
 	processorReturned chan struct{}
 
+	// returnCtxErr is the run context's error as the processor's return
+	// observed it, captured before the return claims its exit order: a
+	// first-returned result is judged against the cancellation state it
+	// actually returned under, so a cancellation arriving between the return
+	// and its attribution cannot relabel an earlier independent result as
+	// the run's own wind-down. Written once, by Run's processor goroutine;
+	// both the exit-order claim and the result's delivery on done order the
+	// write before any reader.
+	returnCtxErr error
+
 	// stopped records that the processor was stopped deliberately — by a
 	// command (Abandon, Rollback) or by the reconcile loop observing the
 	// attempt's end or this runner's displacement — so Run reports nil
@@ -329,6 +339,7 @@ func (r *Rebuild) Run(ctx context.Context) error {
 
 	go func() {
 		err := proc.Run(processorCtx)
+		r.returnCtxErr = ctx.Err()
 		r.exitOrder.CompareAndSwap(exitOrderRunning, exitOrderReturned)
 		close(returned)
 		r.publishProcessorExit()
@@ -592,7 +603,7 @@ func (r *Rebuild) runToCaughtUp(ctx context.Context, proc *processor.Processor, 
 		// fail-closed cause wins over the bare context error — and a result
 		// the processor returned before this stop, carrying more than the
 		// run's own cancellation, must not be discarded behind it.
-		return false, r.classifyExit(reconcileExited, r.windDown(ctx, stop, done, ctx.Err()))
+		return false, r.classifyExit(reconcileExited, r.windDown(stop, done, ctx.Err()))
 	case err := <-done:
 		stop()
 
@@ -612,7 +623,7 @@ func (r *Rebuild) runToCaughtUp(ctx context.Context, proc *processor.Processor, 
 
 		return false, r.classifyExit(reconcileExited, exitErr)
 	case err != nil:
-		wound := r.windDown(ctx, stop, done, err)
+		wound := r.windDown(stop, done, err)
 
 		// An Abandon — or the reconcile loop observing the attempt's end —
 		// can win the race against the catch-up transition; the outcome is
@@ -691,7 +702,7 @@ func (r *Rebuild) promoteAfterCatchUp(ctx context.Context, attemptID, runnerID u
 		return true, nil
 	}
 
-	wound := r.windDown(ctx, stop, done, err)
+	wound := r.windDown(stop, done, err)
 
 	// An Abandon can win the race against auto-promotion; the abandonment is
 	// recorded, so the refused promotion is not an error, and a loss to a
@@ -706,14 +717,20 @@ func (r *Rebuild) promoteAfterCatchUp(ctx context.Context, attemptID, runnerID u
 // cancellation path: it claims the exit order for this stop, stops the
 // processor, drains its result, and attributes the outcome against the
 // path's local failure — from the recorded facts, so a result the processor
-// returned first is never discarded behind the local story. Callers pass
-// the attribution through classifyExit, keeping recorded verdicts' precedence.
-func (r *Rebuild) windDown(ctx context.Context, stop context.CancelFunc, done <-chan error, local error) error {
+// returned first is never discarded behind the local story. The cancellation
+// state it judges against is the one captured at the return itself, read
+// only after the drain so the capture is always ordered before it; sampling
+// the context here instead would let a cancellation arriving after the
+// return relabel an earlier independent result. Callers pass the
+// attribution through classifyExit, keeping recorded verdicts' precedence.
+func (r *Rebuild) windDown(stop context.CancelFunc, done <-chan error, local error) error {
 	returnedFirst := r.claimStopOrder()
 
 	stop()
 
-	return attributeExit(ctx.Err(), returnedFirst, <-done, local)
+	exitErr := <-done
+
+	return attributeExit(r.returnCtxErr, returnedFirst, exitErr, local)
 }
 
 // claimStopOrder claims the exit order for a wind-down's stop, reporting
@@ -732,15 +749,16 @@ func (r *Rebuild) claimStopOrder() (returnedFirst bool) {
 
 // attributeExit decides what a failure path reports when a local failure and
 // the processor's result compete, from two explicitly recorded facts — exit
-// order and the run context's own state — never from the result's shape
-// alone: a processor whose stop won the order reports nothing but the stop's
-// echo, whatever shape its handler gave it, and the local failure governs. A
-// result that returned first is the processor's own; when the run's context
-// has ended and that result carries nothing but the same cancellation, the
-// documented context error is the story and the local failure is downstream
-// of it; any other first-returned result — including one that merely looks
-// like a cancellation this run never issued — is a genuinely independent
-// failure and joins the local one.
+// order and the run context's state as the return observed it — never from
+// the result's shape alone: a processor whose stop won the order reports
+// nothing but the stop's echo, whatever shape its handler gave it, and the
+// local failure governs. A result that returned first is the processor's
+// own; when the run's context had ended at the return and the result carries
+// nothing but that same cancellation, the documented context error is the
+// story and the local failure is downstream of it; any other first-returned
+// result — including a cancellation-shaped one returned while the context
+// was still live — is a genuinely independent failure and joins the local
+// one.
 func attributeExit(ctxErr error, returnedFirst bool, exitErr, local error) error {
 	if !returnedFirst || exitErr == nil {
 		return local

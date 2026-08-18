@@ -2471,6 +2471,152 @@ func TestRun_ProcessorDeathDuringLostCatchUpSurfacesItsError(t *testing.T) {
 	}
 }
 
+// TestRun_LateCancellationKeepsAnEarlierIndependentResult pins attribution's
+// provenance against relabeling: the processor returns a cancellation-shaped
+// result of its own while the run's context is live, and only then is the run
+// canceled. The cancellation state that matters is the one the return
+// happened under — captured with the return's exit-order claim — so the later
+// cancellation must not subsume the result as the run's own wind-down: both
+// the processor's result and the independent append loss survive. The parked
+// append holds the exit publication open, so the cancellation is guaranteed
+// to land between the return and the wind-down that attributes it.
+func TestRun_LateCancellationKeepsAnEarlierIndependentResult(t *testing.T) {
+	t.Parallel()
+
+	events := newEventStore(t)
+	writer := &racingWriter{Store: events}
+
+	inner, err := lifecycle.NewStore(writer)
+	if err != nil {
+		t.Fatalf("creating lifecycle store: %v", err)
+	}
+
+	projections := &parkingSaveStore{Store: inner}
+	h := buildHarness(t, events, projections, lifecycle.WithReconcileInterval(time.Hour))
+	h.appendDomain(3)
+
+	r := h.begin("canceled after an independent cancellation-shaped death")
+
+	// The claim save passes; the CaughtUp save parks with the handle lock
+	// held.
+	entered, gate := projections.armSaveGateAfter(1)
+
+	cancel, done := runAsync(t, r)
+
+	select {
+	case <-entered:
+	case <-time.After(waitTimeout):
+		t.Fatal("timed out waiting for the catch-up save to park")
+	}
+
+	// With the append parked, the processor dies on its own — with a result
+	// that is nothing but cancellation in shape, under a context that is
+	// still alive. Its return claims the exit order before the cancellation
+	// below can be observed by anything.
+	h.model.armHandleFailureWith(fmt.Errorf("simulated shard shutdown: %w", context.Canceled))
+	h.appendDomain(1)
+
+	select {
+	case <-h.model.handleFailed():
+	case <-time.After(waitTimeout):
+		t.Fatal("timed out waiting for the processor to fail")
+	}
+
+	select {
+	case <-lifecycle.ProcessorReturnedForTest(r):
+	case <-time.After(waitTimeout):
+		t.Fatal("timed out waiting for the processor's return")
+	}
+
+	// The run is canceled only now, after the return committed: a wind-down
+	// that samples the context late would misread the earlier result as the
+	// run's own cancellation and discard it — and the append loss with it.
+	cancel()
+
+	// The parked append loses its slot to a verdict-neutral competitor:
+	// same attempt, same claimant, so classification records nothing.
+	writer.armRaceAfter(0, writableLifecycleEvent(t, lifecycle.CaughtUp{
+		Position: 4,
+		At:       time.Date(2026, 8, 18, 13, 30, 0, 0, time.UTC),
+	}))
+
+	close(gate)
+
+	runErr := waitDone(t, done)
+
+	if runErr == nil || !strings.Contains(runErr.Error(), "simulated shard shutdown") {
+		t.Fatalf("want the processor's pre-cancellation result kept, got %v", runErr)
+	}
+
+	if !errors.Is(runErr, eventstore.StreamVersionMismatchError{}) {
+		t.Errorf("want the independent append loss joined alongside it, got %v", runErr)
+	}
+}
+
+// TestRun_OwnCancellationAtTheReturnSubsumesTheLostAppend pins the other side
+// of return-time provenance: when the run is canceled first and the processor
+// returns nothing but that cancellation, the documented context error is the
+// whole story — the append loss the wind-down races into is downstream of the
+// same cancellation and must not ride along as an independent failure.
+func TestRun_OwnCancellationAtTheReturnSubsumesTheLostAppend(t *testing.T) {
+	t.Parallel()
+
+	events := newEventStore(t)
+	writer := &racingWriter{Store: events}
+
+	inner, err := lifecycle.NewStore(writer)
+	if err != nil {
+		t.Fatalf("creating lifecycle store: %v", err)
+	}
+
+	projections := &parkingSaveStore{Store: inner}
+	h := buildHarness(t, events, projections, lifecycle.WithReconcileInterval(time.Hour))
+	h.appendDomain(3)
+
+	r := h.begin("canceled before the processor returned")
+
+	// The claim save passes; the CaughtUp save parks with the handle lock
+	// held.
+	entered, gate := projections.armSaveGateAfter(1)
+
+	cancel, done := runAsync(t, r)
+
+	select {
+	case <-entered:
+	case <-time.After(waitTimeout):
+		t.Fatal("timed out waiting for the catch-up save to park")
+	}
+
+	// The run is canceled while the append is parked: the tailing processor
+	// observes it and returns the run's own cancellation, under the already-
+	// dead context.
+	cancel()
+
+	select {
+	case <-lifecycle.ProcessorReturnedForTest(r):
+	case <-time.After(waitTimeout):
+		t.Fatal("timed out waiting for the processor's return")
+	}
+
+	// The parked append loses its slot to a verdict-neutral competitor.
+	writer.armRaceAfter(0, writableLifecycleEvent(t, lifecycle.CaughtUp{
+		Position: 4,
+		At:       time.Date(2026, 8, 18, 13, 30, 0, 0, time.UTC),
+	}))
+
+	close(gate)
+
+	runErr := waitDone(t, done)
+
+	if !errors.Is(runErr, context.Canceled) {
+		t.Fatalf("want the run's own cancellation surfaced, got %v", runErr)
+	}
+
+	if errors.Is(runErr, eventstore.StreamVersionMismatchError{}) {
+		t.Errorf("want the downstream append loss subsumed by the cancellation, got %v", runErr)
+	}
+}
+
 // TestRun_CancellationAfterProcessorDeathKeepsItsError pins that a
 // cancellation arriving after the processor died with a result of its own
 // does not displace that result. The already-ready result wins the catch-up
@@ -4264,14 +4410,15 @@ func TestRun_ProcessorFailureDuringCatchUpSurfacesDespiteHeldReconcile(t *testin
 // readModel is the versioned read-side: one "table" of handled global
 // positions per projection version, with Teardown dropping a version's table.
 type readModel struct {
-	mu           sync.Mutex
-	tables       map[projection.ID][]int64
-	dropped      []projection.ID
-	gate         chan struct{}
-	failTeardown bool
-	failHandle   bool
-	failedOnce   sync.Once
-	failed       chan struct{}
+	mu            sync.Mutex
+	tables        map[projection.ID][]int64
+	dropped       []projection.ID
+	gate          chan struct{}
+	failTeardown  bool
+	failHandle    bool
+	failHandleErr error
+	failedOnce    sync.Once
+	failed        chan struct{}
 }
 
 func newReadModel() *readModel {
@@ -4349,6 +4496,17 @@ func (m *readModel) armHandleFailure() {
 	m.failHandle = true
 }
 
+// armHandleFailureWith arms handler failures that fail with the given error,
+// so tests can shape the processor's own result — including one that merely
+// looks like a cancellation the run never issued.
+func (m *readModel) armHandleFailureWith(err error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	m.failHandle = true
+	m.failHandleErr = err
+}
+
 type readModelHandler struct {
 	model *readModel
 	id    projection.ID
@@ -4378,6 +4536,11 @@ func (h *readModelHandler) Handle(ctx context.Context, event *eventstore.Event) 
 
 	if h.model.failHandle {
 		h.model.failedOnce.Do(func() { close(h.model.failed) })
+
+		if h.model.failHandleErr != nil {
+			return h.model.failHandleErr
+		}
+
 		return errors.New("handler failure")
 	}
 

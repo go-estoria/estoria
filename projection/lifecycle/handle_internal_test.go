@@ -14,6 +14,7 @@ import (
 	esmemory "github.com/go-estoria/estoria/eventstore/memory"
 	"github.com/go-estoria/estoria/projection"
 	cpmemory "github.com/go-estoria/estoria/projection/checkpointstore/memory"
+	"github.com/go-estoria/estoria/projection/processor"
 	"github.com/go-estoria/estoria/typeid"
 	"github.com/gofrs/uuid/v5"
 )
@@ -903,39 +904,30 @@ func TestAttributeExit(t *testing.T) {
 
 // TestWindDown pins the wind-down helper the cancellation, append-failure,
 // and auto-promotion paths share, directly: it must claim the exit order
-// before stopping and attribute the drained result from the recorded facts.
-// The first row is the cancellation arm's discard-prevention — a result the
-// processor returned before the stop, carrying more than the run's own
-// cancellation, survives a dead context instead of vanishing behind it; the
-// arm itself is a single call to this helper, exercised behaviorally by the
-// append-failure and promotion regressions.
+// before stopping and attribute the drained result from the recorded facts —
+// including the run-context state captured at the return itself, never a
+// later sample. The first row is the cancellation arm's discard-prevention —
+// a result the processor returned before the stop, carrying more than the
+// run's own cancellation, survives a dead context instead of vanishing
+// behind it; the arm itself is a single call to this helper, exercised
+// behaviorally by the append-failure and promotion regressions.
 func TestWindDown(t *testing.T) {
 	t.Parallel()
 
 	errExit := errors.New("the processor's own failure")
 	errLocal := errors.New("the local failure")
 
-	canceled := func(t *testing.T) context.Context {
-		t.Helper()
-
-		ctx, cancel := context.WithCancel(t.Context())
-		cancel()
-
-		return ctx
-	}
-
 	t.Run("a first-returned real result survives a dead context", func(t *testing.T) {
 		t.Parallel()
 
 		r := &Rebuild{}
 		r.exitOrder.Store(exitOrderReturned)
+		r.returnCtxErr = context.Canceled
 
 		done := make(chan error, 1)
 		done <- errExit
 
-		ctx := canceled(t)
-
-		got := r.windDown(ctx, func() {}, done, ctx.Err())
+		got := r.windDown(func() {}, done, context.Canceled)
 
 		if !errors.Is(got, errExit) {
 			t.Fatalf("want the first-returned result kept through the cancellation, got %v", got)
@@ -947,16 +939,34 @@ func TestWindDown(t *testing.T) {
 
 		r := &Rebuild{}
 		r.exitOrder.Store(exitOrderReturned)
+		r.returnCtxErr = context.Canceled
 
 		done := make(chan error, 1)
 		done <- fmt.Errorf("processing: %w", context.Canceled)
 
-		ctx := canceled(t)
+		got := r.windDown(func() {}, done, errLocal)
 
-		got := r.windDown(ctx, func() {}, done, ctx.Err())
+		if !errors.Is(got, context.Canceled) || errors.Is(got, errLocal) {
+			t.Fatalf("want the documented context error to subsume the local failure, got %v", got)
+		}
+	})
 
-		if !errors.Is(got, context.Canceled) || errors.Is(got, errExit) {
-			t.Fatalf("want the documented context error, got %v", got)
+	t.Run("a result returned under a live context is never relabeled", func(t *testing.T) {
+		t.Parallel()
+
+		// The return claimed its order with no context error captured: the
+		// cancellation the local failure carries arrived afterward, so the
+		// cancellation-shaped result stays independent and joins it.
+		r := &Rebuild{}
+		r.exitOrder.Store(exitOrderReturned)
+
+		done := make(chan error, 1)
+		done <- fmt.Errorf("processing: %w", context.Canceled)
+
+		got := r.windDown(func() {}, done, errLocal)
+
+		if !errors.Is(got, errLocal) || !errors.Is(got, context.Canceled) {
+			t.Fatalf("want the pre-cancellation result joined with the local failure, got %v", got)
 		}
 	})
 
@@ -968,14 +978,83 @@ func TestWindDown(t *testing.T) {
 		done := make(chan error, 1)
 		done <- errExit
 
-		stop := func() { r.exitOrder.CompareAndSwap(exitOrderRunning, exitOrderReturned) }
+		// A stop-caused return claims the return side, exactly as the real
+		// processor goroutine does; the wind-down must already hold the stop
+		// claim by then, so this CAS must lose.
+		var stopClaimWon bool
+		stop := func() {
+			stopClaimWon = r.exitOrder.CompareAndSwap(exitOrderRunning, exitOrderReturned)
+		}
 
-		got := r.windDown(t.Context(), stop, done, errLocal)
+		got := r.windDown(stop, done, errLocal)
 
 		if !errors.Is(got, errLocal) || errors.Is(got, errExit) {
 			t.Fatalf("want the local failure to govern a stop-owned exit, got %v", got)
 		}
+
+		if stopClaimWon {
+			t.Error("want the exit order claimed before the stop ran: the stop-side CAS must lose to the wind-down's claim")
+		}
+
+		if r.exitOrder.Load() != exitOrderStopped {
+			t.Errorf("want the exit order held by the stop claim, got %d", r.exitOrder.Load())
+		}
 	})
+}
+
+// TestRunToCaughtUp_CancellationArmDrainsTheUnpublishedResult forces the
+// cancellation arm's discard-prevention through the arm itself: the
+// processor's return has claimed the exit order under a live context, but
+// its result is still unpublished — only the cancellation is ready at the
+// select, and the result lands only once the arm's own stop runs. The arm
+// must wind down through the shared helper, so the independent result is
+// drained and joined rather than discarded behind the bare context error.
+// Behavioral tests cannot hold this window open: an already-published
+// result makes the select's done arm ready first.
+func TestRunToCaughtUp_CancellationArmDrainsTheUnpublishedResult(t *testing.T) {
+	t.Parallel()
+
+	r, certificate := caughtUpRebuildForTest(t, nil)
+
+	// A processor that is never run: its caught-up signal can never fire, so
+	// the select sees only the cancellation.
+	events, err := esmemory.NewEventStore()
+	if err != nil {
+		t.Fatalf("creating event store: %v", err)
+	}
+
+	proc, err := processor.New(events, cpmemory.NewCheckpointStore(), projection.ID{Name: "orders", Version: 1}, nopHandler{})
+	if err != nil {
+		t.Fatalf("creating processor: %v", err)
+	}
+
+	// The return's claim is committed, under a live run context; publication
+	// has not delivered the result yet.
+	r.exitOrder.Store(exitOrderReturned)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	errIndependent := errors.New("the processor's own failure")
+	done := make(chan error, 1)
+	stop := func() { done <- errIndependent }
+
+	reconcileExited := make(chan struct{})
+	close(reconcileExited)
+
+	keepTailing, err := r.runToCaughtUp(ctx, proc, certificate.attempt, certificate.runner, stop, done, reconcileExited, time.Now())
+
+	if keepTailing {
+		t.Fatal("want the cancellation to end the run")
+	}
+
+	if !errors.Is(err, errIndependent) {
+		t.Fatalf("want the unpublished independent result drained and kept, got %v", err)
+	}
+
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("want the run's cancellation joined alongside it, got %v", err)
+	}
 }
 
 // TestPromoteAfterCatchUp_ClaimsExitOrderBeforeStopping pins the arbitration
