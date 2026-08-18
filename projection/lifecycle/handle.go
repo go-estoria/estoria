@@ -221,13 +221,16 @@ func (r *Rebuild) Run(ctx context.Context) error {
 	}
 
 	// Claim-then-act: ownership is recorded before the processor exists. A
-	// pre-append failure — including losing the stream to a competing claim —
-	// starts nothing; a crash after the append is exactly what resume
-	// reconciliation handles.
+	// pre-append failure starts nothing, and losing the stream to a version
+	// conflict is classified from the exact event that won it — a competing
+	// claim is displacement, an ended attempt is a terminal state observed;
+	// a crash after the append is exactly what resume reconciliation handles.
 	if err := r.appendLocked(ctx, transitions...); err != nil {
 		if !errors.Is(err, aggregatestore.ErrEventsAppended) {
+			result := r.claimDefeat(ctx, attempt, err)
 			r.mu.Unlock()
-			return err
+
+			return result
 		}
 
 		// The claim is durable but unobserved. Per ErrEventsAppended's
@@ -238,7 +241,7 @@ func (r *Rebuild) Run(ctx context.Context) error {
 		// exact runner won the claim it recorded. A failed recovery keeps
 		// carrying ErrEventsAppended: the claim's durability must stay
 		// visible to the caller alongside the recovery failure.
-		loaded, loadErr := r.orchestrator.config.Projections.Load(ctx, StreamUUID(r.name), nil)
+		loaded, loadErr := r.hydrateFresh(ctx, 0)
 		if loadErr != nil {
 			r.mu.Unlock()
 			return fmt.Errorf("reloading lifecycle state after an unobserved claim: %w", errors.Join(err, loadErr))
@@ -367,12 +370,16 @@ func (r *Rebuild) classifyExit(reconcileExited <-chan struct{}, err error) error
 // handle's lock: a load that blocks until the processor is canceled must
 // not hold the lock a command needs in order to reach that cancellation —
 // command context cancellation cannot interrupt a mutex wait. The fresh
-// view installs, and the verdict is decided, under the lock. A tailing
-// processor appends nothing that would surface a terminal transition
-// recorded elsewhere; self-reconciliation is what bounds a superseded
-// builder's lifetime. Version numbers are never reused, so the reconcile
-// interval bounds waste, not correctness — a not-yet-reconciled builder
-// writes only to identities nothing else will ever read.
+// view installs, and the verdict is decided, under the lock, and only when
+// the view is at least as new as the one the handle already holds: a load
+// begun at one version can return after a local append advanced past it,
+// and installing its past over certified state would refuse a healthy
+// promotion. A tailing processor appends nothing that would surface a
+// terminal transition recorded elsewhere; self-reconciliation is what
+// bounds a superseded builder's lifetime. Version numbers are never
+// reused, so the reconcile interval bounds waste, not correctness — a
+// not-yet-reconciled builder writes only to identities nothing else will
+// ever read.
 func (r *Rebuild) reconcile(ctx context.Context, attemptID, runnerID uuid.UUID, stop context.CancelFunc) {
 	ticker := time.NewTicker(r.orchestrator.reconcileInterval)
 	defer ticker.Stop()
@@ -392,7 +399,7 @@ func (r *Rebuild) reconcile(ctx context.Context, attemptID, runnerID uuid.UUID, 
 			return
 		}
 
-		loaded, err := r.orchestrator.config.Projections.Load(ctx, StreamUUID(r.name), nil)
+		loaded, err := r.hydrateFresh(ctx, 0)
 		if err != nil {
 			// Benign only when the failure IS this run's own cancellation
 			// and nothing else: deciding on the context's state alone would
@@ -411,22 +418,33 @@ func (r *Rebuild) reconcile(ctx context.Context, attemptID, runnerID uuid.UUID, 
 			return
 		}
 
-		// Validity precedes the attempt comparison: an inconsistent stream
-		// can replace the attempt, and stopping over the replacement alone
-		// would report a poisoned lifecycle as an ordinary nil wind-down.
-		if err := checkLifecycleAggregate(loaded, r.name); err != nil {
-			r.recordTerminalStop(err)
-			r.orchestrator.log.Error("loaded lifecycle state is no longer valid; stopping the processor",
-				"attempt_id", attemptID, "error", err)
-			stop()
-
-			return
-		}
-
 		r.mu.Lock()
 
 		if r.stopped {
 			r.mu.Unlock()
+			return
+		}
+
+		// A view older than the one the handle holds is a read that raced a
+		// newer local append: it proves nothing about the present, and
+		// installing it would overwrite certified state with its own past.
+		// It renders no verdict — not even a validity one; the next tick
+		// reads a newer view, and anything terminal is still terminal there.
+		if loaded.Version() < r.aggregate.Version() {
+			r.mu.Unlock()
+			continue
+		}
+
+		// Validity precedes the attempt comparison: an inconsistent stream
+		// can replace the attempt, and stopping over the replacement alone
+		// would report a poisoned lifecycle as an ordinary nil wind-down.
+		if err := checkLifecycleAggregate(loaded, r.name); err != nil {
+			r.recordTerminalStopLocked(err)
+			r.mu.Unlock()
+			r.orchestrator.log.Error("loaded lifecycle state is no longer valid; stopping the processor",
+				"attempt_id", attemptID, "error", err)
+			stop()
+
 			return
 		}
 
@@ -475,6 +493,12 @@ func (r *Rebuild) recordTerminalStop(cause error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
+	r.recordTerminalStopLocked(cause)
+}
+
+// recordTerminalStopLocked is recordTerminalStop for callers already holding
+// r.mu.
+func (r *Rebuild) recordTerminalStopLocked(cause error) {
 	if r.stopped {
 		return
 	}
@@ -546,39 +570,18 @@ func (r *Rebuild) runToCaughtUp(ctx context.Context, proc *processor.Processor, 
 	case <-proc.CaughtUp():
 	}
 
-	r.mu.Lock()
+	stopped, exited, err := r.recordCatchUp(ctx, attemptID, proc.CaughtUpPosition(), time.Since(started))
 
-	// Recheck under the lock: a same-handle Abandon between the caught-up
-	// signal and this append shares the aggregate, so it would not surface
-	// as a version conflict — CaughtUp would land cleanly on top of the
-	// Abandoned event.
-	if r.stopped {
-		failure := r.failure
-		r.mu.Unlock()
+	switch {
+	case stopped:
 		<-done
+		return false, err
+	case exited:
+		stop()
+		exitErr := <-done
 
-		return false, failure
-	}
-
-	position := proc.CaughtUpPosition()
-
-	err := r.appendLocked(ctx, CaughtUp{
-		Position: position,
-		Duration: time.Since(started),
-		At:       time.Now(),
-	})
-	if err == nil {
-		r.certificate = &certification{
-			attempt:  attemptID,
-			runner:   r.runner,
-			position: position,
-			version:  r.aggregate.Version(),
-			exited:   r.processorExited,
-		}
-	}
-	r.mu.Unlock()
-
-	if err != nil {
+		return false, r.classifyExit(reconcileExited, exitErr)
+	case err != nil:
 		stop()
 		<-done
 
@@ -597,6 +600,48 @@ func (r *Rebuild) runToCaughtUp(ctx context.Context, proc *processor.Processor, 
 	}
 
 	return true, nil
+}
+
+// recordCatchUp records this run's CaughtUp transition and certifies it,
+// unless the run was stopped while the caught-up signal was in flight — a
+// same-handle Abandon shares the aggregate, so it would not surface as a
+// version conflict — or the processor has already published its exit. The
+// exit check, the append, and the certification share one critical section
+// with exit publication, so a certificate is never created against a
+// published exit: it would outlive its processor, and the refusals it then
+// causes would shadow the processor's real result. On a stop it reports the
+// recorded failure, nil for a deliberate one, as err.
+func (r *Rebuild) recordCatchUp(ctx context.Context, attemptID uuid.UUID, position int64, elapsed time.Duration) (stopped, exited bool, err error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if r.stopped {
+		return true, false, r.failure
+	}
+
+	select {
+	case <-r.processorExited:
+		return false, true, nil
+	default:
+	}
+
+	if err := r.appendLocked(ctx, CaughtUp{
+		Position: position,
+		Duration: elapsed,
+		At:       time.Now(),
+	}); err != nil {
+		return false, false, err
+	}
+
+	r.certificate = &certification{
+		attempt:  attemptID,
+		runner:   r.runner,
+		position: position,
+		version:  r.aggregate.Version(),
+		exited:   r.processorExited,
+	}
+
+	return false, false, nil
 }
 
 // promoteAfterCatchUp auto-promotes a rebuild directly after its catch-up
@@ -618,7 +663,7 @@ func (r *Rebuild) promoteAfterCatchUp(ctx context.Context, attemptID, runnerID u
 	}
 
 	stop()
-	<-done
+	exitErr := <-done
 
 	// An Abandon can win the race against auto-promotion; the abandonment is
 	// recorded, so the refused promotion is not an error, and a loss to a
@@ -626,23 +671,110 @@ func (r *Rebuild) promoteAfterCatchUp(ctx context.Context, attemptID, runnerID u
 	// its cause instead.
 	r.recordLostAppend(ctx, attemptID, runnerID, err)
 
+	// A processor that died on its own killed the certification, making the
+	// refusal a mere echo of that death: the processor's result is the run's
+	// story. One that exited only because this wind-down canceled it reports
+	// nothing but its context's cancellation, and the refusal stands as the
+	// cause.
+	if exitErr != nil && !cancellationOnly(exitErr, context.Canceled) && !cancellationOnly(exitErr, context.DeadlineExceeded) {
+		return false, r.classifyExit(reconcileExited, exitErr)
+	}
+
 	return false, r.classifyExit(reconcileExited, err)
 }
 
-// recordLostAppend classifies a lifecycle append this run lost — by version
-// conflict or an unobservable save — so Run's result is typed by what
-// actually won the stream rather than by the raw loss: an ended attempt is
-// a deliberate wind-down, a competing claim is displacement, and anything
-// else leaves the original error to surface. The loaded truth installs, and
-// the verdict records, through the same fields the reconcile loop uses, so
-// exit classification surfaces it uniformly. A load or validity failure
-// leaves the verdict unclassified rather than masking the original loss.
+// hydrateFresh reads the projection's lifecycle stream into a new aggregate,
+// to the given version or to the head when toVersion is 0. Verdicts about
+// what the stream records — reconciliation, claim recovery, defeat
+// classification — must come from the durable events: the configured store's
+// Load may serve a read-through cache entry (aggregatestore.CachedStore does,
+// for unversioned loads), while New and Hydrate reach the stream itself.
+func (r *Rebuild) hydrateFresh(ctx context.Context, toVersion int64) (*aggregatestore.Aggregate[State], error) {
+	var opts *aggregatestore.HydrateOptions
+	if toVersion > 0 {
+		opts = &aggregatestore.HydrateOptions{ToVersion: toVersion}
+	}
+
+	loaded := r.orchestrator.config.Projections.New(StreamUUID(r.name))
+	if err := r.orchestrator.config.Projections.Hydrate(ctx, loaded, opts); err != nil {
+		return nil, err
+	}
+
+	return loaded, nil
+}
+
+// defeatSlot reports the exact stream slot a lost lifecycle append contended
+// for: the version the save expected, plus one. The slot is known only for a
+// loss carrying the store's version-mismatch error; a loss carrying
+// ErrEventsAppended has no foreign winner to classify — the events at the
+// contended slots are this run's own, durably recorded.
+func defeatSlot(lost error) (int64, bool) {
+	var mismatch eventstore.StreamVersionMismatchError
+	if !errors.As(lost, &mismatch) {
+		return 0, false
+	}
+
+	return mismatch.ExpectedVersion + 1, true
+}
+
+// claimDefeat maps a claim append lost to a version conflict onto Run's
+// contract by classifying the exact event that won the contended slot: the
+// attempt ending there is a terminal state observed (nil), a claim recording
+// another runner is displacement, and any other winner — or a slot that
+// cannot be read back — leaves the raw loss to surface. The baseline is the
+// fold the claim was appended against: base names the attempt and the
+// claimant it recorded before the defeat, so an incumbent's own transition
+// winning the slot is not mistaken for a new claimant.
+func (r *Rebuild) claimDefeat(ctx context.Context, base AttemptState, lost error) error {
+	slot, ok := defeatSlot(lost)
+	if !ok {
+		return lost
+	}
+
+	loaded, err := r.hydrateFresh(ctx, slot)
+	if err != nil {
+		return lost
+	}
+
+	if err := checkLifecycleAggregate(loaded, r.name); err != nil {
+		// The winning history does not even validate; fail closed with both.
+		return errors.Join(lost, err)
+	}
+
+	current := loaded.State().Attempt
+
+	switch {
+	case current.ID != base.ID:
+		// The defeating event ended or replaced the attempt: terminal state
+		// reached and observed, nothing to run.
+		return nil
+	case current.Runner != base.Runner:
+		return fmt.Errorf("the claim lost the stream to a competing runner: %w", ErrRunnerDisplaced)
+	default:
+		return lost
+	}
+}
+
+// recordLostAppend classifies a lifecycle append this run lost to a version
+// conflict, from the exact event that defeated it — the fold at the slot the
+// append contended for — so the verdict is deterministic no matter what
+// landed on the stream afterward: an ended attempt is a deliberate
+// wind-down, a competing claim is displacement, and any other winner leaves
+// the original error to surface. A loss carrying ErrEventsAppended is never
+// classified: the events at the contended slots are this run's own durable
+// append, and the raw error already reports exactly that. The verdict
+// records through the same fields the reconcile loop uses, so exit
+// classification surfaces it uniformly; the slot fold installs only when it
+// is at least as new as the handle's current view. A load failure leaves the
+// verdict unclassified rather than masking the original loss; a slot fold
+// that fails validation is terminal.
 func (r *Rebuild) recordLostAppend(ctx context.Context, attemptID, runnerID uuid.UUID, lost error) {
-	if !errors.Is(lost, eventstore.StreamVersionMismatchError{}) && !errors.Is(lost, aggregatestore.ErrEventsAppended) {
+	slot, ok := defeatSlot(lost)
+	if !ok {
 		return
 	}
 
-	loaded, err := r.orchestrator.config.Projections.Load(ctx, StreamUUID(r.name), nil)
+	loaded, err := r.hydrateFresh(ctx, slot)
 	if err != nil {
 		return
 	}
@@ -659,7 +791,9 @@ func (r *Rebuild) recordLostAppend(ctx context.Context, attemptID, runnerID uuid
 		return
 	}
 
-	r.aggregate = loaded
+	if loaded.Version() >= r.aggregate.Version() {
+		r.aggregate = loaded
+	}
 
 	current := loaded.State().Attempt
 

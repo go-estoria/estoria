@@ -379,18 +379,20 @@ func TestPublishProcessorExit_SerializesWithPromotion(t *testing.T) {
 	}
 
 	published := make(chan struct{})
+	exited := r.processorExited
 
 	go func() {
 		r.publishProcessorExit()
 		close(published)
 	}()
 
-	// One-sided by construction: an unserialized publication completes
-	// immediately, so observing it still pending while the save is parked is
-	// the whole assertion.
+	// One-sided by construction: an unserialized publication closes the exit
+	// signal immediately, so observing the signal itself still open while the
+	// save is parked is the whole assertion — helper completion alone would
+	// miss a close that happened before the lock was taken.
 	select {
-	case <-published:
-		t.Fatal("want exit publication blocked while the promotion save is in flight")
+	case <-exited:
+		t.Fatal("want the exit signal unclosed while the promotion save is in flight")
 	case <-time.After(150 * time.Millisecond):
 	}
 
@@ -409,6 +411,228 @@ func TestPublishProcessorExit_SerializesWithPromotion(t *testing.T) {
 	if got := r.aggregate.State().Attempt.Phase; got != PhasePromoted {
 		t.Errorf("want the promotion durable, got %s", got)
 	}
+}
+
+// TestRecordCatchUp_RefusesPublishedExit pins certification's exit check: the
+// caught-up signal and the processor's exit can be ready together, and a
+// certificate created after the exit published would outlive its processor —
+// promotion would refuse on the dead signal, and the refusal would shadow the
+// processor's real result. recordCatchUp must refuse instead: no append, no
+// certificate.
+func TestRecordCatchUp_RefusesPublishedExit(t *testing.T) {
+	t.Parallel()
+
+	r, _ := caughtUpRebuildForTest(t, nil)
+
+	r.publishProcessorExit()
+
+	versionBefore := r.aggregate.Version()
+
+	stopped, exited, err := r.recordCatchUp(t.Context(), r.aggregate.State().Attempt.ID, 9, time.Second)
+
+	switch {
+	case err != nil:
+		t.Fatalf("want the published exit refused without error, got %v", err)
+	case stopped:
+		t.Fatal("want the refusal reported as an exit, not a stop")
+	case !exited:
+		t.Fatal("want the published exit reported")
+	}
+
+	if got := r.aggregate.Version(); got != versionBefore {
+		t.Errorf("want no catch-up appended after the exit published, got version %d (was %d)", got, versionBefore)
+	}
+
+	if r.certificate != nil {
+		t.Error("want no certificate created against a published exit")
+	}
+}
+
+// TestRecordCatchUp_CertifiesLiveProcessor is the control: with the run
+// unstopped and the processor's exit unpublished, the catch-up is appended
+// and the certificate is fully bound to it.
+func TestRecordCatchUp_CertifiesLiveProcessor(t *testing.T) {
+	t.Parallel()
+
+	r, _ := caughtUpRebuildForTest(t, nil)
+
+	attemptID := r.aggregate.State().Attempt.ID
+	versionBefore := r.aggregate.Version()
+
+	stopped, exited, err := r.recordCatchUp(t.Context(), attemptID, 9, time.Second)
+
+	switch {
+	case err != nil:
+		t.Fatalf("want the catch-up recorded, got %v", err)
+	case stopped || exited:
+		t.Fatalf("want a live, unstopped certification, got stopped=%v exited=%v", stopped, exited)
+	}
+
+	if got := r.aggregate.Version(); got != versionBefore+1 {
+		t.Fatalf("want the catch-up appended, got version %d (was %d)", got, versionBefore)
+	}
+
+	certificate := r.certificate
+	if certificate == nil {
+		t.Fatal("want the catch-up certified")
+	}
+
+	if certificate.attempt != attemptID || certificate.runner != r.runner || certificate.position != 9 ||
+		certificate.version != r.aggregate.Version() || certificate.exited != (<-chan struct{})(r.processorExited) {
+		t.Errorf("want the certificate fully bound to the fresh catch-up, got %+v", certificate)
+	}
+}
+
+// TestRecordCatchUp_ReportsStopWithItsCause pins the stop recheck: a
+// same-handle stop between the caught-up signal and the append shares the
+// aggregate, so it surfaces here rather than as a version conflict, carrying
+// the recorded cause.
+func TestRecordCatchUp_ReportsStopWithItsCause(t *testing.T) {
+	t.Parallel()
+
+	cause := errors.New("recorded terminal cause")
+
+	r, _ := caughtUpRebuildForTest(t, nil)
+	r.stopped = true
+	r.failure = cause
+
+	versionBefore := r.aggregate.Version()
+
+	stopped, exited, err := r.recordCatchUp(t.Context(), r.aggregate.State().Attempt.ID, 9, time.Second)
+
+	switch {
+	case !stopped:
+		t.Fatal("want the stop reported")
+	case exited:
+		t.Fatal("want the stop reported as a stop, not an exit")
+	case !errors.Is(err, cause):
+		t.Fatalf("want the recorded cause carried, got %v", err)
+	}
+
+	if got := r.aggregate.Version(); got != versionBefore {
+		t.Errorf("want no catch-up appended after the stop, got version %d (was %d)", got, versionBefore)
+	}
+}
+
+// defeatedRebuildForTest builds a handle over a lifecycle history whose
+// runner was displaced and whose attempt then ended: initiated, claimed by
+// this handle's runner, started, claimed by a competitor (version 4), then
+// abandoned (version 5). The handle's own view is hydrated to toVersion, so
+// tests can hold views on either side of the defeat.
+func defeatedRebuildForTest(t *testing.T, toVersion int64) (*Rebuild, uuid.UUID, uuid.UUID) {
+	t.Helper()
+
+	events, err := esmemory.NewEventStore()
+	if err != nil {
+		t.Fatalf("creating event store: %v", err)
+	}
+
+	store, err := NewStore(events)
+	if err != nil {
+		t.Fatalf("creating lifecycle store: %v", err)
+	}
+
+	orchestrator, err := NewOrchestrator(Config{
+		Events:      events,
+		Checkpoints: cpmemory.NewCheckpointStore(),
+		Handler:     func(projection.ID) (projection.EventHandler, error) { return nopHandler{}, nil },
+		Projections: store,
+	})
+	if err != nil {
+		t.Fatalf("creating orchestrator: %v", err)
+	}
+
+	v1 := projection.ID{Name: "orders", Version: 1}
+	at := time.Date(2026, 8, 18, 9, 0, 0, 0, time.UTC)
+	attempt := uuid.Must(uuid.NewV4())
+	runner := uuid.Must(uuid.NewV4())
+	competitor := uuid.Must(uuid.NewV4())
+
+	history := store.New(StreamUUID("orders"))
+	history.Append(
+		RebuildInitiated{Attempt: attempt, Target: v1, Reason: "defeat classification", At: at},
+		RunnerClaimed{Attempt: attempt, Runner: runner, At: at},
+		BuildStarted{},
+		RunnerClaimed{Attempt: attempt, Runner: competitor, At: at},
+		Abandoned{Cause: "the competitor gave up"},
+	)
+
+	if err := store.Save(t.Context(), history, nil); err != nil {
+		t.Fatalf("saving the defeat history: %v", err)
+	}
+
+	aggregate := store.New(StreamUUID("orders"))
+	if err := store.Hydrate(t.Context(), aggregate, &aggregatestore.HydrateOptions{ToVersion: toVersion}); err != nil {
+		t.Fatalf("hydrating the handle's view to version %d: %v", toVersion, err)
+	}
+
+	r := &Rebuild{
+		orchestrator:    orchestrator,
+		name:            "orders",
+		aggregate:       aggregate,
+		runner:          runner,
+		processorExited: make(chan struct{}),
+	}
+
+	return r, attempt, runner
+}
+
+// TestRecordLostAppend_ClassifiesFromTheDefeatedSlot pins both halves of
+// lost-append classification: the verdict comes from the exact slot the
+// append contended for — here a competing claim, even though the stream's
+// head shows the attempt ended — and the slot fold installs only when it is
+// at least as new as the handle's current view.
+func TestRecordLostAppend_ClassifiesFromTheDefeatedSlot(t *testing.T) {
+	t.Parallel()
+
+	lost := func() error {
+		return fmt.Errorf("recording caughtup: %w",
+			eventstore.StreamVersionMismatchError{ExpectedVersion: 3, ActualVersion: 5})
+	}
+
+	t.Run("verdict is the slot's claim, not the head's end", func(t *testing.T) {
+		t.Parallel()
+
+		// The handle's view is its own pre-defeat fold at version 3.
+		r, attempt, runner := defeatedRebuildForTest(t, 3)
+
+		r.recordLostAppend(t.Context(), attempt, runner, lost())
+
+		if !r.stopped {
+			t.Fatal("want the defeat recorded as a stop")
+		}
+
+		if !errors.Is(r.failure, ErrRunnerDisplaced) {
+			t.Fatalf("want the slot's competing claim recorded as displacement, got %v", r.failure)
+		}
+
+		// The slot fold is newer than the handle's view, so it installs.
+		if got := r.aggregate.Version(); got != 4 {
+			t.Errorf("want the slot fold installed over the older view, got version %d", got)
+		}
+	})
+
+	t.Run("an older slot fold renders its verdict without regressing state", func(t *testing.T) {
+		t.Parallel()
+
+		// The handle's view is already past the slot — a fresher install,
+		// as the reconcile loop performs.
+		r, attempt, runner := defeatedRebuildForTest(t, 5)
+
+		r.recordLostAppend(t.Context(), attempt, runner, lost())
+
+		if !r.stopped {
+			t.Fatal("want the defeat recorded as a stop")
+		}
+
+		if !errors.Is(r.failure, ErrRunnerDisplaced) {
+			t.Fatalf("want the slot's competing claim recorded as displacement, got %v", r.failure)
+		}
+
+		if got := r.aggregate.Version(); got != 5 {
+			t.Errorf("want the newer view kept over the older slot fold, got version %d", got)
+		}
+	})
 }
 
 // TestCheckLifecycleAggregate_RejectsForeignAggregate is the supplemental
