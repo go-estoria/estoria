@@ -5,49 +5,66 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
+	"slices"
+	"sync/atomic"
+	"time"
 
 	"github.com/go-estoria/estoria/eventstore"
 	"github.com/go-estoria/estoria/projection"
-	"github.com/go-estoria/estoria/projection/checkpointstore"
-	"github.com/go-estoria/estoria/projection/processor"
 )
 
-// DefaultWorkerCheckpointID is the checkpoint identity a Worker uses absent
-// WithCheckpointIdentity. It is an ordinary projection checkpoint key: do not
-// run a projection under the same name, or the two would share progress.
-//
-//nolint:gochecknoglobals // A fixed default identity; Go cannot declare struct constants.
-var DefaultWorkerCheckpointID = projection.ID{Name: "estoria_cutover_effects", Version: 1}
+// defaultWorkerPollInterval is the delay between tail reads once the worker
+// is caught up, absent WithPollInterval.
+const defaultWorkerPollInterval = time.Second
 
 // A Worker converges cutover setters onto the recorded routing truth. It is
-// a checkpointed processor folding the lifecycle streams' Promoted and
-// RolledBack events in global order, delivering each recorded cutover — the
-// live version and its revision — to every registered setter through the
-// apply-if-newer contract: ordered, durable, and retried, where an inline
-// hook would be none of the three. A failed delivery stops the worker with
-// the failed cutover still ahead of its checkpoint, so a restart redelivers
-// it: a persistently failing setter blocks later cutovers rather than being
-// skipped, because silently skipping a flip is how routing diverges from the
-// recorded truth. Redelivery is safe by contract — a setter already at or
-// past the delivered revision treats it as a stale no-op.
+// a stateless fold of the lifecycle streams' cutover history: on every start
+// it folds the entire history from the beginning — validating revision and
+// lineage continuity per projection, applying nothing — captures the global
+// position of that completed read as its high-water mark, applies each
+// projection's final cutover through every registered setter in ascending
+// name order, signals readiness, and then tails the sequence strictly after
+// the mark, folding and delivering each newly recorded cutover. Flips
+// superseded before the worker started are never delivered: the worker is a
+// convergence mechanism, not a per-event feed.
 //
-// Run at most one worker per checkpoint identity at a time: workers sharing
-// an identity rewind each other's progress, so deliveries repeat
-// arbitrarily. The setter contract absorbs the repetition — revisions make
-// every replayed delivery a no-op — but shared progress is meaningless as a
-// convergence signal.
+// The worker keeps no durable progress — no checkpoint, no cursor, no state
+// shared with any other worker — so any number of workers may run
+// concurrently over the same store, and every delivery may repeat: setters
+// absorb both through the apply-if-newer contract. Full lifecycle history is
+// the flip side of that statelessness: the fold is correct only over the
+// complete record, so lifecycle streams must never be truncated.
 //
-// The worker assumes the lifecycle store's default JSON domain event codec.
-// It reads the same global sequence the lifecycle streams are appended to.
+// Any failure stops the worker: a decode or continuity failure means the
+// record cannot be trusted, and a failed delivery means a setter has not
+// converged — skipping either is how routing diverges from the recorded
+// truth. Supervise Run and restart on error by creating a new Worker, which
+// refolds from zero.
+//
+// The worker assumes the lifecycle store's default JSON domain event codec
+// and reads the same global sequence the lifecycle streams are appended to,
+// relying on the reader's stable-prefix contract: once a completed read has
+// observed a position, no later commit introduces an unseen event at or
+// below it.
 type Worker struct {
-	processor *processor.Processor
+	events  eventstore.GlobalReader
+	setters []CutoverSetter
+	poll    time.Duration
+
+	started atomic.Bool
+	ready   chan struct{}
 }
 
 // NewWorker creates a Worker that folds cutover events from the store
-// holding the lifecycle streams, checkpointing its progress in checkpoints.
-// At least one setter must be registered via WithCutoverSetter.
-func NewWorker(events eventstore.GlobalReader, checkpoints checkpointstore.Store, opts ...WorkerOption) (*Worker, error) {
-	config := workerConfig{checkpoint: DefaultWorkerCheckpointID}
+// holding the lifecycle streams. At least one setter must be registered via
+// WithCutoverSetter.
+func NewWorker(events eventstore.GlobalReader, opts ...WorkerOption) (*Worker, error) {
+	if events == nil {
+		return nil, errors.New("global event reader is required")
+	}
+
+	config := workerConfig{poll: defaultWorkerPollInterval}
 
 	for _, opt := range opts {
 		if opt == nil {
@@ -64,52 +81,130 @@ func NewWorker(events eventstore.GlobalReader, checkpoints checkpointstore.Store
 		return nil, errors.New("at least one cutover setter is required")
 	}
 
-	// Stop-on-error is pinned after the forwarded options: a processor that
-	// logged and advanced past a failed delivery would checkpoint beyond a
-	// cutover that was never applied, permanently skipping the flip.
-	config.processorOptions = append(config.processorOptions, processor.WithContinueOnHandlerError(false))
+	return &Worker{
+		events:  events,
+		setters: config.setters,
+		poll:    config.poll,
+		ready:   make(chan struct{}),
+	}, nil
+}
 
-	proc, err := processor.New(events, checkpoints, config.checkpoint,
-		cutoverHandler(config.setters), config.processorOptions...)
-	if err != nil {
-		return nil, fmt.Errorf("creating processor: %w", err)
+// Run blocks, converging setters: it folds the recorded cutover history,
+// applies each projection's final cutover, signals readiness, and tails the
+// global sequence. It returns the context's error on cancellation and a
+// non-nil error on any read, validation, or delivery failure. Run may be
+// called at most once; a stopped worker is restarted by creating a new
+// Worker, which refolds from zero.
+func (w *Worker) Run(ctx context.Context) error {
+	if !w.started.CompareAndSwap(false, true) {
+		return errors.New("the worker has already run: create a new worker to refold from zero")
 	}
 
-	return &Worker{processor: proc}, nil
-}
+	// The initial fold applies nothing: intermediate flips are already
+	// superseded, and validation must clear the whole prefix before any
+	// setter acts on state derived from it.
+	live := map[string]cutoverFold{}
 
-// Run blocks, delivering cutovers: it replays cutover history from the
-// worker's checkpoint, then tails the global event sequence. It returns the
-// context's error on cancellation and a non-nil error on any failure to
-// read, apply, or checkpoint. Run may be called at most once; a stopped
-// worker is resumed by creating a new Worker, which picks up from the
-// checkpoint.
-func (w *Worker) Run(ctx context.Context) error {
-	return w.processor.Run(ctx)
-}
+	mark, err := w.drain(ctx, live, 0, nil)
+	if err != nil {
+		return err
+	}
 
-// cutoverHandler returns the event handler driving the worker's deliveries:
-// it decodes each cutover event from the lifecycle streams, validates it,
-// and applies it through every registered setter, in registration order. A
-// cutover that decodes but fails its own scheme — an invalid live version,
-// a non-positive revision, a stream its projection's name does not derive —
-// is an error, not a skip: the reserved namespace is a guardrail, and
-// setters must not act on infrastructure state that fails it.
-func cutoverHandler(setters []CutoverSetter) projection.EventHandlerFunc {
-	return func(ctx context.Context, event *eventstore.Event) error {
-		raw, ok, err := decodeCutover(event)
-		if err != nil || !ok {
+	for _, name := range slices.Sorted(maps.Keys(live)) {
+		if err := w.deliver(ctx, live[name].current); err != nil {
+			return err
+		}
+	}
+
+	close(w.ready)
+
+	for {
+		if mark, err = w.drain(ctx, live, mark, w.deliver); err != nil {
 			return err
 		}
 
-		for _, setter := range setters {
-			if err := setter.ApplyCutover(ctx, raw.cutover); err != nil {
-				return fmt.Errorf("applying cutover for %s: %w", raw.cutover.Live, err)
-			}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(w.poll):
+		}
+	}
+}
+
+// Ready returns a channel that is closed once the worker is initialized:
+// the stable prefix folded and every setter holding each projection's final
+// cutover. It is the worker's readiness signal — health beyond it is
+// supervision of Run — and it never closes if initialization fails.
+func (w *Worker) Ready() <-chan struct{} { return w.ready }
+
+// drain reads the global sequence strictly after the given position,
+// folding every cutover event through the per-name continuity folds and
+// handing each accepted cutover to deliver when it is non-nil. It returns
+// the last observed global position. Validation precedes delivery: a
+// cutover that extends no legal history stops the drain undelivered.
+func (w *Worker) drain(ctx context.Context, live map[string]cutoverFold, after int64,
+	deliver func(context.Context, Cutover) error,
+) (int64, error) {
+	iter, err := w.events.ReadAll(ctx, eventstore.ReadAllOptions{AfterPosition: after})
+	if err != nil {
+		return after, fmt.Errorf("reading events: %w", err)
+	}
+
+	defer func() {
+		closeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), iteratorCloseTimeout)
+		defer cancel()
+
+		_ = iter.Close(closeCtx)
+	}()
+
+	position := after
+
+	for {
+		event, err := iter.Next(ctx)
+		if errors.Is(err, eventstore.ErrEndOfEventStream) {
+			return position, nil
+		} else if err != nil {
+			return position, fmt.Errorf("reading event: %w", err)
 		}
 
-		return nil
+		if event.GlobalPosition != nil {
+			position = *event.GlobalPosition
+		}
+
+		raw, ok, err := decodeCutover(event)
+		if err != nil {
+			return position, err
+		} else if !ok {
+			continue
+		}
+
+		next, err := live[raw.cutover.Live.Name].apply(raw)
+		if err != nil {
+			return position, err
+		}
+
+		live[raw.cutover.Live.Name] = next
+
+		if deliver == nil {
+			continue
+		}
+
+		if err := deliver(ctx, raw.cutover); err != nil {
+			return position, err
+		}
 	}
+}
+
+// deliver applies one cutover through every registered setter, in
+// registration order.
+func (w *Worker) deliver(ctx context.Context, cutover Cutover) error {
+	for _, setter := range w.setters {
+		if err := setter.ApplyCutover(ctx, cutover); err != nil {
+			return fmt.Errorf("applying cutover for %s: %w", cutover.Live, err)
+		}
+	}
+
+	return nil
 }
 
 // rawCutover is one decoded cutover event: the flip it records and the
@@ -173,10 +268,9 @@ func decodeCutover(event *eventstore.Event) (rawCutover, bool, error) {
 
 // workerConfig collects a Worker's options before construction.
 type workerConfig struct {
-	setters          []CutoverSetter
-	checkpoint       projection.ID
-	processorOptions []processor.Option
-	optionErr        error
+	setters   []CutoverSetter
+	poll      time.Duration
+	optionErr error
 }
 
 // A WorkerOption configures a Worker.
@@ -195,28 +289,15 @@ func WithCutoverSetter(setter CutoverSetter) WorkerOption {
 	}
 }
 
-// WithCheckpointIdentity sets the projection ID under which the worker
-// checkpoints its progress, instead of DefaultWorkerCheckpointID. Give
-// workers with different effect sets different identities, and never run two
-// workers under one identity at a time.
-func WithCheckpointIdentity(id projection.ID) WorkerOption {
+// WithPollInterval sets the delay between tail reads once the worker is
+// caught up. The default is one second.
+func WithPollInterval(interval time.Duration) WorkerOption {
 	return func(c *workerConfig) {
-		c.checkpoint = id
-	}
-}
-
-// WithWorkerProcessorOptions passes options through to the processor that
-// drives the worker. The worker's stop-on-error delivery cannot be disabled:
-// WithContinueOnHandlerError is forced off after the forwarded options.
-func WithWorkerProcessorOptions(opts ...processor.Option) WorkerOption {
-	return func(c *workerConfig) {
-		for _, opt := range opts {
-			if opt == nil {
-				c.optionErr = errors.Join(c.optionErr, errors.New("processor option must not be nil"))
-				return
-			}
+		if interval <= 0 {
+			c.optionErr = errors.Join(c.optionErr, errors.New("poll interval must be positive"))
+			return
 		}
 
-		c.processorOptions = append(c.processorOptions, opts...)
+		c.poll = interval
 	}
 }

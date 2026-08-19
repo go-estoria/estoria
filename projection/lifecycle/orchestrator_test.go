@@ -137,9 +137,9 @@ func bareOrchestrator(t *testing.T, events *esmemory.EventStore, checkpoints che
 func (h *harness) startWorker(events eventstore.GlobalReader) {
 	h.t.Helper()
 
-	worker, err := lifecycle.NewWorker(events, h.checkpoints,
+	worker, err := lifecycle.NewWorker(events,
 		lifecycle.WithCutoverSetter(h.router),
-		lifecycle.WithWorkerProcessorOptions(processor.WithPollInterval(2*time.Millisecond)),
+		lifecycle.WithPollInterval(2*time.Millisecond),
 	)
 	if err != nil {
 		h.t.Fatalf("creating cutover worker: %v", err)
@@ -3452,9 +3452,9 @@ func TestSeparateLifecycleStore(t *testing.T) {
 		t.Fatalf("creating orchestrator: %v", err)
 	}
 
-	worker, err := lifecycle.NewWorker(lifecycleEvents, checkpoints,
+	worker, err := lifecycle.NewWorker(lifecycleEvents,
 		lifecycle.WithCutoverSetter(router),
-		lifecycle.WithWorkerProcessorOptions(processor.WithPollInterval(2*time.Millisecond)),
+		lifecycle.WithPollInterval(2*time.Millisecond),
 	)
 	if err != nil {
 		t.Fatalf("creating cutover worker: %v", err)
