@@ -131,6 +131,44 @@ func TestCancellationOnly(t *testing.T) {
 	}
 }
 
+// TestLeavesMatch pins the multi-target generalization directly: every leaf
+// must match at least one target — child order is irrelevant, a wrapper
+// descends to its leaves rather than matching existentially, and a tree
+// mixing the allowed targets is benign while any independent leaf poisons
+// it.
+func TestLeavesMatch(t *testing.T) {
+	t.Parallel()
+
+	errBoom := errors.New("boom")
+	eof := eventstore.ErrEndOfEventStream
+
+	for _, tt := range []struct {
+		name    string
+		err     error
+		targets []error
+		want    bool
+	}{
+		{name: "a failure ahead of the end of stream", err: errors.Join(errBoom, eof), targets: []error{eof}, want: false},
+		{name: "a failure behind the end of stream", err: errors.Join(eof, errBoom), targets: []error{eof}, want: false},
+		{name: "a wrapper around a joined failure", err: fmt.Errorf("reading: %w", errors.Join(eof, errBoom)), targets: []error{eof}, want: false},
+		{name: "the allowed targets mixed", err: errors.Join(eof, context.Canceled), targets: []error{eof, context.Canceled}, want: true},
+		{name: "a wrapped leaf matching the second target", err: fmt.Errorf("tick: %w", context.Canceled), targets: []error{eof, context.Canceled}, want: true},
+		{name: "a wrapper around the mixed targets", err: fmt.Errorf("reading: %w", errors.Join(eof, context.Canceled)), targets: []error{eof, context.Canceled}, want: true},
+		{name: "the end of stream alone", err: eof, targets: []error{eof}, want: true},
+		{name: "joined ends of stream", err: errors.Join(eof, eof), targets: []error{eof}, want: true},
+		{name: "an independent failure against both targets", err: errBoom, targets: []error{eof, context.Canceled}, want: false},
+		{name: "nil matches nothing", err: nil, targets: []error{eof}, want: false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			if got := leavesMatch(tt.err, tt.targets...); got != tt.want {
+				t.Errorf("want %v, got %v", tt.want, got)
+			}
+		})
+	}
+}
+
 // nopHandler is the smallest projection.EventHandler, for wiring real
 // orchestrators in white-box fixtures.
 type nopHandler struct{}

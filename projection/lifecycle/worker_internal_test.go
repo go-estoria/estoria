@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/go-estoria/estoria/eventstore"
@@ -129,6 +130,11 @@ func TestDrainDropsTheEventInHand(t *testing.T) {
 	position, err := worker.drain(ctx, live, 3, nil)
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("want the canceled context's error, got %v", err)
+	}
+
+	// The read succeeded; only the cancellation is reported.
+	if strings.Contains(err.Error(), "reading event") {
+		t.Errorf("want the bare cancellation for the successful read, got %v", err)
 	}
 
 	if position != 3 {
