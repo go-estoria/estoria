@@ -158,7 +158,9 @@ func (w *Worker) Ready() <-chan struct{} { return w.ready }
 // before it is classified, even when the reader does not observe contexts:
 // a canceled drain issues no read and requests no further events, and a
 // result arriving alongside cancellation — an event, the end of the
-// stream, or a failure — is dropped unprocessed.
+// stream, or a cancellation-shaped failure — is dropped unprocessed, while
+// an independent read failure racing the cancellation is joined with it
+// rather than discarded.
 func (w *Worker) drain(ctx context.Context, live map[string]cutoverFold, after int64,
 	deliver func(context.Context, Cutover) error,
 ) (position int64, err error) {
@@ -189,10 +191,16 @@ func (w *Worker) drain(ctx context.Context, live map[string]cutoverFold, after i
 
 		event, err := iter.Next(ctx)
 
-		// Cancellation dominates whatever the read returned: a result that
-		// arrives alongside it is not acted on.
+		// Cancellation dominates whatever the read returned — a result
+		// arriving alongside it is not acted on — but an independent read
+		// failure is joined rather than discarded, while a failure that is
+		// only the cancellation surfacing is not re-reported as one.
 		if ctxErr := ctx.Err(); ctxErr != nil {
-			return position, ctxErr
+			if err == nil || errors.Is(err, eventstore.ErrEndOfEventStream) || cancellationOnly(err, ctxErr) {
+				return position, ctxErr
+			}
+
+			return position, errors.Join(ctxErr, fmt.Errorf("reading event: %w", err))
 		}
 
 		if errors.Is(err, eventstore.ErrEndOfEventStream) {

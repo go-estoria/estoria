@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -390,6 +391,56 @@ func (i cancelEOFIterator) Next(context.Context) (*eventstore.Event, error) {
 }
 
 func (i cancelEOFIterator) Close(context.Context) error { return nil }
+
+// cancelFailReader hands out iterators that cancel a context and fail from
+// the same Next call, modeling cancellation racing a read failure.
+type cancelFailReader struct {
+	cancel context.CancelFunc
+	err    error
+}
+
+func (r cancelFailReader) ReadAll(context.Context, eventstore.ReadAllOptions) (eventstore.StreamIterator, error) {
+	return cancelFailIterator(r), nil
+}
+
+type cancelFailIterator struct {
+	cancel context.CancelFunc
+	err    error
+}
+
+func (i cancelFailIterator) Next(context.Context) (*eventstore.Event, error) {
+	i.cancel()
+
+	return nil, i.err
+}
+
+func (i cancelFailIterator) Close(context.Context) error { return nil }
+
+// nextCountingReader counts the Next calls its iterators receive.
+type nextCountingReader struct {
+	inner     eventstore.GlobalReader
+	nextCalls atomic.Int64
+}
+
+func (r *nextCountingReader) ReadAll(ctx context.Context, opts eventstore.ReadAllOptions) (eventstore.StreamIterator, error) {
+	iter, err := r.inner.ReadAll(ctx, opts)
+	if err != nil {
+		return nil, err
+	}
+
+	return &countedIterator{StreamIterator: iter, reader: r}, nil
+}
+
+type countedIterator struct {
+	eventstore.StreamIterator
+	reader *nextCountingReader
+}
+
+func (i *countedIterator) Next(ctx context.Context) (*eventstore.Event, error) {
+	i.reader.nextCalls.Add(1)
+
+	return i.StreamIterator.Next(ctx)
+}
 
 // gatedSetter blocks one chosen delivery until released, holding the worker
 // inside the delivery window so the test can act there.
@@ -1559,8 +1610,133 @@ func TestWorker_CancellationDominatesTheReadResult(t *testing.T) {
 		t.Fatalf("want the cancellation and the close failure both surfaced, got %v", err)
 	}
 
+	// The end of the stream is not a failure: nothing reports one.
+	if strings.Contains(err.Error(), "reading event") {
+		t.Errorf("want no read failure reported for the canceled end of stream, got %v", err)
+	}
+
 	assertCutovers(t, recorder.seen(), nil)
 	assertReadyWithheld(t, worker)
+}
+
+// TestWorker_CancellationJoinsTheIndependentReadFailure pins the dominance
+// check's failure handling: cancellation prevents processing, but a read
+// failure that is not itself the cancellation surfacing is joined with it
+// rather than discarded — while a cancellation-shaped failure is not
+// re-reported as a read failure.
+func TestWorker_CancellationJoinsTheIndependentReadFailure(t *testing.T) {
+	t.Parallel()
+
+	errStore := errors.New("the store failed")
+
+	for _, tt := range []struct {
+		name     string
+		readErr  func() error
+		wantErr  error // additionally surfaced alongside the cancellation
+		wantRead bool  // whether a read failure may be reported
+	}{
+		{
+			name:     "an independent failure is joined",
+			readErr:  func() error { return errStore },
+			wantErr:  errStore,
+			wantRead: true,
+		},
+		{
+			name:    "a cancellation-shaped failure is not re-reported",
+			readErr: func() error { return fmt.Errorf("waiting for events: %w", context.Canceled) },
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+
+			recorder := &recordingSetter{}
+
+			worker, err := lifecycle.NewWorker(cancelFailReader{cancel: cancel, err: tt.readErr()},
+				lifecycle.WithCutoverSetter(recorder),
+				lifecycle.WithPollInterval(2*time.Millisecond),
+			)
+			if err != nil {
+				t.Fatalf("creating worker: %v", err)
+			}
+
+			err = worker.Run(ctx)
+			if !errors.Is(err, context.Canceled) {
+				t.Fatalf("want the cancellation surfaced, got %v", err)
+			}
+
+			if tt.wantErr != nil && !errors.Is(err, tt.wantErr) {
+				t.Fatalf("want the independent read failure joined with the cancellation, got %v", err)
+			}
+
+			if !tt.wantRead && strings.Contains(err.Error(), "reading event") {
+				t.Errorf("want the cancellation-shaped failure folded into the cancellation, got %v", err)
+			}
+
+			assertCutovers(t, recorder.seen(), nil)
+			assertReadyWithheld(t, worker)
+		})
+	}
+}
+
+// TestWorker_CancellationDuringDeliveryRequestsNoFurtherEvents pins the
+// pre-request check on every iteration: cancellation arriving while an
+// event is being delivered means no further event is requested from the
+// context-oblivious iterator — not merely that a requested one is dropped.
+func TestWorker_CancellationDuringDeliveryRequestsNoFurtherEvents(t *testing.T) {
+	t.Parallel()
+
+	events := newEventStore(t)
+
+	projections, err := lifecycle.NewStore(events)
+	if err != nil {
+		t.Fatalf("creating lifecycle store: %v", err)
+	}
+
+	ordersV1 := projection.ID{Name: "orders", Version: 1}
+	ordersV2 := projection.ID{Name: "orders", Version: 2}
+
+	recordCutover(t, projections, ordersV1, projection.ID{}, false)
+
+	reader := &nextCountingReader{inner: events}
+	setter := newGatedSetter(2)
+	t.Cleanup(setter.releaseGate)
+
+	worker, err := lifecycle.NewWorker(reader,
+		lifecycle.WithCutoverSetter(setter),
+		lifecycle.WithPollInterval(2*time.Millisecond),
+	)
+	if err != nil {
+		t.Fatalf("creating worker: %v", err)
+	}
+
+	runErr, cancel := runWorker(t, worker)
+	waitReady(t, worker)
+
+	// The tail delivery blocks; the drain is parked inside it, so the count
+	// taken after canceling is the last event ever requested.
+	recordCutover(t, projections, ordersV2, ordersV1, false)
+	setter.awaitEntered(t)
+
+	cancel()
+
+	requested := reader.nextCalls.Load()
+	setter.releaseGate()
+
+	if err := awaitExit(t, runErr); !errors.Is(err, context.Canceled) {
+		t.Fatalf("want the canceled context's error, got %v", err)
+	}
+
+	if got := reader.nextCalls.Load(); got != requested {
+		t.Errorf("want no events requested after the mid-delivery cancellation, got %d more", got-requested)
+	}
+
+	assertCutovers(t, setter.seen(), []lifecycle.Cutover{
+		{Live: ordersV1, Revision: 1},
+		{Live: ordersV2, Revision: 2},
+	})
 }
 
 // TestWorker_CancellationPreemptsTheEventInHand pins that cancellation is
