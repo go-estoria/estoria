@@ -884,6 +884,224 @@ func TestValidate_CutoverRevisionPairsWithLive(t *testing.T) {
 			t.Error("want a second cutover from a single allocation rejected, got nil")
 		}
 	})
+
+	t.Run("revision past the created attempt's bound", func(t *testing.T) {
+		t.Parallel()
+
+		s := stateInPhase(PhaseCreated)
+		s.CutoverRevision = 2*int64(s.Allocated) - 2
+
+		if err := s.validate(); err == nil {
+			t.Error("want a revision the admitted attempt cannot have recorded rejected, got nil")
+		}
+	})
+
+	t.Run("revision at the created attempt's bound", func(t *testing.T) {
+		t.Parallel()
+
+		s := stateInPhase(PhaseCreated)
+		s.CutoverRevision = 2*int64(s.Allocated) - 3
+		s.Live = projection.ID{Name: "orders", Version: 1}
+		s.Attempt.Previous = s.Live
+
+		if err := s.validate(); err != nil {
+			t.Errorf("want the created attempt's bound-exact revision valid, got %v", err)
+		}
+	})
+
+	t.Run("revision past the building attempt's bound", func(t *testing.T) {
+		t.Parallel()
+
+		s := stateInPhase(PhaseBuilding)
+		s.CutoverRevision = 2*int64(s.Allocated) - 2
+
+		if err := s.validate(); err == nil {
+			t.Error("want a revision the building attempt cannot have recorded rejected, got nil")
+		}
+	})
+
+	t.Run("revision at the building attempt's bound", func(t *testing.T) {
+		t.Parallel()
+
+		s := stateInPhase(PhaseBuilding)
+		s.CutoverRevision = 2*int64(s.Allocated) - 3
+		s.Live = projection.ID{Name: "orders", Version: 1}
+		s.Attempt.Previous = s.Live
+
+		if err := s.validate(); err != nil {
+			t.Errorf("want the building attempt's bound-exact revision valid, got %v", err)
+		}
+	})
+
+	t.Run("revision past the retiring attempt's bound", func(t *testing.T) {
+		t.Parallel()
+
+		// Previous v1 keeps the prefix on the parity rule alone, so an
+		// over-discounted retiring arm cannot hide behind the later-version
+		// ceiling.
+		s := stateInPhase(PhaseRetiring)
+		s.CutoverRevision = 2*int64(s.Allocated) - 1
+		s.Attempt.Previous = projection.ID{Name: "orders", Version: 1}
+
+		if err := s.validate(); err == nil {
+			t.Error("want a revision the retiring attempt cannot have recorded rejected, got nil")
+		}
+	})
+
+	t.Run("an even revision resting at the first version", func(t *testing.T) {
+		t.Parallel()
+
+		// v1 is promoted first, at revision 1, and history returns to it
+		// only in promote-rollback pairs: v1 rests at odd revisions only.
+		s := State{
+			Name:            "orders",
+			Live:            projection.ID{Name: "orders", Version: 1},
+			CutoverRevision: 2,
+			Allocated:       2,
+		}
+
+		if err := s.validate(); err == nil {
+			t.Error("want an even revision resting at the first version rejected, got nil")
+		}
+	})
+
+	t.Run("the vacant ceiling with a later version live", func(t *testing.T) {
+		t.Parallel()
+
+		// 2A-1 spends every pair returning to the first promotion, so only
+		// version 1 can be live at the ceiling.
+		s := State{
+			Name:            "orders",
+			Live:            projection.ID{Name: "orders", Version: 2},
+			CutoverRevision: 3,
+			Allocated:       2,
+		}
+
+		if err := s.validate(); err == nil {
+			t.Error("want the vacant ceiling with a later version live rejected, got nil")
+		}
+	})
+
+	t.Run("one below the vacant ceiling with a later version live", func(t *testing.T) {
+		t.Parallel()
+
+		s := State{
+			Name:            "orders",
+			Live:            projection.ID{Name: "orders", Version: 2},
+			CutoverRevision: 2,
+			Allocated:       2,
+		}
+
+		if err := s.validate(); err != nil {
+			t.Errorf("want the later version accepted below the ceiling, got %v", err)
+		}
+	})
+
+	t.Run("a second cutover behind a first-live promotion", func(t *testing.T) {
+		t.Parallel()
+
+		// A zero previous testifies nothing was live when the attempt began,
+		// so its promotion is revision 1: the prefix recorded no cutovers.
+		s := State{
+			Name:            "orders",
+			Live:            projection.ID{Name: "orders", Version: 2},
+			CutoverRevision: 2,
+			Allocated:       2,
+			Attempt: AttemptState{
+				ID:          internalAttemptID,
+				Target:      projection.ID{Name: "orders", Version: 2},
+				Phase:       PhasePromoted,
+				Runner:      internalRunnerID,
+				InitiatedAt: internalAt,
+			},
+		}
+
+		if err := s.validate(); err == nil {
+			t.Error("want recorded cutovers behind a first-live promotion rejected, got nil")
+		}
+	})
+
+	t.Run("a first promotion in flight", func(t *testing.T) {
+		t.Parallel()
+
+		if err := firstVersionInPhase(PhasePromoted).validate(); err != nil {
+			t.Errorf("want a first-live promotion in flight valid, got %v", err)
+		}
+	})
+
+	t.Run("an even prefix resting at the first version behind an attempt", func(t *testing.T) {
+		t.Parallel()
+
+		// Counts alone accept revision 2 from two completed allocations; the
+		// prefix parity does not — resting at v1 takes an odd revision.
+		s := State{
+			Name:            "orders",
+			Live:            projection.ID{Name: "orders", Version: 1},
+			CutoverRevision: 2,
+			Allocated:       3,
+			Attempt: AttemptState{
+				ID:          internalAttemptID,
+				Target:      projection.ID{Name: "orders", Version: 3},
+				Previous:    projection.ID{Name: "orders", Version: 1},
+				Phase:       PhaseCaughtUp,
+				Runner:      internalRunnerID,
+				InitiatedAt: internalAt,
+			},
+		}
+
+		if err := s.validate(); err == nil {
+			t.Error("want an even prefix resting at the first version rejected, got nil")
+		}
+	})
+
+	t.Run("a promoted prefix at the ceiling with a later version live", func(t *testing.T) {
+		t.Parallel()
+
+		s := State{
+			Name:            "orders",
+			Live:            projection.ID{Name: "orders", Version: 3},
+			CutoverRevision: 4,
+			Allocated:       3,
+			Attempt: AttemptState{
+				ID:          internalAttemptID,
+				Target:      projection.ID{Name: "orders", Version: 3},
+				Previous:    projection.ID{Name: "orders", Version: 2},
+				Phase:       PhasePromoted,
+				Runner:      internalRunnerID,
+				InitiatedAt: internalAt,
+			},
+		}
+
+		if err := s.validate(); err == nil {
+			t.Error("want a promoted prefix resting a later version at its ceiling rejected, got nil")
+		}
+	})
+
+	t.Run("a promotion over a live version claiming the first revision", func(t *testing.T) {
+		t.Parallel()
+
+		// A non-zero previous testifies v2 was live when the attempt began,
+		// so at least one cutover preceded this promotion — it cannot be
+		// revision 1.
+		s := State{
+			Name:            "orders",
+			Live:            projection.ID{Name: "orders", Version: 3},
+			CutoverRevision: 1,
+			Allocated:       3,
+			Attempt: AttemptState{
+				ID:          internalAttemptID,
+				Target:      projection.ID{Name: "orders", Version: 3},
+				Previous:    projection.ID{Name: "orders", Version: 2},
+				Phase:       PhasePromoted,
+				Runner:      internalRunnerID,
+				InitiatedAt: internalAt,
+			},
+		}
+
+		if err := s.validate(); err == nil {
+			t.Error("want a first revision claimed over a live previous rejected, got nil")
+		}
+	})
 }
 
 // TestValidateSnapshotState_Contract pins the decode-boundary contract
@@ -930,6 +1148,25 @@ func TestValidateSnapshotState_Contract(t *testing.T) {
 			s.CutoverRevision = 2*int64(s.Allocated) - 2
 			return s
 		}(), accept: false},
+		{name: "clean payload resting the first version at an even revision is rejected", state: State{
+			Name:            "orders",
+			Live:            projection.ID{Name: "orders", Version: 1},
+			CutoverRevision: 2,
+			Allocated:       2,
+		}, accept: false},
+		{name: "clean payload recording cutovers behind a first-live promotion is rejected", state: State{
+			Name:            "orders",
+			Live:            projection.ID{Name: "orders", Version: 2},
+			CutoverRevision: 2,
+			Allocated:       2,
+			Attempt: AttemptState{
+				ID:          internalAttemptID,
+				Target:      projection.ID{Name: "orders", Version: 2},
+				Phase:       PhasePromoted,
+				Runner:      internalRunnerID,
+				InitiatedAt: internalAt,
+			},
+		}, accept: false},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()

@@ -306,36 +306,65 @@ func (s State) validate() error {
 		return errors.New("live version recorded with no cutover revision")
 	}
 
-	// Cutover accounting: k completed allocations record at most 2k-1
-	// cutovers — each promotes at most once, version numbers are never
-	// reused, only a promotion that retained a previous version can roll
-	// back, and the first retained nothing. An in-flight attempt's own
-	// allocation has completed nothing: it has recorded no cutover before
-	// promotion, and exactly its promotion in the promoted and retiring
-	// phases — its rollback would have vacated the slot — so it is
-	// discounted before the bound. The division form avoids overflowing the
-	// doubled bound.
-	completed := int64(s.Allocated)
+	// The cutover history before the in-flight attempt is a rest state —
+	// every prior attempt concluded, the slot vacant — and must itself be
+	// reachable. The attempt's own allocation has completed nothing: it has
+	// recorded no cutover before promotion, and exactly its promotion over
+	// the rest state in the promoted and retiring phases, its rollback
+	// having vacated the slot — so that promotion's previous version and
+	// revision predecessor are the rest state to check.
+	live := s.Live
 	recorded := s.CutoverRevision
+	completed := int64(s.Allocated)
 
 	if s.Attempt != (AttemptState{}) {
 		completed--
 
 		if s.Attempt.Phase == PhasePromoted || s.Attempt.Phase == PhaseRetiring {
+			live = s.Attempt.Previous
 			recorded--
 		}
 	}
 
-	if recorded > 0 && recorded/2 >= completed {
+	if err := unreachableRest(live, recorded, completed); err != nil {
 		if s.Attempt == (AttemptState{}) {
-			return fmt.Errorf("cutover revision %d cannot arise from %d allocations", s.CutoverRevision, s.Allocated)
+			return fmt.Errorf("cutover history: %w", err)
 		}
 
-		return fmt.Errorf("cutover revision %d cannot arise from %d allocations with %s in flight",
-			s.CutoverRevision, s.Allocated, s.Attempt.Target)
+		return fmt.Errorf("cutover history before the attempt on %s: %w", s.Attempt.Target, err)
 	}
 
 	return s.validateAttempt()
+}
+
+// unreachableRest reports why no cutover history over the given completed
+// allocations can come to rest — every attempt concluded, the slot vacant —
+// with the given version live at the given revision, or nil if one can.
+// Three structural facts bound rest states. Pairing: a version is live
+// exactly when a cutover has been recorded. Counts: each allocation promotes
+// at most once, version numbers are never reused, and only a promotion that
+// retained a previous version rolls back — the first retained nothing — so
+// k allocations record at most 2k-1 cutovers. Shape: version 1 is only ever
+// promoted first, over nothing at revision 1, and history returns to it only
+// in promote-rollback pairs, so it rests at odd revisions alone; the 2k-1
+// maximum spends the unpaired promotion plus every pair resting at version
+// 1, so any later version rests at 2k-2 or below. The division forms avoid
+// overflowing the doubled bounds.
+func unreachableRest(live projection.ID, recorded, completed int64) error {
+	switch {
+	case live == (projection.ID{}) && recorded != 0:
+		return fmt.Errorf("%d cutovers recorded with no version left live", recorded)
+	case live != (projection.ID{}) && recorded < 1:
+		return fmt.Errorf("%s live with no cutover recorded", live)
+	case recorded > 0 && recorded/2 >= completed:
+		return fmt.Errorf("revision %d cannot arise from %d completed allocations", recorded, completed)
+	case live.Version == 1 && recorded%2 == 0:
+		return fmt.Errorf("revision %d cannot rest at %s: history returns to the first promotion only in promote-rollback pairs", recorded, live)
+	case live.Version > 1 && (recorded-1)/2 >= completed-1:
+		return fmt.Errorf("revision %d cannot rest at %s: only version 1 rests at the %d-allocation maximum", recorded, live, completed)
+	}
+
+	return nil
 }
 
 // validateAttempt checks the in-flight attempt against the projection-level
