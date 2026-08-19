@@ -298,17 +298,41 @@ func (s State) validate() error {
 	// Every cutover flips Live to a non-zero version — a first rebuild has no
 	// rollback target, so no legitimate history returns Live to zero — and
 	// the first promotion records revision 1: a live version and a positive
-	// revision exist together or not at all. Each allocation contributes at
-	// most one promotion and one rollback, and the first can never roll
-	// back, so A allocations record at most 2A-1 cutovers; the division form
-	// avoids overflowing the doubled bound.
+	// revision exist together or not at all.
 	switch {
 	case s.Live == (projection.ID{}) && s.CutoverRevision != 0:
 		return fmt.Errorf("cutover revision %d recorded with no live version", s.CutoverRevision)
 	case s.Live != (projection.ID{}) && s.CutoverRevision < 1:
 		return errors.New("live version recorded with no cutover revision")
-	case s.CutoverRevision/2 >= int64(s.Allocated):
-		return fmt.Errorf("cutover revision %d cannot arise from %d allocations", s.CutoverRevision, s.Allocated)
+	}
+
+	// Cutover accounting: k completed allocations record at most 2k-1
+	// cutovers — each promotes at most once, version numbers are never
+	// reused, only a promotion that retained a previous version can roll
+	// back, and the first retained nothing. An in-flight attempt's own
+	// allocation has completed nothing: it has recorded no cutover before
+	// promotion, and exactly its promotion in the promoted and retiring
+	// phases — its rollback would have vacated the slot — so it is
+	// discounted before the bound. The division form avoids overflowing the
+	// doubled bound.
+	completed := int64(s.Allocated)
+	recorded := s.CutoverRevision
+
+	if s.Attempt != (AttemptState{}) {
+		completed--
+
+		if s.Attempt.Phase == PhasePromoted || s.Attempt.Phase == PhaseRetiring {
+			recorded--
+		}
+	}
+
+	if recorded > 0 && recorded/2 >= completed {
+		if s.Attempt == (AttemptState{}) {
+			return fmt.Errorf("cutover revision %d cannot arise from %d allocations", s.CutoverRevision, s.Allocated)
+		}
+
+		return fmt.Errorf("cutover revision %d cannot arise from %d allocations with %s in flight",
+			s.CutoverRevision, s.Allocated, s.Attempt.Target)
 	}
 
 	return s.validateAttempt()

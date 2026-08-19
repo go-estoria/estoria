@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -3953,15 +3954,24 @@ func TestSnapshotRoundTrip_PreservesCutoverRevision(t *testing.T) {
 // would then refuse the negative event — routing frozen while the lifecycle
 // advances. No legitimate history reaches the ceiling; persisted state is
 // trusted if it validates, so the states arrive through the snapshot layer,
-// shaped realizably: the ceiling is exactly what 1<<62 allocations can
-// record, and certification refusals keep their precedence — the guard sits
-// with the append, not above the license protocol.
+// shaped realizably: the ceiling is exactly what 1<<62 completed allocations
+// can record, the in-flight attempt holds one further allocation that
+// validation discounts, and certification refusals keep their precedence —
+// the guard sits with the append, not above the license protocol.
 func TestCutoverCommands_RefuseAnExhaustedRevision(t *testing.T) {
 	t.Parallel()
 
-	const exhaustedAllocations = 1 << 62
+	if strconv.IntSize < 64 {
+		t.Skip("the revision ceiling is reachable only with 64-bit allocation counts")
+	}
+
+	// Assembled from int64 variables at runtime: as untyped constants these
+	// would not compile into the int fields on 32-bit platforms, skip aside.
+	completedAllocations := int64(1) << 62
+	exhaustedAllocations := int(completedAllocations) + 1
 
 	ordersV1 := projection.ID{Name: "orders", Version: 1}
+	ordersPrior := projection.ID{Name: "orders", Version: int(completedAllocations)}
 	ordersTop := projection.ID{Name: "orders", Version: exhaustedAllocations}
 	at := time.Date(2026, 8, 18, 16, 0, 0, 0, time.UTC)
 
@@ -4079,6 +4089,10 @@ func TestCutoverCommands_RefuseAnExhaustedRevision(t *testing.T) {
 			t.Fatalf("beginning: %v", err)
 		}
 
+		// One cutover of the ceiling is this attempt's own promotion, so the
+		// completed allocations sit one below their maximum: the last of them
+		// promoted without rolling back and is the version this promotion
+		// retained.
 		writeLifecycleSnapshot(t, snapshots, lifecycle.State{
 			Name:            "orders",
 			Live:            ordersTop,
@@ -4087,7 +4101,7 @@ func TestCutoverCommands_RefuseAnExhaustedRevision(t *testing.T) {
 			Attempt: lifecycle.AttemptState{
 				ID:          uuid.Must(uuid.NewV4()),
 				Target:      ordersTop,
-				Previous:    ordersV1,
+				Previous:    ordersPrior,
 				Phase:       lifecycle.PhasePromoted,
 				Runner:      uuid.Must(uuid.NewV4()),
 				InitiatedAt: at,

@@ -726,11 +726,13 @@ func TestValidate_ClaimedRunnerRequiredPastCreated(t *testing.T) {
 	}
 }
 
-// TestValidate_CutoverRevisionPairsWithLive pins the pairing invariant: every
+// TestValidate_CutoverRevisionPairsWithLive pins the pairing invariant — every
 // cutover flips Live to a non-zero version and the first promotion records
 // revision 1, so a live version and a positive revision exist together or
-// not at all — either alone can only come from tampered or reset
-// persistence.
+// not at all — and the cutover accounting bound: completed allocations record
+// at most one promotion and one rollback each, the first promotion retains
+// nothing to roll back to, and an in-flight attempt's own allocation has
+// recorded nothing, or exactly its promotion once promoted or retiring.
 func TestValidate_CutoverRevisionPairsWithLive(t *testing.T) {
 	t.Parallel()
 
@@ -771,8 +773,11 @@ func TestValidate_CutoverRevisionPairsWithLive(t *testing.T) {
 
 		// A first promotion plus a promote-rollback pair per later
 		// allocation: 2A-1 is the most cutovers A allocations can record.
+		// Every pair reverts to what was live before it, so the bound-exact
+		// history necessarily ends with the first version live.
 		s := stateInPhase(PhaseNone)
 		s.CutoverRevision = 2*int64(s.Allocated) - 1
+		s.Live = projection.ID{Name: "orders", Version: 1}
 
 		if err := s.validate(); err != nil {
 			t.Errorf("want the bound-exact revision valid, got %v", err)
@@ -787,6 +792,96 @@ func TestValidate_CutoverRevisionPairsWithLive(t *testing.T) {
 
 		if err := s.validate(); err == nil {
 			t.Error("want a revision no clean history could record rejected, got nil")
+		}
+	})
+
+	t.Run("revision far past the allocation bound", func(t *testing.T) {
+		t.Parallel()
+
+		s := stateInPhase(PhaseNone)
+		s.CutoverRevision = 100 * int64(s.Allocated)
+
+		if err := s.validate(); err == nil {
+			t.Error("want a revision deep past the bound rejected, not only the boundary, got nil")
+		}
+	})
+
+	t.Run("revision past the in-flight attempt's bound", func(t *testing.T) {
+		t.Parallel()
+
+		// The attempt's own allocation has recorded nothing yet, so only the
+		// completed A-1 allocations bound the revision: 2(A-1)-1, not 2A-1.
+		s := stateInPhase(PhaseCaughtUp)
+		s.CutoverRevision = 2*int64(s.Allocated) - 2
+
+		if err := s.validate(); err == nil {
+			t.Error("want a revision the unpromoted attempt cannot have recorded rejected, got nil")
+		}
+	})
+
+	t.Run("revision at the in-flight attempt's bound", func(t *testing.T) {
+		t.Parallel()
+
+		s := stateInPhase(PhaseCaughtUp)
+		s.CutoverRevision = 2*int64(s.Allocated) - 3
+		s.Live = projection.ID{Name: "orders", Version: 1}
+		s.Attempt.Previous = s.Live
+
+		if err := s.validate(); err != nil {
+			t.Errorf("want the attempt-discounted bound-exact revision valid, got %v", err)
+		}
+	})
+
+	t.Run("revision past the promoted attempt's bound", func(t *testing.T) {
+		t.Parallel()
+
+		// A promoted attempt has recorded exactly its promotion: its rollback
+		// would vacate the slot, so 2(A-1)-1 completed cutovers plus one is
+		// the ceiling while it remains in flight.
+		s := stateInPhase(PhasePromoted)
+		s.CutoverRevision = 2*int64(s.Allocated) - 1
+
+		if err := s.validate(); err == nil {
+			t.Error("want a revision the promoted attempt cannot have recorded rejected, got nil")
+		}
+	})
+
+	t.Run("revision at the promoted attempt's bound", func(t *testing.T) {
+		t.Parallel()
+
+		// Bound-exact completed allocations left the first version live, so
+		// the in-flight promotion necessarily retained v1 as its previous.
+		s := stateInPhase(PhasePromoted)
+		s.CutoverRevision = 2*int64(s.Allocated) - 2
+		s.Attempt.Previous = projection.ID{Name: "orders", Version: 1}
+
+		if err := s.validate(); err != nil {
+			t.Errorf("want the promoted attempt's bound-exact revision valid, got %v", err)
+		}
+	})
+
+	t.Run("revision at the retiring attempt's bound", func(t *testing.T) {
+		t.Parallel()
+
+		s := stateInPhase(PhaseRetiring)
+		s.CutoverRevision = 2*int64(s.Allocated) - 2
+		s.Attempt.Previous = projection.ID{Name: "orders", Version: 1}
+
+		if err := s.validate(); err != nil {
+			t.Errorf("want the retiring attempt's bound-exact revision valid, got %v", err)
+		}
+	})
+
+	t.Run("a second cutover from a single allocation", func(t *testing.T) {
+		t.Parallel()
+
+		// One allocation, promoted and in flight: revision 1 is the only
+		// cutover any history could have recorded.
+		s := firstVersionInPhase(PhasePromoted)
+		s.CutoverRevision = 2
+
+		if err := s.validate(); err == nil {
+			t.Error("want a second cutover from a single allocation rejected, got nil")
 		}
 	})
 }
@@ -828,6 +923,11 @@ func TestValidateSnapshotState_Contract(t *testing.T) {
 		{name: "clean payload past the allocation bound is rejected", state: func() State {
 			s := stateInPhase(PhaseNone)
 			s.CutoverRevision = 2 * int64(s.Allocated)
+			return s
+		}(), accept: false},
+		{name: "clean payload whose revision the in-flight attempt cannot have recorded is rejected", state: func() State {
+			s := stateInPhase(PhaseCaughtUp)
+			s.CutoverRevision = 2*int64(s.Allocated) - 2
 			return s
 		}(), accept: false},
 	} {

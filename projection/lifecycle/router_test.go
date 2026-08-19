@@ -489,6 +489,16 @@ func TestStreamRouter_RejectsDiscontinuousHistories(t *testing.T) {
 			},
 			wantErr: "never reused",
 		},
+		{
+			name: "a promotion below the high-water",
+			events: []estoria.DomainEvent[lifecycle.State]{
+				lifecycle.Promoted{Next: v1, Revision: 1, At: promotedAt},
+				lifecycle.Promoted{Previous: v1, Next: v3, Revision: 2, At: promotedAt},
+				lifecycle.RolledBack{From: v3, RevertedTo: v1, Revision: 3, At: promotedAt},
+				lifecycle.Promoted{Previous: v1, Next: v2, Revision: 4, At: promotedAt},
+			},
+			wantErr: "never reused",
+		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
