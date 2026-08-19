@@ -154,9 +154,11 @@ func (w *Worker) Ready() <-chan struct{} { return w.ready }
 // cutover that extends no legal history stops the drain undelivered. A
 // failed iterator close is a failed drain — the iterator cannot vouch for
 // the completeness of what it yielded. Cancellation is checked before the
-// read begins and after every event, even when the reader does not observe
-// contexts: a canceled drain issues no read, and an event whose read
-// completes alongside cancellation is dropped unprocessed.
+// read begins, before each event is requested, and against every result
+// before it is classified, even when the reader does not observe contexts:
+// a canceled drain issues no read and requests no further events, and a
+// result arriving alongside cancellation — an event, the end of the
+// stream, or a failure — is dropped unprocessed.
 func (w *Worker) drain(ctx context.Context, live map[string]cutoverFold, after int64,
 	deliver func(context.Context, Cutover) error,
 ) (position int64, err error) {
@@ -181,15 +183,22 @@ func (w *Worker) drain(ctx context.Context, live map[string]cutoverFold, after i
 	position = after
 
 	for {
+		if err := ctx.Err(); err != nil {
+			return position, err
+		}
+
 		event, err := iter.Next(ctx)
+
+		// Cancellation dominates whatever the read returned: a result that
+		// arrives alongside it is not acted on.
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return position, ctxErr
+		}
+
 		if errors.Is(err, eventstore.ErrEndOfEventStream) {
 			return position, nil
 		} else if err != nil {
 			return position, fmt.Errorf("reading event: %w", err)
-		}
-
-		if err := ctx.Err(); err != nil {
-			return position, err
 		}
 
 		if event.GlobalPosition != nil {

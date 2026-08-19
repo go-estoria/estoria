@@ -336,6 +336,61 @@ func (i *cancelingIterator) Next(ctx context.Context) (*eventstore.Event, error)
 	return event, nil
 }
 
+// cancelOnReadReader cancels a context from inside ReadAll — after the read
+// is handed out, before any event is requested — and counts the Next calls
+// its iterators receive.
+type cancelOnReadReader struct {
+	inner  eventstore.GlobalReader
+	cancel context.CancelFunc
+
+	nextCalls atomic.Int64
+}
+
+func (r *cancelOnReadReader) ReadAll(ctx context.Context, opts eventstore.ReadAllOptions) (eventstore.StreamIterator, error) {
+	iter, err := r.inner.ReadAll(ctx, opts)
+	if err != nil {
+		return nil, err
+	}
+
+	r.cancel()
+
+	return &nextCountingIterator{StreamIterator: iter, reader: r}, nil
+}
+
+type nextCountingIterator struct {
+	eventstore.StreamIterator
+	reader *cancelOnReadReader
+}
+
+func (i *nextCountingIterator) Next(ctx context.Context) (*eventstore.Event, error) {
+	i.reader.nextCalls.Add(1)
+
+	return i.StreamIterator.Next(ctx)
+}
+
+// cancelEOFReader hands out iterators that cancel a context while reporting
+// the end of the stream, modeling a reader that treats cancellation as
+// stream end.
+type cancelEOFReader struct {
+	cancel context.CancelFunc
+}
+
+func (r cancelEOFReader) ReadAll(context.Context, eventstore.ReadAllOptions) (eventstore.StreamIterator, error) {
+	return cancelEOFIterator(r), nil
+}
+
+type cancelEOFIterator struct {
+	cancel context.CancelFunc
+}
+
+func (i cancelEOFIterator) Next(context.Context) (*eventstore.Event, error) {
+	i.cancel()
+
+	return nil, eventstore.ErrEndOfEventStream
+}
+
+func (i cancelEOFIterator) Close(context.Context) error { return nil }
+
 // gatedSetter blocks one chosen delivery until released, holding the worker
 // inside the delivery window so the test can act there.
 type gatedSetter struct {
@@ -1428,6 +1483,132 @@ func TestWorker_CancellationDropsTheEventInHand(t *testing.T) {
 
 	if got := reader.yielded.Load(); got != initialized+1 {
 		t.Errorf("want the drain stopped with the canceling event in hand, read %d events past initialization", got-initialized)
+	}
+
+	assertCutovers(t, recorder.seen(), []lifecycle.Cutover{{Live: ordersV1, Revision: 1}})
+}
+
+// TestWorker_CancellationDuringTheReadIssuesNoNext pins the check between
+// the read and its first event: cancellation arriving while the read is
+// being handed out means no event is ever requested from it — a
+// context-oblivious Next is never given the chance to block shutdown.
+func TestWorker_CancellationDuringTheReadIssuesNoNext(t *testing.T) {
+	t.Parallel()
+
+	events := newEventStore(t)
+
+	projections, err := lifecycle.NewStore(events)
+	if err != nil {
+		t.Fatalf("creating lifecycle store: %v", err)
+	}
+
+	recordCutover(t, projections, projection.ID{Name: "orders", Version: 1}, projection.ID{}, false)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	reader := &cancelOnReadReader{inner: events, cancel: cancel}
+	recorder := &recordingSetter{}
+
+	worker, err := lifecycle.NewWorker(reader,
+		lifecycle.WithCutoverSetter(recorder),
+		lifecycle.WithPollInterval(2*time.Millisecond),
+	)
+	if err != nil {
+		t.Fatalf("creating worker: %v", err)
+	}
+
+	if err := worker.Run(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("want the canceled context's error, got %v", err)
+	}
+
+	if got := reader.nextCalls.Load(); got != 0 {
+		t.Errorf("want no events requested after cancellation, got %d Next calls", got)
+	}
+
+	assertCutovers(t, recorder.seen(), nil)
+	assertReadyWithheld(t, worker)
+}
+
+// TestWorker_CancellationDominatesTheReadResult pins the check against
+// every read result: a Next that reports end-of-stream alongside
+// cancellation returns the cancellation, and an accompanying close failure
+// joins it rather than replacing it.
+func TestWorker_CancellationDominatesTheReadResult(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	errClose := errors.New("the close failed")
+	reader := &failingCloseReader{inner: cancelEOFReader{cancel: cancel}, err: errClose}
+	reader.armed.Store(true)
+
+	recorder := &recordingSetter{}
+
+	worker, err := lifecycle.NewWorker(reader,
+		lifecycle.WithCutoverSetter(recorder),
+		lifecycle.WithPollInterval(2*time.Millisecond),
+	)
+	if err != nil {
+		t.Fatalf("creating worker: %v", err)
+	}
+
+	err = worker.Run(ctx)
+	if !errors.Is(err, context.Canceled) || !errors.Is(err, errClose) {
+		t.Fatalf("want the cancellation and the close failure both surfaced, got %v", err)
+	}
+
+	assertCutovers(t, recorder.seen(), nil)
+	assertReadyWithheld(t, worker)
+}
+
+// TestWorker_CancellationPreemptsTheEventInHand pins that cancellation is
+// applied to a read's result before the result is acted on: a malformed
+// cutover arriving alongside cancellation is never decoded — the worker
+// reports the cancellation, not the decode failure.
+func TestWorker_CancellationPreemptsTheEventInHand(t *testing.T) {
+	t.Parallel()
+
+	events := newEventStore(t)
+
+	projections, err := lifecycle.NewStore(events)
+	if err != nil {
+		t.Fatalf("creating lifecycle store: %v", err)
+	}
+
+	ordersV1 := projection.ID{Name: "orders", Version: 1}
+	ordersV2 := projection.ID{Name: "orders", Version: 2}
+
+	recordCutover(t, projections, ordersV1, projection.ID{}, false)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	reader := &cancelingReader{inner: events, cancel: cancel}
+	recorder := &recordingSetter{}
+
+	worker, err := lifecycle.NewWorker(reader,
+		lifecycle.WithCutoverSetter(recorder),
+		lifecycle.WithPollInterval(2*time.Millisecond),
+	)
+	if err != nil {
+		t.Fatalf("creating worker: %v", err)
+	}
+
+	runErr := make(chan error, 1)
+
+	go func() { runErr <- worker.Run(ctx) }()
+
+	waitReady(t, worker)
+	reader.cancelOn.Store(reader.yielded.Load() + 1)
+
+	// An invalid revision the decoder must refuse — unless the cancellation
+	// riding the same read preempts the decode entirely.
+	appendRawCutoverEvent(t, events, lifecycle.Promoted{Previous: ordersV1, Next: ordersV2, Revision: 0, At: promotedAt})
+
+	if err := awaitExit(t, runErr); !errors.Is(err, context.Canceled) {
+		t.Fatalf("want the cancellation reported instead of the decode failure, got %v", err)
 	}
 
 	assertCutovers(t, recorder.seen(), []lifecycle.Cutover{{Live: ordersV1, Revision: 1}})
