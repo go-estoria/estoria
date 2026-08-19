@@ -6,9 +6,12 @@ import (
 	"errors"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/go-estoria/estoria"
+	"github.com/go-estoria/estoria/aggregatestore"
 	"github.com/go-estoria/estoria/eventstore"
 	esmemory "github.com/go-estoria/estoria/eventstore/memory"
 	"github.com/go-estoria/estoria/projection"
@@ -106,6 +109,263 @@ func assertCutovers(t *testing.T, got, want []lifecycle.Cutover) {
 	for i := range want {
 		if got[i] != want[i] {
 			t.Fatalf("want deliveries %v, got %v", want, got)
+		}
+	}
+}
+
+// assertReadyWithheld asserts the worker never signaled readiness.
+func assertReadyWithheld(t *testing.T, worker *lifecycle.Worker) {
+	t.Helper()
+
+	select {
+	case <-worker.Ready():
+		t.Error("want readiness withheld")
+	default:
+	}
+}
+
+// runWorker runs the worker in the background under a test-scoped cancelable
+// context, returning its exit channel.
+func runWorker(t *testing.T, worker *lifecycle.Worker) (<-chan error, context.CancelFunc) {
+	t.Helper()
+
+	ctx, cancel := context.WithCancel(t.Context())
+	runErr := make(chan error, 1)
+
+	go func() { runErr <- worker.Run(ctx) }()
+
+	t.Cleanup(cancel)
+
+	return runErr, cancel
+}
+
+// awaitExit waits for the worker's exit error.
+func awaitExit(t *testing.T, runErr <-chan error) error {
+	t.Helper()
+
+	select {
+	case err := <-runErr:
+		return err
+	case <-time.After(waitTimeout):
+		t.Fatal("worker never exited")
+		return nil
+	}
+}
+
+// countingReader wraps a GlobalReader, recording the AfterPosition of every
+// read issued through it once the read has been handed out.
+type countingReader struct {
+	inner eventstore.GlobalReader
+
+	mu    sync.Mutex
+	after []int64
+}
+
+func (r *countingReader) ReadAll(ctx context.Context, opts eventstore.ReadAllOptions) (eventstore.StreamIterator, error) {
+	iter, err := r.inner.ReadAll(ctx, opts)
+
+	r.mu.Lock()
+	r.after = append(r.after, opts.AfterPosition)
+	r.mu.Unlock()
+
+	return iter, err
+}
+
+func (r *countingReader) reads() []int64 {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	return append([]int64(nil), r.after...)
+}
+
+// failingReader fails every read.
+type failingReader struct{ err error }
+
+func (r failingReader) ReadAll(context.Context, eventstore.ReadAllOptions) (eventstore.StreamIterator, error) {
+	return nil, r.err
+}
+
+// failingNextReader yields a fixed number of events and then fails the read
+// mid-stream.
+type failingNextReader struct {
+	inner eventstore.GlobalReader
+	allow int
+	err   error
+}
+
+func (r *failingNextReader) ReadAll(ctx context.Context, opts eventstore.ReadAllOptions) (eventstore.StreamIterator, error) {
+	iter, err := r.inner.ReadAll(ctx, opts)
+	if err != nil {
+		return nil, err
+	}
+
+	return &failingNextIterator{StreamIterator: iter, reader: r}, nil
+}
+
+type failingNextIterator struct {
+	eventstore.StreamIterator
+	reader  *failingNextReader
+	yielded int
+}
+
+func (i *failingNextIterator) Next(ctx context.Context) (*eventstore.Event, error) {
+	if i.yielded >= i.reader.allow {
+		return nil, i.reader.err
+	}
+
+	event, err := i.StreamIterator.Next(ctx)
+	if err == nil {
+		i.yielded++
+	}
+
+	return event, err
+}
+
+// failingCloseReader closes iterators with an error while armed.
+type failingCloseReader struct {
+	inner eventstore.GlobalReader
+	err   error
+	armed atomic.Bool
+}
+
+func (r *failingCloseReader) ReadAll(ctx context.Context, opts eventstore.ReadAllOptions) (eventstore.StreamIterator, error) {
+	iter, err := r.inner.ReadAll(ctx, opts)
+	if err != nil {
+		return nil, err
+	}
+
+	return &failingCloseIterator{StreamIterator: iter, reader: r}, nil
+}
+
+type failingCloseIterator struct {
+	eventstore.StreamIterator
+	reader *failingCloseReader
+}
+
+func (i *failingCloseIterator) Close(ctx context.Context) error {
+	_ = i.StreamIterator.Close(ctx)
+
+	if i.reader.armed.Load() {
+		return i.reader.err
+	}
+
+	return nil
+}
+
+// cancelingReader cancels a context from inside a chosen Next call, modeling
+// cancellation that arrives while a reader that does not observe contexts is
+// mid-drain. It counts the events it yields.
+type cancelingReader struct {
+	inner    eventstore.GlobalReader
+	cancel   context.CancelFunc
+	cancelOn int
+
+	yielded int
+}
+
+func (r *cancelingReader) ReadAll(ctx context.Context, opts eventstore.ReadAllOptions) (eventstore.StreamIterator, error) {
+	iter, err := r.inner.ReadAll(ctx, opts)
+	if err != nil {
+		return nil, err
+	}
+
+	return &cancelingIterator{StreamIterator: iter, reader: r}, nil
+}
+
+type cancelingIterator struct {
+	eventstore.StreamIterator
+	reader *cancelingReader
+}
+
+func (i *cancelingIterator) Next(ctx context.Context) (*eventstore.Event, error) {
+	event, err := i.StreamIterator.Next(ctx)
+	if err != nil {
+		return event, err
+	}
+
+	i.reader.yielded++
+	if i.reader.yielded == i.reader.cancelOn {
+		i.reader.cancel()
+	}
+
+	return event, nil
+}
+
+// gatedSetter blocks one chosen delivery until released, holding the worker
+// inside the delivery window so the test can act there.
+type gatedSetter struct {
+	recordingSetter
+	gateOn      int32
+	calls       atomic.Int32
+	entered     chan struct{}
+	release     chan struct{}
+	releaseOnce sync.Once
+}
+
+func newGatedSetter(gateOn int32) *gatedSetter {
+	return &gatedSetter{gateOn: gateOn, entered: make(chan struct{}), release: make(chan struct{})}
+}
+
+func (s *gatedSetter) ApplyCutover(ctx context.Context, cutover lifecycle.Cutover) error {
+	if s.calls.Add(1) == s.gateOn {
+		close(s.entered)
+		<-s.release
+	}
+
+	return s.recordingSetter.ApplyCutover(ctx, cutover)
+}
+
+func (s *gatedSetter) releaseGate() {
+	s.releaseOnce.Do(func() { close(s.release) })
+}
+
+func (s *gatedSetter) awaitEntered(t *testing.T) {
+	t.Helper()
+
+	select {
+	case <-s.entered:
+	case <-time.After(waitTimeout):
+		t.Fatal("the gated delivery never started")
+	}
+}
+
+// nameRefusingSetter refuses every cutover for one projection name.
+type nameRefusingSetter struct {
+	recordingSetter
+	refuse string
+}
+
+func (s *nameRefusingSetter) ApplyCutover(ctx context.Context, cutover lifecycle.Cutover) error {
+	if cutover.Live.Name == s.refuse {
+		return errors.New("refusing " + s.refuse)
+	}
+
+	return s.recordingSetter.ApplyCutover(ctx, cutover)
+}
+
+// storeHead reports the last global position the store has recorded.
+func storeHead(t *testing.T, events eventstore.GlobalReader) int64 {
+	t.Helper()
+
+	iter, err := events.ReadAll(t.Context(), eventstore.ReadAllOptions{})
+	if err != nil {
+		t.Fatalf("reading events: %v", err)
+	}
+
+	defer func() { _ = iter.Close(t.Context()) }()
+
+	var head int64
+
+	for {
+		event, err := iter.Next(t.Context())
+		if errors.Is(err, eventstore.ErrEndOfEventStream) {
+			return head
+		} else if err != nil {
+			t.Fatalf("reading event: %v", err)
+		}
+
+		if event.GlobalPosition != nil {
+			head = *event.GlobalPosition
 		}
 	}
 }
@@ -380,18 +640,29 @@ func TestWorker_RejectsInvalidCutovers(t *testing.T) {
 	for _, tt := range []struct {
 		name    string
 		history func(*testing.T, *esmemory.EventStore)
+		wantErr string
 	}{
 		{
 			name:    "invalid live version",
 			history: rawPromoted(ordersStream, projection.ID{Name: "orders", Version: 0}, 1),
+			wantErr: "records an invalid live version",
+		},
+		{
+			// The name-derived stream and every fold arm accept this event;
+			// only the live version's own validation refuses it.
+			name:    "an unrepresentable projection name",
+			history: rawPromoted(typeid.ID{Type: lifecycle.StreamType, UUID: lifecycle.StreamUUID("")}, projection.ID{Version: 1}, 1),
+			wantErr: "records an invalid live version",
 		},
 		{
 			name:    "invalid cutover revision",
 			history: rawPromoted(ordersStream, v1, 0),
+			wantErr: "records an invalid cutover revision",
 		},
 		{
 			name:    "foreignly addressed stream",
 			history: rawPromoted(typeid.NewV4(lifecycle.StreamType), v1, 1),
+			wantErr: "want the name-derived stream",
 		},
 		{
 			name: "a discontinuous history",
@@ -400,6 +671,7 @@ func TestWorker_RejectsInvalidCutovers(t *testing.T) {
 				appendRawCutoverEvent(t, events, lifecycle.Promoted{Next: v1, Revision: 1, At: promotedAt})
 				appendRawCutoverEvent(t, events, lifecycle.Promoted{Previous: v1, Next: v2, Revision: 3, At: promotedAt})
 			},
+			wantErr: "records revision",
 		},
 		{
 			name: "an opening rollback",
@@ -407,6 +679,7 @@ func TestWorker_RejectsInvalidCutovers(t *testing.T) {
 				t.Helper()
 				appendRawCutoverEvent(t, events, lifecycle.RolledBack{From: v2, RevertedTo: v1, Revision: 1, At: promotedAt})
 			},
+			wantErr: "opens with a rollback",
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
@@ -431,9 +704,12 @@ func TestWorker_RejectsInvalidCutovers(t *testing.T) {
 			runCtx, cancel := context.WithTimeout(t.Context(), 250*time.Millisecond)
 			defer cancel()
 
-			if err := worker.Run(runCtx); err == nil || errors.Is(err, context.DeadlineExceeded) {
-				t.Fatalf("want the invalid history to stop the worker, got %v", err)
+			err = worker.Run(runCtx)
+			if err == nil || errors.Is(err, context.DeadlineExceeded) || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("want the invalid history refused with %q, got %v", tt.wantErr, err)
 			}
+
+			assertReadyWithheld(t, worker)
 
 			if got := setter.seen(); len(got) != 0 {
 				t.Errorf("want no deliveries from an invalid history, got %v", got)
@@ -620,25 +896,63 @@ func TestWorker_DuplicateWorkersConverge(t *testing.T) {
 	}
 }
 
-// TestWorker_RunAtMostOnce pins the restart contract: a Worker folds once,
-// and restarting means a new Worker refolding from zero.
+// TestWorker_RunAtMostOnce pins the restart contract: a Worker folds once —
+// whether its first run is still going or has already terminated — and
+// restarting means a new Worker refolding from zero.
 func TestWorker_RunAtMostOnce(t *testing.T) {
 	t.Parallel()
 
-	worker, err := lifecycle.NewWorker(newEventStore(t),
-		lifecycle.WithCutoverSetter(&recordingSetter{}),
-		lifecycle.WithPollInterval(2*time.Millisecond),
-	)
-	if err != nil {
-		t.Fatalf("creating worker: %v", err)
-	}
+	t.Run("while the first run is going", func(t *testing.T) {
+		t.Parallel()
 
-	startWorkerForTest(t, worker)
-	waitReady(t, worker)
+		worker, err := lifecycle.NewWorker(newEventStore(t),
+			lifecycle.WithCutoverSetter(&recordingSetter{}),
+			lifecycle.WithPollInterval(2*time.Millisecond),
+		)
+		if err != nil {
+			t.Fatalf("creating worker: %v", err)
+		}
 
-	if err := worker.Run(t.Context()); err == nil || !strings.Contains(err.Error(), "already run") {
-		t.Fatalf("want the second run refused, got %v", err)
-	}
+		startWorkerForTest(t, worker)
+		waitReady(t, worker)
+
+		if err := worker.Run(t.Context()); err == nil || !strings.Contains(err.Error(), "already run") {
+			t.Fatalf("want the second run refused, got %v", err)
+		}
+	})
+
+	t.Run("after the first run terminated", func(t *testing.T) {
+		t.Parallel()
+
+		worker, err := lifecycle.NewWorker(newEventStore(t),
+			lifecycle.WithCutoverSetter(&recordingSetter{}),
+			lifecycle.WithPollInterval(2*time.Millisecond),
+		)
+		if err != nil {
+			t.Fatalf("creating worker: %v", err)
+		}
+
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+
+		runErr := make(chan error, 1)
+
+		go func() { runErr <- worker.Run(ctx) }()
+
+		waitReady(t, worker)
+		cancel()
+
+		if err := awaitExit(t, runErr); !errors.Is(err, context.Canceled) {
+			t.Fatalf("want the first run canceled, got %v", err)
+		}
+
+		// The canceled context keeps a worker that wrongly accepted the rerun
+		// from folding: the refusal must come from the run-once gate, not the
+		// context.
+		if err := worker.Run(ctx); err == nil || !strings.Contains(err.Error(), "already run") {
+			t.Fatalf("want the rerun refused after termination, got %v", err)
+		}
+	})
 }
 
 func TestNewWorker_Validation(t *testing.T) {
@@ -660,9 +974,13 @@ func TestNewWorker_Validation(t *testing.T) {
 	}{
 		{"rejects a worker with no setters", nil},
 		{"rejects a nil cutover setter", []lifecycle.WorkerOption{lifecycle.WithCutoverSetter(nil)}},
-		{"rejects a non-positive poll interval", []lifecycle.WorkerOption{
+		{"rejects a zero poll interval", []lifecycle.WorkerOption{
 			lifecycle.WithCutoverSetter(&recordingSetter{}),
 			lifecycle.WithPollInterval(0),
+		}},
+		{"rejects a negative poll interval", []lifecycle.WorkerOption{
+			lifecycle.WithCutoverSetter(&recordingSetter{}),
+			lifecycle.WithPollInterval(-time.Millisecond),
 		}},
 		{"rejects a nil option", []lifecycle.WorkerOption{nil}},
 	} {
@@ -674,4 +992,677 @@ func TestNewWorker_Validation(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestWorker_InitializationCloseFailureWithholdsReadiness pins close-error
+// propagation during the initial fold: an iterator that cannot vouch for a
+// complete read stops the worker before any setter acts, and readiness is
+// withheld.
+func TestWorker_InitializationCloseFailureWithholdsReadiness(t *testing.T) {
+	t.Parallel()
+
+	events := newEventStore(t)
+
+	projections, err := lifecycle.NewStore(events)
+	if err != nil {
+		t.Fatalf("creating lifecycle store: %v", err)
+	}
+
+	ordersV1 := projection.ID{Name: "orders", Version: 1}
+	recordCutover(t, projections, ordersV1, projection.ID{}, false)
+
+	errClose := errors.New("the close failed")
+	reader := &failingCloseReader{inner: events, err: errClose}
+	reader.armed.Store(true)
+
+	recorder := &recordingSetter{}
+
+	worker, err := lifecycle.NewWorker(reader,
+		lifecycle.WithCutoverSetter(recorder),
+		lifecycle.WithPollInterval(2*time.Millisecond),
+	)
+	if err != nil {
+		t.Fatalf("creating worker: %v", err)
+	}
+
+	runErr, _ := runWorker(t, worker)
+
+	err = awaitExit(t, runErr)
+	if !errors.Is(err, errClose) || !strings.Contains(err.Error(), "closing event iterator") {
+		t.Fatalf("want the close failure propagated, got %v", err)
+	}
+
+	assertReadyWithheld(t, worker)
+	assertCutovers(t, recorder.seen(), nil)
+}
+
+// TestWorker_TailCloseFailureStopsTheWorker pins close-error propagation past
+// readiness: a tail read whose iterator fails to close stops the worker
+// instead of allowing another poll.
+func TestWorker_TailCloseFailureStopsTheWorker(t *testing.T) {
+	t.Parallel()
+
+	events := newEventStore(t)
+
+	projections, err := lifecycle.NewStore(events)
+	if err != nil {
+		t.Fatalf("creating lifecycle store: %v", err)
+	}
+
+	ordersV1 := projection.ID{Name: "orders", Version: 1}
+	recordCutover(t, projections, ordersV1, projection.ID{}, false)
+
+	errClose := errors.New("the close failed")
+	reader := &failingCloseReader{inner: events, err: errClose}
+	recorder := &recordingSetter{}
+
+	worker, err := lifecycle.NewWorker(reader,
+		lifecycle.WithCutoverSetter(recorder),
+		lifecycle.WithPollInterval(2*time.Millisecond),
+	)
+	if err != nil {
+		t.Fatalf("creating worker: %v", err)
+	}
+
+	runErr, _ := runWorker(t, worker)
+	waitReady(t, worker)
+	assertCutovers(t, recorder.seen(), []lifecycle.Cutover{{Live: ordersV1, Revision: 1}})
+
+	reader.armed.Store(true)
+
+	err = awaitExit(t, runErr)
+	if !errors.Is(err, errClose) || !strings.Contains(err.Error(), "closing event iterator") {
+		t.Fatalf("want the tail close failure to stop the worker, got %v", err)
+	}
+
+	assertCutovers(t, recorder.seen(), []lifecycle.Cutover{{Live: ordersV1, Revision: 1}})
+}
+
+// TestWorker_CancellationStopsInitialization pins the entry check: a worker
+// started with a canceled context touches nothing — no read issued, no
+// setter acting, readiness withheld — and Run returns the context's error.
+func TestWorker_CancellationStopsInitialization(t *testing.T) {
+	t.Parallel()
+
+	events := newEventStore(t)
+
+	projections, err := lifecycle.NewStore(events)
+	if err != nil {
+		t.Fatalf("creating lifecycle store: %v", err)
+	}
+
+	recordCutover(t, projections, projection.ID{Name: "orders", Version: 1}, projection.ID{}, false)
+
+	reader := &countingReader{inner: events}
+	recorder := &recordingSetter{}
+
+	worker, err := lifecycle.NewWorker(reader,
+		lifecycle.WithCutoverSetter(recorder),
+		lifecycle.WithPollInterval(2*time.Millisecond),
+	)
+	if err != nil {
+		t.Fatalf("creating worker: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	if err := worker.Run(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("want the canceled context's error, got %v", err)
+	}
+
+	if reads := reader.reads(); len(reads) != 0 {
+		t.Errorf("want no reads issued after cancellation, got %v", reads)
+	}
+
+	assertCutovers(t, recorder.seen(), nil)
+	assertReadyWithheld(t, worker)
+}
+
+// TestWorker_CancellationStopsTheFoldMidDrain pins the drain's per-event
+// check: cancellation arriving mid-read stops the fold between events even
+// when the reader does not observe contexts, before any setter acts.
+func TestWorker_CancellationStopsTheFoldMidDrain(t *testing.T) {
+	t.Parallel()
+
+	events := newEventStore(t)
+
+	projections, err := lifecycle.NewStore(events)
+	if err != nil {
+		t.Fatalf("creating lifecycle store: %v", err)
+	}
+
+	recordCutover(t, projections, projection.ID{Name: "orders", Version: 1}, projection.ID{}, false)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	reader := &cancelingReader{inner: events, cancel: cancel, cancelOn: 2}
+	recorder := &recordingSetter{}
+
+	worker, err := lifecycle.NewWorker(reader,
+		lifecycle.WithCutoverSetter(recorder),
+		lifecycle.WithPollInterval(2*time.Millisecond),
+	)
+	if err != nil {
+		t.Fatalf("creating worker: %v", err)
+	}
+
+	if err := worker.Run(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("want the canceled context's error, got %v", err)
+	}
+
+	if reader.yielded != 2 {
+		t.Errorf("want the drain stopped after the canceling event, read %d events", reader.yielded)
+	}
+
+	assertCutovers(t, recorder.seen(), nil)
+	assertReadyWithheld(t, worker)
+}
+
+// TestWorker_CancellationStopsFinalDeliveries pins the check between final
+// deliveries: cancellation arriving while one projection's final is in
+// flight stops the remaining projections' deliveries and withholds
+// readiness.
+func TestWorker_CancellationStopsFinalDeliveries(t *testing.T) {
+	t.Parallel()
+
+	events := newEventStore(t)
+
+	projections, err := lifecycle.NewStore(events)
+	if err != nil {
+		t.Fatalf("creating lifecycle store: %v", err)
+	}
+
+	customersV1 := projection.ID{Name: "customers", Version: 1}
+	ordersV1 := projection.ID{Name: "orders", Version: 1}
+
+	recordCutover(t, projections, customersV1, projection.ID{}, false)
+	recordCutover(t, projections, ordersV1, projection.ID{}, false)
+
+	setter := newGatedSetter(1)
+	t.Cleanup(setter.releaseGate)
+
+	worker, err := lifecycle.NewWorker(events,
+		lifecycle.WithCutoverSetter(setter),
+		lifecycle.WithPollInterval(2*time.Millisecond),
+	)
+	if err != nil {
+		t.Fatalf("creating worker: %v", err)
+	}
+
+	runErr, cancel := runWorker(t, worker)
+
+	setter.awaitEntered(t)
+	cancel()
+	setter.releaseGate()
+
+	if err := awaitExit(t, runErr); !errors.Is(err, context.Canceled) {
+		t.Fatalf("want the canceled context's error, got %v", err)
+	}
+
+	// The delivery in flight completed; the next projection's never started.
+	assertCutovers(t, setter.seen(), []lifecycle.Cutover{{Live: customersV1, Revision: 1}})
+	assertReadyWithheld(t, worker)
+}
+
+// TestWorker_CancellationWithholdsReadinessAfterFinals pins the readiness
+// check: cancellation arriving during the last final delivery leaves every
+// setter converged but never signals readiness.
+func TestWorker_CancellationWithholdsReadinessAfterFinals(t *testing.T) {
+	t.Parallel()
+
+	events := newEventStore(t)
+
+	projections, err := lifecycle.NewStore(events)
+	if err != nil {
+		t.Fatalf("creating lifecycle store: %v", err)
+	}
+
+	customersV1 := projection.ID{Name: "customers", Version: 1}
+	ordersV1 := projection.ID{Name: "orders", Version: 1}
+
+	recordCutover(t, projections, customersV1, projection.ID{}, false)
+	recordCutover(t, projections, ordersV1, projection.ID{}, false)
+
+	setter := newGatedSetter(2)
+	t.Cleanup(setter.releaseGate)
+
+	worker, err := lifecycle.NewWorker(events,
+		lifecycle.WithCutoverSetter(setter),
+		lifecycle.WithPollInterval(2*time.Millisecond),
+	)
+	if err != nil {
+		t.Fatalf("creating worker: %v", err)
+	}
+
+	runErr, cancel := runWorker(t, worker)
+
+	setter.awaitEntered(t)
+	cancel()
+	setter.releaseGate()
+
+	if err := awaitExit(t, runErr); !errors.Is(err, context.Canceled) {
+		t.Fatalf("want the canceled context's error, got %v", err)
+	}
+
+	assertCutovers(t, setter.seen(), []lifecycle.Cutover{
+		{Live: customersV1, Revision: 1},
+		{Live: ordersV1, Revision: 1},
+	})
+	assertReadyWithheld(t, worker)
+}
+
+// TestWorker_TailsEventsRecordedDuringInitialization pins the high-water
+// handoff: the tail starts at the completed initial read's position, so a
+// cutover recorded while final deliveries were still in flight is delivered
+// by the tail — exactly once, neither lost to a later mark nor duplicated.
+func TestWorker_TailsEventsRecordedDuringInitialization(t *testing.T) {
+	t.Parallel()
+
+	events := newEventStore(t)
+
+	projections, err := lifecycle.NewStore(events)
+	if err != nil {
+		t.Fatalf("creating lifecycle store: %v", err)
+	}
+
+	ordersV1 := projection.ID{Name: "orders", Version: 1}
+	ordersV2 := projection.ID{Name: "orders", Version: 2}
+
+	recordCutover(t, projections, ordersV1, projection.ID{}, false)
+
+	setter := newGatedSetter(1)
+
+	worker, err := lifecycle.NewWorker(events,
+		lifecycle.WithCutoverSetter(setter),
+		lifecycle.WithPollInterval(2*time.Millisecond),
+	)
+	if err != nil {
+		t.Fatalf("creating worker: %v", err)
+	}
+
+	startWorkerForTest(t, worker)
+	t.Cleanup(setter.releaseGate)
+
+	setter.awaitEntered(t)
+
+	// The initial read is complete and its position captured; this cutover
+	// lands strictly after it, before the worker reaches the tail.
+	recordCutover(t, projections, ordersV2, ordersV1, false)
+
+	setter.releaseGate()
+	waitReady(t, worker)
+
+	waitFor(t, func() bool { return len(setter.seen()) == 2 })
+	assertCutovers(t, setter.seen(), []lifecycle.Cutover{
+		{Live: ordersV1, Revision: 1},
+		{Live: ordersV2, Revision: 2},
+	})
+}
+
+// TestWorker_TailEnforcesInitializedFoldState pins that the tail folds
+// against the full state the initial fold established — the recorded
+// rollback target and the promoted high-water — not merely the live
+// revision.
+func TestWorker_TailEnforcesInitializedFoldState(t *testing.T) {
+	t.Parallel()
+
+	ordersV1 := projection.ID{Name: "orders", Version: 1}
+	ordersV2 := projection.ID{Name: "orders", Version: 2}
+	ordersV3 := projection.ID{Name: "orders", Version: 3}
+
+	promotions := func(t *testing.T, projections aggregatestore.Store[lifecycle.State]) lifecycle.Cutover {
+		t.Helper()
+
+		recordCutover(t, projections, ordersV1, projection.ID{}, false)
+		recordCutover(t, projections, ordersV2, ordersV1, false)
+
+		return lifecycle.Cutover{Live: ordersV2, Revision: 2}
+	}
+
+	for _, tt := range []struct {
+		name    string
+		seed    func(*testing.T, aggregatestore.Store[lifecycle.State]) lifecycle.Cutover
+		tail    estoria.DomainEvent[lifecycle.State]
+		tailed  lifecycle.Cutover // delivered when wantErr is empty
+		wantErr string
+	}{
+		{
+			name:   "a rollback lands on the target initialization recorded",
+			seed:   promotions,
+			tail:   lifecycle.RolledBack{From: ordersV2, RevertedTo: ordersV1, Revision: 3, At: promotedAt},
+			tailed: lifecycle.Cutover{Live: ordersV1, Revision: 3},
+		},
+		{
+			name:    "a rollback to a version the promotion did not retain",
+			seed:    promotions,
+			tail:    lifecycle.RolledBack{From: ordersV2, RevertedTo: ordersV3, Revision: 3, At: promotedAt},
+			wantErr: "the promotion retained",
+		},
+		{
+			name: "a promotion below the initialized high-water",
+			seed: func(t *testing.T, projections aggregatestore.Store[lifecycle.State]) lifecycle.Cutover {
+				t.Helper()
+
+				recordCutover(t, projections, ordersV1, projection.ID{}, false)
+				recordCutover(t, projections, ordersV2, ordersV1, true)
+
+				return lifecycle.Cutover{Live: ordersV1, Revision: 3}
+			},
+			tail:    lifecycle.Promoted{Previous: ordersV1, Next: ordersV2, Revision: 4, At: promotedAt},
+			wantErr: "never reused",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			events := newEventStore(t)
+
+			projections, err := lifecycle.NewStore(events)
+			if err != nil {
+				t.Fatalf("creating lifecycle store: %v", err)
+			}
+
+			final := tt.seed(t, projections)
+
+			recorder := &recordingSetter{}
+
+			worker, err := lifecycle.NewWorker(events,
+				lifecycle.WithCutoverSetter(recorder),
+				lifecycle.WithPollInterval(2*time.Millisecond),
+			)
+			if err != nil {
+				t.Fatalf("creating worker: %v", err)
+			}
+
+			runErr, _ := runWorker(t, worker)
+			waitReady(t, worker)
+			assertCutovers(t, recorder.seen(), []lifecycle.Cutover{final})
+
+			appendRawCutoverEvent(t, events, tt.tail)
+
+			if tt.wantErr == "" {
+				waitFor(t, func() bool { return len(recorder.seen()) == 2 })
+				assertCutovers(t, recorder.seen(), []lifecycle.Cutover{final, tt.tailed})
+
+				return
+			}
+
+			if err := awaitExit(t, runErr); err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("want the tailed cutover refused with %q, got %v", tt.wantErr, err)
+			}
+
+			assertCutovers(t, recorder.seen(), []lifecycle.Cutover{final})
+		})
+	}
+}
+
+// TestWorker_ReadFailuresStopInitialization pins fail-closed reads: a read
+// that cannot start or cannot finish stops the worker with the reader's
+// error, readiness withheld, before any setter acts.
+func TestWorker_ReadFailuresStopInitialization(t *testing.T) {
+	t.Parallel()
+
+	errRead := errors.New("the read failed")
+
+	for _, tt := range []struct {
+		name    string
+		reader  func(*testing.T) eventstore.GlobalReader
+		wantErr string
+	}{
+		{
+			name:    "the read cannot start",
+			reader:  func(*testing.T) eventstore.GlobalReader { return failingReader{err: errRead} },
+			wantErr: "reading events",
+		},
+		{
+			name: "the read fails mid-stream",
+			reader: func(t *testing.T) eventstore.GlobalReader {
+				t.Helper()
+
+				events := newEventStore(t)
+
+				projections, err := lifecycle.NewStore(events)
+				if err != nil {
+					t.Fatalf("creating lifecycle store: %v", err)
+				}
+
+				recordCutover(t, projections, projection.ID{Name: "orders", Version: 1}, projection.ID{}, false)
+
+				return &failingNextReader{inner: events, allow: 1, err: errRead}
+			},
+			wantErr: "reading event",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			recorder := &recordingSetter{}
+
+			worker, err := lifecycle.NewWorker(tt.reader(t),
+				lifecycle.WithCutoverSetter(recorder),
+				lifecycle.WithPollInterval(2*time.Millisecond),
+			)
+			if err != nil {
+				t.Fatalf("creating worker: %v", err)
+			}
+
+			// The deadline bounds the failure mode: a worker that swallowed
+			// the read failure would initialize and tail until the deadline.
+			runCtx, cancel := context.WithTimeout(t.Context(), 250*time.Millisecond)
+			defer cancel()
+
+			err = worker.Run(runCtx)
+			if !errors.Is(err, errRead) || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("want the read failure propagated as %q, got %v", tt.wantErr, err)
+			}
+
+			assertReadyWithheld(t, worker)
+			assertCutovers(t, recorder.seen(), nil)
+		})
+	}
+}
+
+// TestWorker_ReadyOnlyAfterEveryProjectionConverges pins the readiness
+// gate's scope across projections: a setter refusing one projection's final
+// stops the worker uninitialized even after another projection's final was
+// applied.
+func TestWorker_ReadyOnlyAfterEveryProjectionConverges(t *testing.T) {
+	t.Parallel()
+
+	events := newEventStore(t)
+
+	projections, err := lifecycle.NewStore(events)
+	if err != nil {
+		t.Fatalf("creating lifecycle store: %v", err)
+	}
+
+	customersV1 := projection.ID{Name: "customers", Version: 1}
+	ordersV1 := projection.ID{Name: "orders", Version: 1}
+
+	recordCutover(t, projections, customersV1, projection.ID{}, false)
+	recordCutover(t, projections, ordersV1, projection.ID{}, false)
+
+	setter := &nameRefusingSetter{refuse: "orders"}
+
+	worker, err := lifecycle.NewWorker(events,
+		lifecycle.WithCutoverSetter(setter),
+		lifecycle.WithPollInterval(2*time.Millisecond),
+	)
+	if err != nil {
+		t.Fatalf("creating worker: %v", err)
+	}
+
+	if err := worker.Run(t.Context()); err == nil || !strings.Contains(err.Error(), "applying cutover") {
+		t.Fatalf("want the refused final to stop initialization, got %v", err)
+	}
+
+	assertReadyWithheld(t, worker)
+	assertCutovers(t, setter.seen(), []lifecycle.Cutover{{Live: customersV1, Revision: 1}})
+}
+
+// TestWorker_IgnoresForeignStreamTypes pins the stream-type filter: a
+// cutover-shaped event on a non-lifecycle stream is not routing truth, even
+// when every other field would decode — the worker neither delivers it nor
+// folds it into any projection's continuity.
+func TestWorker_IgnoresForeignStreamTypes(t *testing.T) {
+	t.Parallel()
+
+	events := newEventStore(t)
+
+	projections, err := lifecycle.NewStore(events)
+	if err != nil {
+		t.Fatalf("creating lifecycle store: %v", err)
+	}
+
+	customersV1 := projection.ID{Name: "customers", Version: 1}
+	customersV2 := projection.ID{Name: "customers", Version: 2}
+	customersV3 := projection.ID{Name: "customers", Version: 3}
+
+	recordCutover(t, projections, customersV1, projection.ID{}, false)
+
+	recorder := &recordingSetter{}
+
+	worker, err := lifecycle.NewWorker(events,
+		lifecycle.WithCutoverSetter(recorder),
+		lifecycle.WithPollInterval(2*time.Millisecond),
+	)
+	if err != nil {
+		t.Fatalf("creating worker: %v", err)
+	}
+
+	startWorkerForTest(t, worker)
+	waitReady(t, worker)
+
+	// A decoy on a foreign stream type, maximally confusable otherwise: the
+	// event type, payload, and UUID all match what the lifecycle would write.
+	data, err := json.Marshal(lifecycle.Promoted{Previous: customersV1, Next: customersV2, Revision: 2, At: promotedAt})
+	if err != nil {
+		t.Fatalf("marshaling decoy event: %v", err)
+	}
+
+	if _, err := events.AppendStream(t.Context(),
+		typeid.ID{Type: "decoystream", UUID: lifecycle.StreamUUID("customers")},
+		[]*eventstore.WritableEvent{{Type: lifecycle.Promoted{}.EventType(), Data: data, DataContentType: "application/json"}},
+		eventstore.AppendStreamOptions{}); err != nil {
+		t.Fatalf("appending decoy event: %v", err)
+	}
+
+	// The real flips continue the real continuity: a worker that had folded
+	// or delivered the decoy would refuse the repeated revision 2 here and
+	// never reach revision 3.
+	recordCutover(t, projections, customersV2, customersV1, false)
+	recordCutover(t, projections, customersV3, customersV2, false)
+
+	waitFor(t, func() bool { return len(recorder.seen()) == 3 })
+	assertCutovers(t, recorder.seen(), []lifecycle.Cutover{
+		{Live: customersV1, Revision: 1},
+		{Live: customersV2, Revision: 2},
+		{Live: customersV3, Revision: 3},
+	})
+}
+
+// TestWorker_AdvancesTheMarkPastNonCutoverEvents pins the high-water mark's
+// scope: it tracks the last observed event, cutover or not, so tail reads
+// resume from the head instead of re-reading trailing non-cutover events on
+// every poll.
+func TestWorker_AdvancesTheMarkPastNonCutoverEvents(t *testing.T) {
+	t.Parallel()
+
+	events := newEventStore(t)
+
+	projections, err := lifecycle.NewStore(events)
+	if err != nil {
+		t.Fatalf("creating lifecycle store: %v", err)
+	}
+
+	recordCutover(t, projections, projection.ID{Name: "orders", Version: 1}, projection.ID{}, false)
+
+	if _, err := events.AppendStream(t.Context(), typeid.NewV4("order"),
+		[]*eventstore.WritableEvent{{Type: "ordertest", Data: []byte(`{}`)}},
+		eventstore.AppendStreamOptions{}); err != nil {
+		t.Fatalf("appending domain event: %v", err)
+	}
+
+	head := storeHead(t, events)
+	reader := &countingReader{inner: events}
+
+	worker, err := lifecycle.NewWorker(reader,
+		lifecycle.WithCutoverSetter(&recordingSetter{}),
+		lifecycle.WithPollInterval(2*time.Millisecond),
+	)
+	if err != nil {
+		t.Fatalf("creating worker: %v", err)
+	}
+
+	startWorkerForTest(t, worker)
+	waitReady(t, worker)
+
+	waitFor(t, func() bool { return len(reader.reads()) >= 3 })
+
+	reads := reader.reads()
+	if reads[0] != 0 {
+		t.Errorf("want the initial fold read from zero, got %d", reads[0])
+	}
+
+	for i, after := range reads[1:] {
+		if after != head {
+			t.Errorf("want tail read %d to start after the head %d, got %d", i+1, head, after)
+		}
+	}
+}
+
+// TestWorker_HonorsConfiguredPollInterval pins that the configured interval
+// drives the tail: a cutover recorded after a tail read's snapshot is
+// delivered within a fraction of the default interval, which only the
+// configured one allows.
+func TestWorker_HonorsConfiguredPollInterval(t *testing.T) {
+	t.Parallel()
+
+	events := newEventStore(t)
+
+	projections, err := lifecycle.NewStore(events)
+	if err != nil {
+		t.Fatalf("creating lifecycle store: %v", err)
+	}
+
+	ordersV1 := projection.ID{Name: "orders", Version: 1}
+	ordersV2 := projection.ID{Name: "orders", Version: 2}
+
+	recordCutover(t, projections, ordersV1, projection.ID{}, false)
+
+	reader := &countingReader{inner: events}
+	recorder := &recordingSetter{}
+
+	worker, err := lifecycle.NewWorker(reader,
+		lifecycle.WithCutoverSetter(recorder),
+		lifecycle.WithPollInterval(2*time.Millisecond),
+	)
+	if err != nil {
+		t.Fatalf("creating worker: %v", err)
+	}
+
+	startWorkerForTest(t, worker)
+	waitReady(t, worker)
+
+	// Once the first tail read is handed out its snapshot is fixed, so this
+	// cutover is delivered no sooner than the poll after it.
+	waitFor(t, func() bool { return len(reader.reads()) >= 2 })
+	recordCutover(t, projections, ordersV2, ordersV1, false)
+
+	deadline := time.Now().Add(600 * time.Millisecond)
+
+	for len(recorder.seen()) < 2 {
+		if time.Now().After(deadline) {
+			t.Fatal("no tail delivery within a fraction of the default poll interval")
+		}
+
+		time.Sleep(time.Millisecond)
+	}
+
+	assertCutovers(t, recorder.seen(), []lifecycle.Cutover{
+		{Live: ordersV1, Revision: 1},
+		{Live: ordersV2, Revision: 2},
+	})
 }

@@ -246,44 +246,63 @@ func (r *StreamRouter) Refresh(ctx context.Context) error {
 
 // advance folds cutover events recorded after the last folded position into
 // the cached live map, through the same semantic decoder the cutover worker
-// uses. The fold commits only on success: a read, decode, or validation
-// failure leaves the cache and cursor untouched, so the next call retries
-// from the same position instead of serving a partial fold or silently
-// skipping past a malformed event. The caller must hold r.mu.
+// uses. The fold commits only on success: a read, decode, validation, or
+// iterator-close failure leaves the cache and cursor untouched, so the next
+// call retries from the same position instead of serving a partial fold or
+// silently skipping past a malformed event. The caller must hold r.mu.
 func (r *StreamRouter) advance(ctx context.Context) error {
+	live, position, err := r.fold(ctx)
+	if err != nil {
+		return err
+	}
+
+	r.live = live
+	r.position = position
+	r.refreshedAt = time.Now()
+
+	return nil
+}
+
+// fold reads and validates the cutover events after the router's cursor,
+// returning the extended live map and cursor. A failed iterator close is a
+// failed fold: the iterator cannot vouch for the completeness of what it
+// yielded.
+func (r *StreamRouter) fold(ctx context.Context) (live map[string]cutoverFold, position int64, err error) {
 	iter, err := r.events.ReadAll(ctx, eventstore.ReadAllOptions{AfterPosition: r.position})
 	if err != nil {
-		return fmt.Errorf("reading events: %w", err)
+		return nil, 0, fmt.Errorf("reading events: %w", err)
 	}
 
 	defer func() {
 		closeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), iteratorCloseTimeout)
 		defer cancel()
 
-		_ = iter.Close(closeCtx)
+		if closeErr := iter.Close(closeCtx); closeErr != nil {
+			err = errors.Join(err, fmt.Errorf("closing event iterator: %w", closeErr))
+		}
 	}()
 
-	live := maps.Clone(r.live)
+	live = maps.Clone(r.live)
 	if live == nil {
 		live = map[string]cutoverFold{}
 	}
 
-	position := r.position
+	position = r.position
 
 	for {
 		event, err := iter.Next(ctx)
 		if errors.Is(err, eventstore.ErrEndOfEventStream) {
-			break
+			return live, position, nil
 		} else if err != nil {
-			return fmt.Errorf("reading event: %w", err)
+			return nil, 0, fmt.Errorf("reading event: %w", err)
 		}
 
 		if raw, ok, err := decodeCutover(event); err != nil {
-			return err
+			return nil, 0, err
 		} else if ok {
 			next, err := live[raw.cutover.Live.Name].apply(raw)
 			if err != nil {
-				return err
+				return nil, 0, err
 			}
 
 			live[raw.cutover.Live.Name] = next
@@ -293,12 +312,6 @@ func (r *StreamRouter) advance(ctx context.Context) error {
 			position = *event.GlobalPosition
 		}
 	}
-
-	r.live = live
-	r.position = position
-	r.refreshedAt = time.Now()
-
-	return nil
 }
 
 var _ Router = (*StreamRouter)(nil)

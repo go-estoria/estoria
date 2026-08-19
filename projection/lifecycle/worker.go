@@ -91,13 +91,20 @@ func NewWorker(events eventstore.GlobalReader, opts ...WorkerOption) (*Worker, e
 
 // Run blocks, converging setters: it folds the recorded cutover history,
 // applies each projection's final cutover, signals readiness, and tails the
-// global sequence. It returns the context's error on cancellation and a
-// non-nil error on any read, validation, or delivery failure. Run may be
-// called at most once; a stopped worker is restarted by creating a new
+// global sequence. It returns the context's error on cancellation — honored
+// between events and between deliveries, even when the reader or setters do
+// not observe it, and never after signaling readiness it has not earned —
+// and a non-nil error on any read, validation, or delivery failure. Run may
+// be called at most once and consumes the worker's single start even when
+// it returns immediately; a stopped worker is restarted by creating a new
 // Worker, which refolds from zero.
 func (w *Worker) Run(ctx context.Context) error {
 	if !w.started.CompareAndSwap(false, true) {
 		return errors.New("the worker has already run: create a new worker to refold from zero")
+	}
+
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 
 	// The initial fold applies nothing: intermediate flips are already
@@ -111,9 +118,18 @@ func (w *Worker) Run(ctx context.Context) error {
 	}
 
 	for _, name := range slices.Sorted(maps.Keys(live)) {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+
 		if err := w.deliver(ctx, live[name].current); err != nil {
 			return err
 		}
+	}
+
+	// A canceled worker must not report itself initialized.
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 
 	close(w.ready)
@@ -141,10 +157,13 @@ func (w *Worker) Ready() <-chan struct{} { return w.ready }
 // folding every cutover event through the per-name continuity folds and
 // handing each accepted cutover to deliver when it is non-nil. It returns
 // the last observed global position. Validation precedes delivery: a
-// cutover that extends no legal history stops the drain undelivered.
+// cutover that extends no legal history stops the drain undelivered. A
+// failed iterator close is a failed drain — the iterator cannot vouch for
+// the completeness of what it yielded — and cancellation stops the drain
+// between events even when the reader does not observe contexts.
 func (w *Worker) drain(ctx context.Context, live map[string]cutoverFold, after int64,
 	deliver func(context.Context, Cutover) error,
-) (int64, error) {
+) (position int64, err error) {
 	iter, err := w.events.ReadAll(ctx, eventstore.ReadAllOptions{AfterPosition: after})
 	if err != nil {
 		return after, fmt.Errorf("reading events: %w", err)
@@ -154,12 +173,18 @@ func (w *Worker) drain(ctx context.Context, live map[string]cutoverFold, after i
 		closeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), iteratorCloseTimeout)
 		defer cancel()
 
-		_ = iter.Close(closeCtx)
+		if closeErr := iter.Close(closeCtx); closeErr != nil {
+			err = errors.Join(err, fmt.Errorf("closing event iterator: %w", closeErr))
+		}
 	}()
 
-	position := after
+	position = after
 
 	for {
+		if err := ctx.Err(); err != nil {
+			return position, err
+		}
+
 		event, err := iter.Next(ctx)
 		if errors.Is(err, eventstore.ErrEndOfEventStream) {
 			return position, nil

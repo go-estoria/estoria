@@ -963,9 +963,10 @@ func (r *Rebuild) recordLostAppend(ctx context.Context, attemptID, runnerID uuid
 }
 
 // Promote cuts reads over to the target version by recording Promoted — the
-// event is the flip. The cutover worker converges registered setters on it
-// in stream order; nothing runs inline, so there is no hook failure to
-// special-case and no unrecorded cutover to repair.
+// event is the flip. Cutover workers converge registered setters on it: a
+// running worker tails and delivers the flip, and a restarted worker refolds
+// and applies each projection's final cutover. Nothing runs inline, so there
+// is no hook failure to special-case and no unrecorded cutover to repair.
 //
 // Promotion requires a current catch-up certification: persisted
 // PhaseCaughtUp is a historical fact, not a standing license, so only the

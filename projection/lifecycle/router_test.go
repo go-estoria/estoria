@@ -610,6 +610,54 @@ func TestStreamRouter_ReportsCorruptCutoverEvent(t *testing.T) {
 	}
 }
 
+// TestStreamRouter_CloseFailureLeavesTheFoldUncommitted pins that an
+// iterator close failure is a read failure: the fold is reported and nothing
+// commits, so the next fold retries from the original position instead of
+// serving a read the iterator could not vouch for.
+func TestStreamRouter_CloseFailureLeavesTheFoldUncommitted(t *testing.T) {
+	t.Parallel()
+
+	events, err := esmemory.NewEventStore()
+	if err != nil {
+		t.Fatalf("creating event store: %v", err)
+	}
+
+	projections, err := lifecycle.NewStore(events)
+	if err != nil {
+		t.Fatalf("creating lifecycle store: %v", err)
+	}
+
+	ordersV1 := projection.ID{Name: "orders", Version: 1}
+	recordCutover(t, projections, ordersV1, projection.ID{}, false)
+
+	reads := &countingReader{inner: events}
+	reader := &failingCloseReader{inner: reads, err: errors.New("the close failed")}
+	reader.armed.Store(true)
+
+	router, err := lifecycle.NewStreamRouter(reader)
+	if err != nil {
+		t.Fatalf("creating stream router: %v", err)
+	}
+
+	if err := router.Refresh(t.Context()); err == nil || !strings.Contains(err.Error(), "closing event iterator") {
+		t.Fatalf("want the close failure propagated, got %v", err)
+	}
+
+	reader.armed.Store(false)
+
+	if err := router.Refresh(t.Context()); err != nil {
+		t.Fatalf("refreshing after the close healed: %v", err)
+	}
+
+	if got := reads.reads(); len(got) != 2 || got[1] != 0 {
+		t.Errorf("want the healed fold to retry from the original position, got reads %v", got)
+	}
+
+	if got, err := router.Live(t.Context(), "orders"); err != nil || got != ordersV1 {
+		t.Errorf("want %s live after the healed fold, got %s (%v)", ordersV1, got, err)
+	}
+}
+
 // recordCutover appends a full attempt to next's lifecycle stream — creating
 // the aggregate on the projection's first rebuild, loading it afterwards —
 // promoted and completed, or rolled back to previous when rollBack is set.
