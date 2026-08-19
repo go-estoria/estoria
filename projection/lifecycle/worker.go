@@ -92,19 +92,17 @@ func NewWorker(events eventstore.GlobalReader, opts ...WorkerOption) (*Worker, e
 // Run blocks, converging setters: it folds the recorded cutover history,
 // applies each projection's final cutover, signals readiness, and tails the
 // global sequence. It returns the context's error on cancellation — honored
-// between events and between deliveries, even when the reader or setters do
-// not observe it, and never after signaling readiness it has not earned —
-// and a non-nil error on any read, validation, or delivery failure. Run may
-// be called at most once and consumes the worker's single start even when
-// it returns immediately; a stopped worker is restarted by creating a new
-// Worker, which refolds from zero.
+// before each read, after each read, before each setter application, and
+// before readiness, even when the reader or setters do not observe it; a
+// canceled worker issues no further reads, applies no further setters, and
+// never signals readiness it has not earned. It returns a non-nil error on
+// any read, validation, or delivery failure. Run may be called at most once
+// and consumes the worker's single start even when it returns immediately;
+// a stopped worker is restarted by creating a new Worker, which refolds
+// from zero.
 func (w *Worker) Run(ctx context.Context) error {
 	if !w.started.CompareAndSwap(false, true) {
 		return errors.New("the worker has already run: create a new worker to refold from zero")
-	}
-
-	if err := ctx.Err(); err != nil {
-		return err
 	}
 
 	// The initial fold applies nothing: intermediate flips are already
@@ -118,10 +116,6 @@ func (w *Worker) Run(ctx context.Context) error {
 	}
 
 	for _, name := range slices.Sorted(maps.Keys(live)) {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-
 		if err := w.deliver(ctx, live[name].current); err != nil {
 			return err
 		}
@@ -159,11 +153,17 @@ func (w *Worker) Ready() <-chan struct{} { return w.ready }
 // the last observed global position. Validation precedes delivery: a
 // cutover that extends no legal history stops the drain undelivered. A
 // failed iterator close is a failed drain — the iterator cannot vouch for
-// the completeness of what it yielded — and cancellation stops the drain
-// between events even when the reader does not observe contexts.
+// the completeness of what it yielded. Cancellation is checked before the
+// read begins and after every event, even when the reader does not observe
+// contexts: a canceled drain issues no read, and an event whose read
+// completes alongside cancellation is dropped unprocessed.
 func (w *Worker) drain(ctx context.Context, live map[string]cutoverFold, after int64,
 	deliver func(context.Context, Cutover) error,
 ) (position int64, err error) {
+	if err := ctx.Err(); err != nil {
+		return after, err
+	}
+
 	iter, err := w.events.ReadAll(ctx, eventstore.ReadAllOptions{AfterPosition: after})
 	if err != nil {
 		return after, fmt.Errorf("reading events: %w", err)
@@ -181,15 +181,15 @@ func (w *Worker) drain(ctx context.Context, live map[string]cutoverFold, after i
 	position = after
 
 	for {
-		if err := ctx.Err(); err != nil {
-			return position, err
-		}
-
 		event, err := iter.Next(ctx)
 		if errors.Is(err, eventstore.ErrEndOfEventStream) {
 			return position, nil
 		} else if err != nil {
 			return position, fmt.Errorf("reading event: %w", err)
+		}
+
+		if err := ctx.Err(); err != nil {
+			return position, err
 		}
 
 		if event.GlobalPosition != nil {
@@ -221,9 +221,14 @@ func (w *Worker) drain(ctx context.Context, live map[string]cutoverFold, after i
 }
 
 // deliver applies one cutover through every registered setter, in
-// registration order.
+// registration order, checking cancellation before each: a setter that
+// observes shutdown stops the fan-out even when the rest do not.
 func (w *Worker) deliver(ctx context.Context, cutover Cutover) error {
 	for _, setter := range w.setters {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+
 		if err := setter.ApplyCutover(ctx, cutover); err != nil {
 			return fmt.Errorf("applying cutover for %s: %w", cutover.Live, err)
 		}

@@ -658,6 +658,43 @@ func TestStreamRouter_CloseFailureLeavesTheFoldUncommitted(t *testing.T) {
 	}
 }
 
+// TestStreamRouter_ReadAndCloseFailuresBothSurface pins the join: when a
+// read fails mid-stream and its iterator then fails to close, the fold's
+// error carries both causes.
+func TestStreamRouter_ReadAndCloseFailuresBothSurface(t *testing.T) {
+	t.Parallel()
+
+	events, err := esmemory.NewEventStore()
+	if err != nil {
+		t.Fatalf("creating event store: %v", err)
+	}
+
+	projections, err := lifecycle.NewStore(events)
+	if err != nil {
+		t.Fatalf("creating lifecycle store: %v", err)
+	}
+
+	recordCutover(t, projections, projection.ID{Name: "orders", Version: 1}, projection.ID{}, false)
+
+	errRead := errors.New("the read failed")
+	errClose := errors.New("the close failed")
+
+	reader := &failingCloseReader{
+		inner: &failingNextReader{inner: events, allow: 0, err: errRead},
+		err:   errClose,
+	}
+	reader.armed.Store(true)
+
+	router, err := lifecycle.NewStreamRouter(reader)
+	if err != nil {
+		t.Fatalf("creating stream router: %v", err)
+	}
+
+	if err := router.Refresh(t.Context()); !errors.Is(err, errRead) || !errors.Is(err, errClose) {
+		t.Fatalf("want both the read and close failures surfaced, got %v", err)
+	}
+}
+
 // recordCutover appends a full attempt to next's lifecycle stream — creating
 // the aggregate on the projection's first rebuild, loading it afterwards —
 // promoted and completed, or rolled back to previous when rollBack is set.

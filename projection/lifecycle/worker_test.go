@@ -221,11 +221,18 @@ func (i *failingNextIterator) Next(ctx context.Context) (*eventstore.Event, erro
 	return event, err
 }
 
-// failingCloseReader closes iterators with an error while armed.
+// failingCloseReader closes iterators with an error while armed — once when
+// oneShot is set, so a test can prove nothing follows the failing close —
+// and keeps an ordered history of the reads it hands out and the close
+// failures it fires.
 type failingCloseReader struct {
-	inner eventstore.GlobalReader
-	err   error
-	armed atomic.Bool
+	inner   eventstore.GlobalReader
+	err     error
+	oneShot bool
+	armed   atomic.Bool
+
+	mu      sync.Mutex
+	history []string
 }
 
 func (r *failingCloseReader) ReadAll(ctx context.Context, opts eventstore.ReadAllOptions) (eventstore.StreamIterator, error) {
@@ -234,7 +241,27 @@ func (r *failingCloseReader) ReadAll(ctx context.Context, opts eventstore.ReadAl
 		return nil, err
 	}
 
+	r.record("read")
+
 	return &failingCloseIterator{StreamIterator: iter, reader: r}, nil
+}
+
+func (r *failingCloseReader) record(event string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	r.history = append(r.history, event)
+}
+
+func (r *failingCloseReader) lastEvent() string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if len(r.history) == 0 {
+		return ""
+	}
+
+	return r.history[len(r.history)-1]
 }
 
 type failingCloseIterator struct {
@@ -245,22 +272,41 @@ type failingCloseIterator struct {
 func (i *failingCloseIterator) Close(ctx context.Context) error {
 	_ = i.StreamIterator.Close(ctx)
 
-	if i.reader.armed.Load() {
+	fire := i.reader.armed.Load()
+	if fire && i.reader.oneShot {
+		fire = i.reader.armed.CompareAndSwap(true, false)
+	}
+
+	if fire {
+		i.reader.record("close failed")
 		return i.reader.err
 	}
 
 	return nil
 }
 
+// cancelingSetter cancels a context from inside its own application,
+// modeling a setter that observes shutdown mid-fan-out.
+type cancelingSetter struct {
+	recordingSetter
+	cancel context.CancelFunc
+}
+
+func (s *cancelingSetter) ApplyCutover(ctx context.Context, cutover lifecycle.Cutover) error {
+	s.cancel()
+
+	return s.recordingSetter.ApplyCutover(ctx, cutover)
+}
+
 // cancelingReader cancels a context from inside a chosen Next call, modeling
 // cancellation that arrives while a reader that does not observe contexts is
-// mid-drain. It counts the events it yields.
+// mid-drain. It counts the events it yields; cancelOn zero never fires.
 type cancelingReader struct {
 	inner    eventstore.GlobalReader
 	cancel   context.CancelFunc
-	cancelOn int
+	cancelOn atomic.Int64
 
-	yielded int
+	yielded atomic.Int64
 }
 
 func (r *cancelingReader) ReadAll(ctx context.Context, opts eventstore.ReadAllOptions) (eventstore.StreamIterator, error) {
@@ -283,8 +329,7 @@ func (i *cancelingIterator) Next(ctx context.Context) (*eventstore.Event, error)
 		return event, err
 	}
 
-	i.reader.yielded++
-	if i.reader.yielded == i.reader.cancelOn {
+	if i.reader.yielded.Add(1) == i.reader.cancelOn.Load() {
 		i.reader.cancel()
 	}
 
@@ -1012,7 +1057,7 @@ func TestWorker_InitializationCloseFailureWithholdsReadiness(t *testing.T) {
 	recordCutover(t, projections, ordersV1, projection.ID{}, false)
 
 	errClose := errors.New("the close failed")
-	reader := &failingCloseReader{inner: events, err: errClose}
+	reader := &failingCloseReader{inner: events, err: errClose, oneShot: true}
 	reader.armed.Store(true)
 
 	recorder := &recordingSetter{}
@@ -1030,6 +1075,12 @@ func TestWorker_InitializationCloseFailureWithholdsReadiness(t *testing.T) {
 	err = awaitExit(t, runErr)
 	if !errors.Is(err, errClose) || !strings.Contains(err.Error(), "closing event iterator") {
 		t.Fatalf("want the close failure propagated, got %v", err)
+	}
+
+	// The one-shot failure proves the stop was immediate: no read follows
+	// the failing close.
+	if got := reader.lastEvent(); got != "close failed" {
+		t.Errorf("want the failing close to be the reader's last event, got %q", got)
 	}
 
 	assertReadyWithheld(t, worker)
@@ -1053,7 +1104,7 @@ func TestWorker_TailCloseFailureStopsTheWorker(t *testing.T) {
 	recordCutover(t, projections, ordersV1, projection.ID{}, false)
 
 	errClose := errors.New("the close failed")
-	reader := &failingCloseReader{inner: events, err: errClose}
+	reader := &failingCloseReader{inner: events, err: errClose, oneShot: true}
 	recorder := &recordingSetter{}
 
 	worker, err := lifecycle.NewWorker(reader,
@@ -1073,6 +1124,13 @@ func TestWorker_TailCloseFailureStopsTheWorker(t *testing.T) {
 	err = awaitExit(t, runErr)
 	if !errors.Is(err, errClose) || !strings.Contains(err.Error(), "closing event iterator") {
 		t.Fatalf("want the tail close failure to stop the worker, got %v", err)
+	}
+
+	// The failure fired once and disarmed, so only an immediate stop leaves
+	// it as the reader's last event: a worker that read again before
+	// returning would append that read to the history.
+	if got := reader.lastEvent(); got != "close failed" {
+		t.Errorf("want the failing close to be the reader's last event, got %q", got)
 	}
 
 	assertCutovers(t, recorder.seen(), []lifecycle.Cutover{{Live: ordersV1, Revision: 1}})
@@ -1117,6 +1175,20 @@ func TestWorker_CancellationStopsInitialization(t *testing.T) {
 
 	assertCutovers(t, recorder.seen(), nil)
 	assertReadyWithheld(t, worker)
+
+	// The canceled run consumed the worker's single start: a retry with a
+	// live context is refused by the run-once gate — the deadline bounds a
+	// worker that wrongly accepted it.
+	retryCtx, cancelRetry := context.WithTimeout(t.Context(), 250*time.Millisecond)
+	defer cancelRetry()
+
+	if err := worker.Run(retryCtx); err == nil || !strings.Contains(err.Error(), "already run") {
+		t.Fatalf("want the retry refused after the consumed start, got %v", err)
+	}
+
+	if reads := reader.reads(); len(reads) != 0 {
+		t.Errorf("want no reads from the refused retry, got %v", reads)
+	}
 }
 
 // TestWorker_CancellationStopsTheFoldMidDrain pins the drain's per-event
@@ -1137,7 +1209,9 @@ func TestWorker_CancellationStopsTheFoldMidDrain(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 
-	reader := &cancelingReader{inner: events, cancel: cancel, cancelOn: 2}
+	reader := &cancelingReader{inner: events, cancel: cancel}
+	reader.cancelOn.Store(2)
+
 	recorder := &recordingSetter{}
 
 	worker, err := lifecycle.NewWorker(reader,
@@ -1152,8 +1226,8 @@ func TestWorker_CancellationStopsTheFoldMidDrain(t *testing.T) {
 		t.Fatalf("want the canceled context's error, got %v", err)
 	}
 
-	if reader.yielded != 2 {
-		t.Errorf("want the drain stopped after the canceling event, read %d events", reader.yielded)
+	if got := reader.yielded.Load(); got != 2 {
+		t.Errorf("want the drain stopped after the canceling event, read %d events", got)
 	}
 
 	assertCutovers(t, recorder.seen(), nil)
@@ -1299,6 +1373,147 @@ func TestWorker_TailsEventsRecordedDuringInitialization(t *testing.T) {
 		{Live: ordersV1, Revision: 1},
 		{Live: ordersV2, Revision: 2},
 	})
+}
+
+// TestWorker_CancellationDropsTheEventInHand pins the check after each read:
+// a cutover whose read completes alongside cancellation is dropped
+// unprocessed — neither folded nor delivered — rather than ridden to the
+// setters on the way out.
+func TestWorker_CancellationDropsTheEventInHand(t *testing.T) {
+	t.Parallel()
+
+	events := newEventStore(t)
+
+	projections, err := lifecycle.NewStore(events)
+	if err != nil {
+		t.Fatalf("creating lifecycle store: %v", err)
+	}
+
+	ordersV1 := projection.ID{Name: "orders", Version: 1}
+	ordersV2 := projection.ID{Name: "orders", Version: 2}
+
+	recordCutover(t, projections, ordersV1, projection.ID{}, false)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	reader := &cancelingReader{inner: events, cancel: cancel}
+	recorder := &recordingSetter{}
+
+	worker, err := lifecycle.NewWorker(reader,
+		lifecycle.WithCutoverSetter(recorder),
+		lifecycle.WithPollInterval(2*time.Millisecond),
+	)
+	if err != nil {
+		t.Fatalf("creating worker: %v", err)
+	}
+
+	runErr := make(chan error, 1)
+
+	go func() { runErr <- worker.Run(ctx) }()
+
+	waitReady(t, worker)
+	assertCutovers(t, recorder.seen(), []lifecycle.Cutover{{Live: ordersV1, Revision: 1}})
+
+	// Arm the cancellation to fire from inside the read that yields the next
+	// event — the raw append is a single cutover, so that read is it.
+	initialized := reader.yielded.Load()
+	reader.cancelOn.Store(initialized + 1)
+
+	appendRawCutoverEvent(t, events, lifecycle.Promoted{Previous: ordersV1, Next: ordersV2, Revision: 2, At: promotedAt})
+
+	if err := awaitExit(t, runErr); !errors.Is(err, context.Canceled) {
+		t.Fatalf("want the canceled context's error, got %v", err)
+	}
+
+	if got := reader.yielded.Load(); got != initialized+1 {
+		t.Errorf("want the drain stopped with the canceling event in hand, read %d events past initialization", got-initialized)
+	}
+
+	assertCutovers(t, recorder.seen(), []lifecycle.Cutover{{Live: ordersV1, Revision: 1}})
+}
+
+// TestWorker_CancellationStopsSetterFanout pins the check before each
+// setter: a setter observing shutdown mid-application stops the fan-out —
+// later context-oblivious setters are never invoked.
+func TestWorker_CancellationStopsSetterFanout(t *testing.T) {
+	t.Parallel()
+
+	events := newEventStore(t)
+
+	projections, err := lifecycle.NewStore(events)
+	if err != nil {
+		t.Fatalf("creating lifecycle store: %v", err)
+	}
+
+	ordersV1 := projection.ID{Name: "orders", Version: 1}
+	recordCutover(t, projections, ordersV1, projection.ID{}, false)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	first := &cancelingSetter{cancel: cancel}
+	second := &recordingSetter{}
+
+	worker, err := lifecycle.NewWorker(events,
+		lifecycle.WithCutoverSetter(first),
+		lifecycle.WithCutoverSetter(second),
+		lifecycle.WithPollInterval(2*time.Millisecond),
+	)
+	if err != nil {
+		t.Fatalf("creating worker: %v", err)
+	}
+
+	if err := worker.Run(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("want the canceled context's error, got %v", err)
+	}
+
+	assertCutovers(t, first.seen(), []lifecycle.Cutover{{Live: ordersV1, Revision: 1}})
+	assertCutovers(t, second.seen(), nil)
+	assertReadyWithheld(t, worker)
+}
+
+// TestWorker_ReadAndCloseFailuresBothSurface pins the join: when a read
+// fails mid-stream and its iterator then fails to close, the worker's error
+// carries both causes.
+func TestWorker_ReadAndCloseFailuresBothSurface(t *testing.T) {
+	t.Parallel()
+
+	events := newEventStore(t)
+
+	projections, err := lifecycle.NewStore(events)
+	if err != nil {
+		t.Fatalf("creating lifecycle store: %v", err)
+	}
+
+	recordCutover(t, projections, projection.ID{Name: "orders", Version: 1}, projection.ID{}, false)
+
+	errRead := errors.New("the read failed")
+	errClose := errors.New("the close failed")
+
+	reader := &failingCloseReader{
+		inner: &failingNextReader{inner: events, allow: 1, err: errRead},
+		err:   errClose,
+	}
+	reader.armed.Store(true)
+
+	recorder := &recordingSetter{}
+
+	worker, err := lifecycle.NewWorker(reader,
+		lifecycle.WithCutoverSetter(recorder),
+		lifecycle.WithPollInterval(2*time.Millisecond),
+	)
+	if err != nil {
+		t.Fatalf("creating worker: %v", err)
+	}
+
+	err = worker.Run(t.Context())
+	if !errors.Is(err, errRead) || !errors.Is(err, errClose) {
+		t.Fatalf("want both the read and close failures surfaced, got %v", err)
+	}
+
+	assertReadyWithheld(t, worker)
+	assertCutovers(t, recorder.seen(), nil)
 }
 
 // TestWorker_TailEnforcesInitializedFoldState pins that the tail folds
