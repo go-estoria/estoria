@@ -1633,7 +1633,7 @@ func TestWorker_CancellationJoinsTheIndependentReadFailure(t *testing.T) {
 		name     string
 		readErr  func() error
 		wantErr  error // additionally surfaced alongside the cancellation
-		wantRead bool  // whether a read failure may be reported
+		wantRead bool  // whether a read failure must be reported
 	}{
 		{
 			name:     "an independent failure is joined",
@@ -1644,6 +1644,22 @@ func TestWorker_CancellationJoinsTheIndependentReadFailure(t *testing.T) {
 		{
 			name:    "a cancellation-shaped failure is not re-reported",
 			readErr: func() error { return fmt.Errorf("waiting for events: %w", context.Canceled) },
+		},
+		{
+			// Every leaf must be benign: an end of stream joined with a
+			// failure is a failed read, not a finished one.
+			name:     "a failure joined with the end of the stream is preserved",
+			readErr:  func() error { return errors.Join(eventstore.ErrEndOfEventStream, errStore) },
+			wantErr:  errStore,
+			wantRead: true,
+		},
+		{
+			// Whole-tree classification: the cancellation leaf must not let
+			// the failure beside it ride along as benign.
+			name:     "a failure riding the cancellation is still joined",
+			readErr:  func() error { return errors.Join(context.Canceled, errStore) },
+			wantErr:  errStore,
+			wantRead: true,
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1671,6 +1687,10 @@ func TestWorker_CancellationJoinsTheIndependentReadFailure(t *testing.T) {
 				t.Fatalf("want the independent read failure joined with the cancellation, got %v", err)
 			}
 
+			if tt.wantRead && !strings.Contains(err.Error(), "reading event") {
+				t.Errorf("want the read failure reported as one, got %v", err)
+			}
+
 			if !tt.wantRead && strings.Contains(err.Error(), "reading event") {
 				t.Errorf("want the cancellation-shaped failure folded into the cancellation, got %v", err)
 			}
@@ -1679,6 +1699,46 @@ func TestWorker_CancellationJoinsTheIndependentReadFailure(t *testing.T) {
 			assertReadyWithheld(t, worker)
 		})
 	}
+}
+
+// TestWorker_ReadFailureJoinedWithEOFStopsTheWorker pins whole-tree EOF
+// classification without cancellation in play: a read failure joined with
+// the end of the stream is a failed read, not a finished one — the worker
+// stops with the failure instead of initializing over a read it cannot
+// trust.
+func TestWorker_ReadFailureJoinedWithEOFStopsTheWorker(t *testing.T) {
+	t.Parallel()
+
+	errStore := errors.New("the store failed")
+
+	reader := &failingNextReader{
+		inner: newEventStore(t),
+		allow: 0,
+		err:   errors.Join(eventstore.ErrEndOfEventStream, errStore),
+	}
+
+	recorder := &recordingSetter{}
+
+	worker, err := lifecycle.NewWorker(reader,
+		lifecycle.WithCutoverSetter(recorder),
+		lifecycle.WithPollInterval(2*time.Millisecond),
+	)
+	if err != nil {
+		t.Fatalf("creating worker: %v", err)
+	}
+
+	// The deadline bounds the failure mode: a worker that read the joined
+	// failure as a clean end would initialize and tail until the deadline.
+	runCtx, cancel := context.WithTimeout(t.Context(), 250*time.Millisecond)
+	defer cancel()
+
+	err = worker.Run(runCtx)
+	if !errors.Is(err, errStore) || !strings.Contains(err.Error(), "reading event") {
+		t.Fatalf("want the joined read failure to stop the worker, got %v", err)
+	}
+
+	assertReadyWithheld(t, worker)
+	assertCutovers(t, recorder.seen(), nil)
 }
 
 // TestWorker_CancellationDuringDeliveryRequestsNoFurtherEvents pins the

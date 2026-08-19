@@ -551,14 +551,20 @@ func (r *Rebuild) recordTerminalStopLocked(cause error) {
 }
 
 // cancellationOnly reports whether err represents nothing but the given
-// cancellation: every leaf of its error tree matches target. errors.Is
-// alone proves the cancellation appears somewhere in the tree, which would
-// let a joined independent failure ride along and be discarded as benign.
-// The traversal mirrors the errors package's own: joined nodes fan out,
-// wrapped nodes descend, and matching applies at the leaves — where a node
-// whose unwrapping yields no children is itself a leaf, exactly as
-// errors.Is treats it.
+// cancellation: every leaf of its error tree matches target.
 func cancellationOnly(err, target error) bool {
+	return leavesMatch(err, target)
+}
+
+// leavesMatch reports whether every leaf of err's error tree matches at
+// least one of the targets. errors.Is alone proves a target appears
+// somewhere in the tree, which would let a joined independent failure ride
+// along and be discarded as benign. The traversal mirrors the errors
+// package's own: joined nodes fan out, wrapped nodes descend, and matching
+// applies at the leaves — where a node whose unwrapping yields no children
+// is itself a leaf, exactly as errors.Is treats it. A nil err matches
+// nothing.
+func leavesMatch(err error, targets ...error) bool {
 	if err == nil {
 		return false
 	}
@@ -566,11 +572,11 @@ func cancellationOnly(err, target error) bool {
 	if multi, ok := err.(interface{ Unwrap() []error }); ok {
 		joined := multi.Unwrap()
 		if len(joined) == 0 {
-			return errors.Is(err, target)
+			return leafMatches(err, targets)
 		}
 
 		for _, cause := range joined {
-			if !cancellationOnly(cause, target) {
+			if !leavesMatch(cause, targets...) {
 				return false
 			}
 		}
@@ -580,13 +586,24 @@ func cancellationOnly(err, target error) bool {
 
 	if single, ok := err.(interface{ Unwrap() error }); ok {
 		if cause := single.Unwrap(); cause != nil {
-			return cancellationOnly(cause, target)
+			return leavesMatch(cause, targets...)
 		}
 
-		return errors.Is(err, target)
+		return leafMatches(err, targets)
 	}
 
-	return errors.Is(err, target)
+	return leafMatches(err, targets)
+}
+
+// leafMatches reports whether one leaf matches any target.
+func leafMatches(err error, targets []error) bool {
+	for _, target := range targets {
+		if errors.Is(err, target) {
+			return true
+		}
+	}
+
+	return false
 }
 
 // runToCaughtUp waits for this run's drain to reach the head, records the

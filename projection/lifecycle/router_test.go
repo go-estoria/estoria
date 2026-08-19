@@ -695,6 +695,48 @@ func TestStreamRouter_ReadAndCloseFailuresBothSurface(t *testing.T) {
 	}
 }
 
+// TestStreamRouter_ReadFailureJoinedWithEOFFailsTheFold pins whole-tree EOF
+// classification in the fold: a read failure joined with the end of the
+// stream is a failed read — nothing commits, and the router keeps
+// reporting the failure rather than serving the partial fold as truth.
+func TestStreamRouter_ReadFailureJoinedWithEOFFailsTheFold(t *testing.T) {
+	t.Parallel()
+
+	events, err := esmemory.NewEventStore()
+	if err != nil {
+		t.Fatalf("creating event store: %v", err)
+	}
+
+	projections, err := lifecycle.NewStore(events)
+	if err != nil {
+		t.Fatalf("creating lifecycle store: %v", err)
+	}
+
+	recordCutover(t, projections, projection.ID{Name: "orders", Version: 1}, projection.ID{}, false)
+
+	errStore := errors.New("the store failed")
+	reader := &failingNextReader{
+		inner: events,
+		allow: 0,
+		err:   errors.Join(eventstore.ErrEndOfEventStream, errStore),
+	}
+
+	router, err := lifecycle.NewStreamRouter(reader)
+	if err != nil {
+		t.Fatalf("creating stream router: %v", err)
+	}
+
+	if err := router.Refresh(t.Context()); !errors.Is(err, errStore) {
+		t.Fatalf("want the joined read failure to fail the fold, got %v", err)
+	}
+
+	// Nothing committed: the next use reports the failure, not an empty
+	// fold's ErrNoLiveVersion.
+	if _, err := router.Live(t.Context(), "orders"); !errors.Is(err, errStore) {
+		t.Errorf("want the uncommitted fold to keep failing, got %v", err)
+	}
+}
+
 // recordCutover appends a full attempt to next's lifecycle stream — creating
 // the aggregate on the projection's first rebuild, loading it afterwards —
 // promoted and completed, or rolled back to previous when rollBack is set.

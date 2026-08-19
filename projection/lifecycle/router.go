@@ -291,7 +291,11 @@ func (r *StreamRouter) fold(ctx context.Context) (live map[string]cutoverFold, p
 
 	for {
 		event, err := iter.Next(ctx)
-		if errors.Is(err, eventstore.ErrEndOfEventStream) {
+
+		// The end of the stream is clean only when it is the read's whole
+		// story: a failure joined with it is a failed read, not a finished
+		// one.
+		if leavesMatch(err, eventstore.ErrEndOfEventStream) {
 			return live, position, nil
 		} else if err != nil {
 			return nil, 0, fmt.Errorf("reading event: %w", err)

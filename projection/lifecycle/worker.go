@@ -193,17 +193,21 @@ func (w *Worker) drain(ctx context.Context, live map[string]cutoverFold, after i
 
 		// Cancellation dominates whatever the read returned — a result
 		// arriving alongside it is not acted on — but an independent read
-		// failure is joined rather than discarded, while a failure that is
-		// only the cancellation surfacing is not re-reported as one.
+		// failure is joined rather than discarded: only a result whose
+		// every leaf is the end of the stream or the cancellation itself
+		// folds into the bare cancellation.
 		if ctxErr := ctx.Err(); ctxErr != nil {
-			if err == nil || errors.Is(err, eventstore.ErrEndOfEventStream) || cancellationOnly(err, ctxErr) {
+			if err == nil || leavesMatch(err, eventstore.ErrEndOfEventStream, ctxErr) {
 				return position, ctxErr
 			}
 
 			return position, errors.Join(ctxErr, fmt.Errorf("reading event: %w", err))
 		}
 
-		if errors.Is(err, eventstore.ErrEndOfEventStream) {
+		// The end of the stream is clean only when it is the read's whole
+		// story: a failure joined with it is a failed read, not a finished
+		// one.
+		if leavesMatch(err, eventstore.ErrEndOfEventStream) {
 			return position, nil
 		} else if err != nil {
 			return position, fmt.Errorf("reading event: %w", err)
