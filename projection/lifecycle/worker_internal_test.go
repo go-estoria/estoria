@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"testing"
-	"time"
 
 	"github.com/go-estoria/estoria/eventstore"
 	"github.com/go-estoria/estoria/projection"
@@ -67,6 +66,25 @@ func (i *inHandIterator) Next(context.Context) (*eventstore.Event, error) {
 }
 
 func (i *inHandIterator) Close(context.Context) error { return nil }
+
+// deadlineTrippedCtx deterministically transitions to DeadlineExceeded when
+// tripped, avoiding wall-clock deadlines entirely: the deadline "expires"
+// exactly when the fixture says so. Nothing here runs concurrently — the
+// drain, the iterator, and the trip all share the test goroutine.
+type deadlineTrippedCtx struct {
+	context.Context //nolint:containedctx // The type IS a context: embedding is how it implements the interface.
+	tripped         bool
+}
+
+func (c *deadlineTrippedCtx) Err() error {
+	if c.tripped {
+		return context.DeadlineExceeded
+	}
+
+	return c.Context.Err()
+}
+
+func (c *deadlineTrippedCtx) trip() { c.tripped = true }
 
 // promotedEvent builds a well-formed cutover event at the given global
 // position.
@@ -154,16 +172,16 @@ func TestDrainDropsTheEventInHand(t *testing.T) {
 			want: context.Canceled,
 		},
 		{
-			// The trigger outlives the deadline instead of canceling, so
-			// the read completes with the deadline already exceeded.
+			// The context transitions to DeadlineExceeded from inside the
+			// read itself — no wall clock, so the entry check can never
+			// preempt the in-hand branch.
 			name: "deadline exceeded",
 			ctx: func(t *testing.T) (context.Context, func()) {
 				t.Helper()
 
-				ctx, cancel := context.WithTimeout(t.Context(), 10*time.Millisecond)
-				t.Cleanup(cancel)
+				ctx := &deadlineTrippedCtx{Context: t.Context()}
 
-				return ctx, func() { time.Sleep(100 * time.Millisecond) }
+				return ctx, ctx.trip
 			},
 			want: context.DeadlineExceeded,
 		},
@@ -172,9 +190,9 @@ func TestDrainDropsTheEventInHand(t *testing.T) {
 			t.Parallel()
 
 			ctx, trigger := tt.ctx(t)
+			iter := &inHandIterator{trigger: trigger, event: promotedEvent(t, 9)}
 
-			worker, err := NewWorker(stubReader{iter: &inHandIterator{trigger: trigger, event: promotedEvent(t, 9)}},
-				WithCutoverSetter(nopSetter{}))
+			worker, err := NewWorker(stubReader{iter: iter}, WithCutoverSetter(nopSetter{}))
 			if err != nil {
 				t.Fatalf("creating worker: %v", err)
 			}
@@ -182,6 +200,14 @@ func TestDrainDropsTheEventInHand(t *testing.T) {
 			live := map[string]cutoverFold{}
 
 			position, err := worker.drain(ctx, live, 3, nil)
+
+			// The row is meaningful only if the read happened: an entry
+			// check that preempted the drain would satisfy every assertion
+			// below without exercising the in-hand branch.
+			if !iter.served {
+				t.Fatal("want the read exercised, but the entry check preempted it")
+			}
+
 			//nolint:errorlint // Identity is the assertion: a wrapped or joined context error must fail here.
 			if err != tt.want {
 				t.Fatalf("want exactly the context's error %v, got %v", tt.want, err)
