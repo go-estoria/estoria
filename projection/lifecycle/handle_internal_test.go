@@ -156,6 +156,8 @@ func TestLeavesMatch(t *testing.T) {
 		{name: "a wrapper around the mixed targets", err: fmt.Errorf("reading: %w", errors.Join(eof, context.Canceled)), targets: []error{eof, context.Canceled}, want: true},
 		{name: "the end of stream alone", err: eof, targets: []error{eof}, want: true},
 		{name: "joined ends of stream", err: errors.Join(eof, eof), targets: []error{eof}, want: true},
+		{name: "a failure nested beneath a joined child", err: errors.Join(eof, errors.Join(eof, errBoom)), targets: []error{eof}, want: false},
+		{name: "nested joins of allowed targets", err: errors.Join(eof, errors.Join(eof, context.Canceled)), targets: []error{eof, context.Canceled}, want: true},
 		{name: "an independent failure against both targets", err: errBoom, targets: []error{eof, context.Canceled}, want: false},
 		{name: "nil matches nothing", err: nil, targets: []error{eof}, want: false},
 	} {

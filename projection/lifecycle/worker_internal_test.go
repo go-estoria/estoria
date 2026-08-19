@@ -4,8 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"strings"
 	"testing"
+	"time"
 
 	"github.com/go-estoria/estoria/eventstore"
 	"github.com/go-estoria/estoria/projection"
@@ -47,12 +47,12 @@ func (r stubReader) ReadAll(context.Context, eventstore.ReadAllOptions) (eventst
 	return r.iter, nil
 }
 
-// inHandIterator yields one event, canceling a context from inside the
-// yielding Next call.
+// inHandIterator yields one event, firing a trigger — a cancellation, or a
+// wait that outlives a deadline — from inside the yielding Next call.
 type inHandIterator struct {
-	cancel context.CancelFunc
-	event  *eventstore.Event
-	served bool
+	trigger func()
+	event   *eventstore.Event
+	served  bool
 }
 
 func (i *inHandIterator) Next(context.Context) (*eventstore.Event, error) {
@@ -61,12 +61,30 @@ func (i *inHandIterator) Next(context.Context) (*eventstore.Event, error) {
 	}
 
 	i.served = true
-	i.cancel()
+	i.trigger()
 
 	return i.event, nil
 }
 
 func (i *inHandIterator) Close(context.Context) error { return nil }
+
+// promotedEvent builds a well-formed cutover event at the given global
+// position.
+func promotedEvent(t *testing.T, position int64) *eventstore.Event {
+	t.Helper()
+
+	data, err := json.Marshal(Promoted{Next: projection.ID{Name: "orders", Version: 1}, Revision: 1})
+	if err != nil {
+		t.Fatalf("marshaling promoted event: %v", err)
+	}
+
+	return &eventstore.Event{
+		ID:             typeid.NewV4(Promoted{}.EventType()),
+		StreamID:       typeid.ID{Type: StreamType, UUID: StreamUUID("orders")},
+		Data:           data,
+		GlobalPosition: &position,
+	}
+}
 
 // TestDrainCancellationPrecedesTheRead pins the drain's entry check: a drain
 // entered with a canceled context issues no read at all.
@@ -97,52 +115,86 @@ func TestDrainCancellationPrecedesTheRead(t *testing.T) {
 	}
 }
 
-// TestDrainDropsTheEventInHand pins that a cutover read alongside
-// cancellation is wholly unprocessed: the returned position is unmoved and
-// the fold is untouched.
+// TestDrainDropsTheEventInHand pins that a cutover read alongside a context
+// ending is wholly unprocessed — position unmoved, fold untouched — and
+// that the result is exactly the context's own error: not a hard-coded
+// cancellation, not the cancellation's cause, not a wrap or join of either.
 func TestDrainDropsTheEventInHand(t *testing.T) {
 	t.Parallel()
 
-	data, err := json.Marshal(Promoted{Next: projection.ID{Name: "orders", Version: 1}, Revision: 1})
-	if err != nil {
-		t.Fatalf("marshaling promoted event: %v", err)
-	}
+	errCause := errors.New("the root cause")
 
-	yielded := int64(9)
-	event := &eventstore.Event{
-		ID:             typeid.NewV4(Promoted{}.EventType()),
-		StreamID:       typeid.ID{Type: StreamType, UUID: StreamUUID("orders")},
-		Data:           data,
-		GlobalPosition: &yielded,
-	}
+	for _, tt := range []struct {
+		name string
+		ctx  func(*testing.T) (context.Context, func())
+		want error
+	}{
+		{
+			name: "canceled",
+			ctx: func(t *testing.T) (context.Context, func()) {
+				t.Helper()
 
-	ctx, cancel := context.WithCancel(t.Context())
-	defer cancel()
+				ctx, cancel := context.WithCancel(t.Context())
+				t.Cleanup(cancel)
 
-	worker, err := NewWorker(stubReader{iter: &inHandIterator{cancel: cancel, event: event}},
-		WithCutoverSetter(nopSetter{}))
-	if err != nil {
-		t.Fatalf("creating worker: %v", err)
-	}
+				return ctx, cancel
+			},
+			want: context.Canceled,
+		},
+		{
+			name: "canceled with a cause",
+			ctx: func(t *testing.T) (context.Context, func()) {
+				t.Helper()
 
-	live := map[string]cutoverFold{}
+				ctx, cancel := context.WithCancelCause(t.Context())
+				t.Cleanup(func() { cancel(nil) })
 
-	position, err := worker.drain(ctx, live, 3, nil)
-	if !errors.Is(err, context.Canceled) {
-		t.Fatalf("want the canceled context's error, got %v", err)
-	}
+				return ctx, func() { cancel(errCause) }
+			},
+			want: context.Canceled,
+		},
+		{
+			// The trigger outlives the deadline instead of canceling, so
+			// the read completes with the deadline already exceeded.
+			name: "deadline exceeded",
+			ctx: func(t *testing.T) (context.Context, func()) {
+				t.Helper()
 
-	// The read succeeded; only the cancellation is reported.
-	if strings.Contains(err.Error(), "reading event") {
-		t.Errorf("want the bare cancellation for the successful read, got %v", err)
-	}
+				ctx, cancel := context.WithTimeout(t.Context(), 10*time.Millisecond)
+				t.Cleanup(cancel)
 
-	if position != 3 {
-		t.Errorf("want the position unmoved at 3, got %d", position)
-	}
+				return ctx, func() { time.Sleep(100 * time.Millisecond) }
+			},
+			want: context.DeadlineExceeded,
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 
-	if len(live) != 0 {
-		t.Errorf("want the fold untouched, got %d entries", len(live))
+			ctx, trigger := tt.ctx(t)
+
+			worker, err := NewWorker(stubReader{iter: &inHandIterator{trigger: trigger, event: promotedEvent(t, 9)}},
+				WithCutoverSetter(nopSetter{}))
+			if err != nil {
+				t.Fatalf("creating worker: %v", err)
+			}
+
+			live := map[string]cutoverFold{}
+
+			position, err := worker.drain(ctx, live, 3, nil)
+			//nolint:errorlint // Identity is the assertion: a wrapped or joined context error must fail here.
+			if err != tt.want {
+				t.Fatalf("want exactly the context's error %v, got %v", tt.want, err)
+			}
+
+			if position != 3 {
+				t.Errorf("want the position unmoved at 3, got %d", position)
+			}
+
+			if len(live) != 0 {
+				t.Errorf("want the fold untouched, got %d entries", len(live))
+			}
+		})
 	}
 }
 

@@ -393,10 +393,12 @@ func (i cancelEOFIterator) Next(context.Context) (*eventstore.Event, error) {
 func (i cancelEOFIterator) Close(context.Context) error { return nil }
 
 // cancelFailReader hands out iterators that cancel a context and fail from
-// the same Next call, modeling cancellation racing a read failure.
+// the same Next call — optionally handing back an event alongside the
+// failure — modeling cancellation racing a read failure.
 type cancelFailReader struct {
 	cancel context.CancelFunc
 	err    error
+	event  *eventstore.Event
 }
 
 func (r cancelFailReader) ReadAll(context.Context, eventstore.ReadAllOptions) (eventstore.StreamIterator, error) {
@@ -406,15 +408,34 @@ func (r cancelFailReader) ReadAll(context.Context, eventstore.ReadAllOptions) (e
 type cancelFailIterator struct {
 	cancel context.CancelFunc
 	err    error
+	event  *eventstore.Event
 }
 
 func (i cancelFailIterator) Next(context.Context) (*eventstore.Event, error) {
 	i.cancel()
 
-	return nil, i.err
+	return i.event, i.err
 }
 
 func (i cancelFailIterator) Close(context.Context) error { return nil }
+
+// cutoverEvent builds a well-formed cutover event at the given global
+// position.
+func cutoverEvent(t *testing.T, position int64) *eventstore.Event {
+	t.Helper()
+
+	data, err := json.Marshal(lifecycle.Promoted{Next: projection.ID{Name: "orders", Version: 1}, Revision: 1, At: promotedAt})
+	if err != nil {
+		t.Fatalf("marshaling promoted event: %v", err)
+	}
+
+	return &eventstore.Event{
+		ID:             typeid.NewV4(lifecycle.Promoted{}.EventType()),
+		StreamID:       typeid.ID{Type: lifecycle.StreamType, UUID: lifecycle.StreamUUID("orders")},
+		Data:           data,
+		GlobalPosition: &position,
+	}
+}
 
 // nextCountingReader counts the Next calls its iterators receive.
 type nextCountingReader struct {
@@ -1528,14 +1549,11 @@ func TestWorker_CancellationDropsTheEventInHand(t *testing.T) {
 
 	appendRawCutoverEvent(t, events, lifecycle.Promoted{Previous: ordersV1, Next: ordersV2, Revision: 2, At: promotedAt})
 
-	err = awaitExit(t, runErr)
-	if !errors.Is(err, context.Canceled) {
-		t.Fatalf("want the canceled context's error, got %v", err)
-	}
-
-	// The read succeeded; only the cancellation is reported.
-	if strings.Contains(err.Error(), "reading event") {
-		t.Errorf("want the bare cancellation for the successful read, got %v", err)
+	// The read succeeded, so the result is exactly the context's error:
+	// nothing wrapped, joined, or reported as a read failure.
+	//nolint:errorlint // Identity is the assertion: a wrapped or joined context error must fail here.
+	if err := awaitExit(t, runErr); err != context.Canceled {
+		t.Fatalf("want exactly the canceled context's error, got %v", err)
 	}
 
 	if got := reader.yielded.Load(); got != initialized+1 {
@@ -1636,16 +1654,26 @@ func TestWorker_CancellationJoinsTheIndependentReadFailure(t *testing.T) {
 	errStore := errors.New("the store failed")
 
 	for _, tt := range []struct {
-		name     string
-		readErr  func() error
-		wantErr  error // additionally surfaced alongside the cancellation
-		wantRead bool  // whether a read failure must be reported
+		name      string
+		readErr   func() error
+		withEvent bool  // Next hands back an event alongside the failure
+		wantErr   error // additionally surfaced alongside the cancellation
+		wantRead  bool  // whether a read failure must be reported
 	}{
 		{
 			name:     "an independent failure is joined",
 			readErr:  func() error { return errStore },
 			wantErr:  errStore,
 			wantRead: true,
+		},
+		{
+			// An iterator may hand back an event alongside its failure; the
+			// failure still rules the result, and the event is not processed.
+			name:      "a failure accompanying a delivered event is preserved",
+			readErr:   func() error { return errStore },
+			withEvent: true,
+			wantErr:   errStore,
+			wantRead:  true,
 		},
 		{
 			name:    "a cancellation-shaped failure is not re-reported",
@@ -1676,7 +1704,12 @@ func TestWorker_CancellationJoinsTheIndependentReadFailure(t *testing.T) {
 
 			recorder := &recordingSetter{}
 
-			worker, err := lifecycle.NewWorker(cancelFailReader{cancel: cancel, err: tt.readErr()},
+			reader := cancelFailReader{cancel: cancel, err: tt.readErr()}
+			if tt.withEvent {
+				reader.event = cutoverEvent(t, 1)
+			}
+
+			worker, err := lifecycle.NewWorker(reader,
 				lifecycle.WithCutoverSetter(recorder),
 				lifecycle.WithPollInterval(2*time.Millisecond),
 			)
