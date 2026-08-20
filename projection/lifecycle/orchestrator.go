@@ -43,21 +43,28 @@ type Config struct {
 	// across processes — so the factory must tolerate concurrent invocation.
 	Handler func(id projection.ID) (projection.EventHandler, error)
 
-	// Projections is the aggregate store holding projection lifecycle
-	// aggregates. NewStore wires one; back it with the domain event store or
-	// with separate storage. Decorations such as caching
-	// (aggregatestore.CachedStore) or snapshotting
-	// (aggregatestore.SnapshottingStore) serve reads; verdicts that authorize
-	// destruction fold LifecycleEvents directly and never consult them.
-	Projections aggregatestore.Store[State]
-
 	// LifecycleEvents is the event store holding projection lifecycle
-	// streams: the same store Projections was wired over via NewStore.
-	// Destructive authority — which witnesses gate a retirement, and what a
-	// reservation captured — and every other verdict about what a lifecycle
-	// stream records are refolded from this store directly, so snapshot or
-	// cache decorations on Projections can never stand in for the events.
+	// streams: the single source every lifecycle decision derives from. Back
+	// it with the domain event store or with separate storage. Every store
+	// the orchestrator reads or writes lifecycle state through is derived
+	// from it at construction, so no configuration can point decisions at
+	// one history and effects at another. Every mutating command and every
+	// verdict — which witnesses gate a retirement, what a reservation
+	// captured, whether an attempt is in flight — refolds this store
+	// directly, bypassing whatever decorations DecorateProjections carries.
 	LifecycleEvents eventstore.Store
+
+	// DecorateProjections wraps the projection store the orchestrator serves
+	// observation from and saves through. The orchestrator builds the
+	// event-sourced base store over LifecycleEvents itself and passes it in;
+	// the decorator returns it wrapped in read decorations — caching
+	// (aggregatestore.CachedStore), snapshotting
+	// (aggregatestore.SnapshottingStore), or any stack over the given base —
+	// so every decoration is structurally bound to the same events. Optional;
+	// nil serves observation from the undecorated base. Decorations serve
+	// reads and persistence concerns only: nothing they serve can redirect a
+	// claim, conceal an attempt, weaken a policy, or aim a teardown.
+	DecorateProjections func(aggregatestore.Store[State]) (aggregatestore.Store[State], error)
 }
 
 // An Orchestrator is a process manager for projection rebuilds: it loads a
@@ -77,9 +84,15 @@ type Orchestrator struct {
 	log               estoria.Logger
 
 	// authority folds lifecycle streams directly from LifecycleEvents,
-	// bypassing whatever read decorations Projections carries: every verdict
-	// about what a stream records is derived through it.
+	// bypassing whatever read decorations the projection store carries:
+	// every command entry and every verdict about what a stream records is
+	// derived through it.
 	authority aggregatestore.Store[State]
+
+	// projections is the store observation is served from and saves flow
+	// through: the authority store wrapped by DecorateProjections, or the
+	// authority store itself.
+	projections aggregatestore.Store[State]
 
 	// optionErr collects invalid options for NewOrchestrator to report, so a
 	// nil logger or option fails construction instead of panicking at use.
@@ -95,8 +108,6 @@ func NewOrchestrator(config Config, opts ...OrchestratorOption) (*Orchestrator, 
 		return nil, errors.New("checkpoint store is required")
 	case config.Handler == nil:
 		return nil, errors.New("handler factory is required")
-	case config.Projections == nil:
-		return nil, errors.New("projection aggregate store is required")
 	case config.LifecycleEvents == nil:
 		return nil, errors.New("lifecycle event store is required")
 	}
@@ -106,12 +117,25 @@ func NewOrchestrator(config Config, opts ...OrchestratorOption) (*Orchestrator, 
 		return nil, fmt.Errorf("wiring the lifecycle authority store: %w", err)
 	}
 
+	projections := authority
+	if config.DecorateProjections != nil {
+		projections, err = config.DecorateProjections(authority)
+		if err != nil {
+			return nil, fmt.Errorf("decorating the projection store: %w", err)
+		}
+
+		if projections == nil {
+			return nil, errors.New("the projection store decorator returned a nil store")
+		}
+	}
+
 	orchestrator := &Orchestrator{
 		config:            config,
 		reconcileInterval: DefaultReconcileInterval,
 		witnesses:         map[string]RetirementWitness{},
 		log:               estoria.GetLogger().WithGroup("lifecycle"),
 		authority:         authority,
+		projections:       projections,
 	}
 
 	for _, opt := range opts {
@@ -133,17 +157,18 @@ func NewOrchestrator(config Config, opts ...OrchestratorOption) (*Orchestrator, 
 // version number: one past the highest ever allocated, or version 1 for a
 // projection never rebuilt. Admission and allocation are one append to the
 // projection's lifecycle stream, and Begin is non-destructive by
-// construction — it consults no cache and cleans nothing up. It refuses a
-// projection that already has a rebuild in flight; two concurrent Begins
-// conflict on the stream, and the loser's save reports a version mismatch.
+// construction — it decides from an event-only fold of the stream and
+// cleans nothing up. It refuses a projection that already has a rebuild in
+// flight; two concurrent Begins conflict on the stream, and the loser's
+// save reports a version mismatch.
 //
 // An error carrying aggregatestore.ErrEventsAppended means the admission was
 // durably recorded even though the save could not observe it; Resume the
 // projection by name to obtain a usable handle.
 func (o *Orchestrator) Begin(ctx context.Context, name, reason string) (*Rebuild, error) {
-	aggregate, err := o.config.Projections.Load(ctx, StreamUUID(name), nil)
+	aggregate, err := o.authority.Load(ctx, StreamUUID(name), nil)
 	if errors.Is(err, aggregatestore.ErrAggregateNotFound) {
-		aggregate = o.config.Projections.New(StreamUUID(name))
+		aggregate = o.authority.New(StreamUUID(name))
 	} else if err != nil {
 		return nil, fmt.Errorf("loading projection lifecycle: %w", err)
 	}
@@ -171,7 +196,7 @@ func (o *Orchestrator) Begin(ctx context.Context, name, reason string) (*Rebuild
 		At:       time.Now(),
 	})
 
-	if err := o.config.Projections.Save(ctx, aggregate, nil); err != nil {
+	if err := o.projections.Save(ctx, aggregate, nil); err != nil {
 		// Discard the failed admission so it cannot ride along with a later
 		// save. When the error carries ErrEventsAppended the admission is
 		// durable regardless, and resuming by name observes it.
@@ -189,6 +214,11 @@ func (o *Orchestrator) Begin(ctx context.Context, name, reason string) (*Rebuild
 // handle cannot promote until it has Run — promotion requires the catch-up
 // certification only a running drain establishes — while Rollback, Abandon,
 // and Retire are deliberately not runner-scoped.
+//
+// The resumed view is served through the wired store's read decorations;
+// every command on the handle re-derives its verdicts from an event-only
+// fold of the lifecycle stream before acting, so what Resume observed never
+// authorizes anything.
 func (o *Orchestrator) Resume(ctx context.Context, name string) (*Rebuild, error) {
 	aggregate, err := o.loadAggregate(ctx, name)
 	if err != nil {
@@ -237,7 +267,7 @@ func (o *Orchestrator) SetRetirementPolicy(ctx context.Context, name string, cha
 		return fmt.Errorf("retirement policy witnesses: %w", err)
 	}
 
-	aggregate, err := o.loadAggregate(ctx, name)
+	aggregate, err := o.loadAuthority(ctx, name)
 	if err != nil {
 		return err
 	}
@@ -256,7 +286,7 @@ func (o *Orchestrator) SetRetirementPolicy(ctx context.Context, name string, cha
 		At:          time.Now(),
 	})
 
-	if err := o.config.Projections.Save(ctx, aggregate, nil); err != nil {
+	if err := o.projections.Save(ctx, aggregate, nil); err != nil {
 		if errors.Is(err, aggregatestore.ErrEventsAppended) {
 			return fmt.Errorf("retirement policy recorded, but this view is stale; reload before issuing further commands: %w", err)
 		}
@@ -267,10 +297,29 @@ func (o *Orchestrator) SetRetirementPolicy(ctx context.Context, name string, cha
 	return nil
 }
 
-// loadAggregate loads the named projection's lifecycle aggregate and
-// sanity-checks it against the name that addressed it.
+// loadAggregate loads the named projection's lifecycle aggregate through the
+// decorated projection store — the observation surface — and sanity-checks
+// it against the name that addressed it. Mutating commands load through
+// loadAuthority instead.
 func (o *Orchestrator) loadAggregate(ctx context.Context, name string) (*aggregatestore.Aggregate[State], error) {
-	aggregate, err := o.config.Projections.Load(ctx, StreamUUID(name), nil)
+	aggregate, err := o.projections.Load(ctx, StreamUUID(name), nil)
+	if err != nil {
+		return nil, fmt.Errorf("loading projection lifecycle: %w", err)
+	}
+
+	if err := checkLifecycleAggregate(aggregate, name); err != nil {
+		return nil, err
+	}
+
+	return aggregate, nil
+}
+
+// loadAuthority folds the named projection's lifecycle directly from the
+// lifecycle event store — the fold every mutating command decides from,
+// bypassing whatever read decorations serve observation — and sanity-checks
+// it against the name that addressed it.
+func (o *Orchestrator) loadAuthority(ctx context.Context, name string) (*aggregatestore.Aggregate[State], error) {
+	aggregate, err := o.authority.Load(ctx, StreamUUID(name), nil)
 	if err != nil {
 		return nil, fmt.Errorf("loading projection lifecycle: %w", err)
 	}

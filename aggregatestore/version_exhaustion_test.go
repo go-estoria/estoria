@@ -104,7 +104,9 @@ func TestAggregate_ApplyRefusesTheVersionCeiling(t *testing.T) {
 // guard: a save that would grow the stream past the maximum representable
 // version, or from a negative version no legitimate hydration produces, is
 // refused before anything reaches the event store — while the final
-// representable slot itself remains appendable.
+// representable slot itself remains appendable. The guard is count-aware at
+// both boundaries: two events one below the ceiling overrun it by exactly
+// one, and version -1 is the negative version nearest to legitimacy.
 func TestEventSourcedStoreSave_RefusesVersionExhaustion(t *testing.T) {
 	t.Parallel()
 
@@ -153,6 +155,50 @@ func TestEventSourcedStoreSave_RefusesVersionExhaustion(t *testing.T) {
 
 		aggregate := store.New(id)
 		aggregate.TestOnlySetStateAtVersion(newMockEntity(id), -3)
+		aggregate.Append(mockEntityEventA{})
+
+		err := store.Save(t.Context(), aggregate, nil)
+		if err == nil || !strings.Contains(err.Error(), "is invalid") {
+			t.Fatalf("want the negative-version save refused, got %v", err)
+		}
+
+		if len(events.appends) != 0 {
+			t.Errorf("want nothing appended to the event store, got %d appends", len(events.appends))
+		}
+	})
+
+	t.Run("the final slot refuses a second event", func(t *testing.T) {
+		t.Parallel()
+
+		store, events := newStore(t)
+		id := uuid.Must(uuid.NewV4())
+
+		aggregate := store.New(id)
+		aggregate.TestOnlySetStateAtVersion(newMockEntity(id), math.MaxInt64-1)
+		aggregate.Append(mockEntityEventA{}, mockEntityEventA{})
+
+		err := store.Save(t.Context(), aggregate, nil)
+		if err == nil || !strings.Contains(err.Error(), "aggregate versions end at") {
+			t.Fatalf("want the two-event append past the ceiling refused, got %v", err)
+		}
+
+		if len(events.appends) != 0 {
+			t.Errorf("want nothing appended to the event store, got %d appends", len(events.appends))
+		}
+
+		if got := aggregate.Version(); got != math.MaxInt64-1 {
+			t.Errorf("want the version unmoved, got %d", got)
+		}
+	})
+
+	t.Run("version -1 never appends", func(t *testing.T) {
+		t.Parallel()
+
+		store, events := newStore(t)
+		id := uuid.Must(uuid.NewV4())
+
+		aggregate := store.New(id)
+		aggregate.TestOnlySetStateAtVersion(newMockEntity(id), -1)
 		aggregate.Append(mockEntityEventA{})
 
 		err := store.Save(t.Context(), aggregate, nil)

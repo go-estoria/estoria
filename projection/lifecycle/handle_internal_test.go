@@ -229,28 +229,23 @@ func caughtUpRebuildForTest(t *testing.T, store aggregatestore.Store[State]) (*R
 		t.Fatalf("creating event store: %v", err)
 	}
 
-	if store == nil {
-		inner, err := NewStore(events)
-		if err != nil {
-			t.Fatalf("creating lifecycle store: %v", err)
-		}
-
-		store = inner
-	} else if wrapper, ok := store.(*gatedSaveStore); ok {
-		inner, err := NewStore(events)
-		if err != nil {
-			t.Fatalf("creating lifecycle store: %v", err)
-		}
-
-		wrapper.Store = inner
-	}
-
 	orchestrator, err := NewOrchestrator(Config{
 		Events:          events,
 		Checkpoints:     cpmemory.NewCheckpointStore(),
 		Handler:         func(projection.ID) (projection.EventHandler, error) { return nopHandler{}, nil },
-		Projections:     store,
 		LifecycleEvents: events,
+		DecorateProjections: func(base aggregatestore.Store[State]) (aggregatestore.Store[State], error) {
+			if store == nil {
+				store = base
+				return base, nil
+			}
+
+			if wrapper, ok := store.(*gatedSaveStore); ok {
+				wrapper.Store = base
+			}
+
+			return store, nil
+		},
 	})
 	if err != nil {
 		t.Fatalf("creating orchestrator: %v", err)
@@ -580,7 +575,6 @@ func defeatedRebuildForTest(t *testing.T, toVersion int64) (*Rebuild, uuid.UUID,
 		Events:          events,
 		Checkpoints:     cpmemory.NewCheckpointStore(),
 		Handler:         func(projection.ID) (projection.EventHandler, error) { return nopHandler{}, nil },
-		Projections:     store,
 		LifecycleEvents: events,
 	})
 	if err != nil {

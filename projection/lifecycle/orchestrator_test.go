@@ -47,14 +47,7 @@ type harness struct {
 func newHarness(t *testing.T, opts ...lifecycle.OrchestratorOption) *harness {
 	t.Helper()
 
-	events := newEventStore(t)
-
-	projections, err := lifecycle.NewStore(events)
-	if err != nil {
-		t.Fatalf("creating lifecycle store: %v", err)
-	}
-
-	return buildHarness(t, events, projections, opts...)
+	return buildHarness(t, newEventStore(t), nil, opts...)
 }
 
 func newEventStore(t *testing.T) *esmemory.EventStore {
@@ -68,30 +61,46 @@ func newEventStore(t *testing.T) *esmemory.EventStore {
 	return events
 }
 
-// buildHarness wires the standard harness around the given stores, so tests
-// can interpose failure-injecting wrappers at either layer.
-func buildHarness(t *testing.T, events *esmemory.EventStore, projections aggregatestore.Store[lifecycle.State], opts ...lifecycle.OrchestratorOption) *harness {
+// buildHarness wires the standard harness over the given event store, with
+// decorate wrapping the projection store when non-nil, so tests can
+// interpose failure-injecting or read-decorating wrappers.
+func buildHarness(t *testing.T, events *esmemory.EventStore, decorate func(aggregatestore.Store[lifecycle.State]) (aggregatestore.Store[lifecycle.State], error), opts ...lifecycle.OrchestratorOption) *harness {
 	t.Helper()
 
-	return buildHarnessWithAuthority(t, events, events, projections, opts...)
+	return buildHarnessWithLifecycleEvents(t, events, events, decorate, opts...)
 }
 
-// buildHarnessWithAuthority additionally separates the lifecycle authority
-// reads, so tests can interpose on the event-only folds every runtime
-// verdict derives from.
-func buildHarnessWithAuthority(t *testing.T, events *esmemory.EventStore, lifecycleEvents eventstore.Store, projections aggregatestore.Store[lifecycle.State], opts ...lifecycle.OrchestratorOption) *harness {
+// buildHarnessWithLifecycleEvents additionally separates the lifecycle event
+// store from the domain store, so tests can interpose on the event-only
+// folds every command entry and runtime verdict derives from.
+func buildHarnessWithLifecycleEvents(t *testing.T, events *esmemory.EventStore, lifecycleEvents eventstore.Store, decorate func(aggregatestore.Store[lifecycle.State]) (aggregatestore.Store[lifecycle.State], error), opts ...lifecycle.OrchestratorOption) *harness {
 	t.Helper()
 
 	checkpoints := cpmemory.NewCheckpointStore()
 	router := lifecycle.NewMemoryRouter()
 	model := newReadModel()
 
+	var projections aggregatestore.Store[lifecycle.State]
+
 	orchestrator, err := lifecycle.NewOrchestrator(lifecycle.Config{
 		Events:          events,
 		Checkpoints:     checkpoints,
 		Handler:         model.handler,
-		Projections:     projections,
 		LifecycleEvents: lifecycleEvents,
+		DecorateProjections: func(base aggregatestore.Store[lifecycle.State]) (aggregatestore.Store[lifecycle.State], error) {
+			projections = base
+
+			if decorate == nil {
+				return base, nil
+			}
+
+			decorated, err := decorate(base)
+			if decorated != nil {
+				projections = decorated
+			}
+
+			return decorated, err
+		},
 	}, append([]lifecycle.OrchestratorOption{
 		lifecycle.WithProcessorOptions(processor.WithPollInterval(2 * time.Millisecond)),
 		lifecycle.WithReconcileInterval(10 * time.Millisecond),
@@ -122,16 +131,10 @@ func buildHarnessWithAuthority(t *testing.T, events *esmemory.EventStore, lifecy
 func bareOrchestrator(t *testing.T, events *esmemory.EventStore, checkpoints checkpointstore.Store, handler func(projection.ID) (projection.EventHandler, error)) *lifecycle.Orchestrator {
 	t.Helper()
 
-	projections, err := lifecycle.NewStore(events)
-	if err != nil {
-		t.Fatalf("creating lifecycle store: %v", err)
-	}
-
 	orchestrator, err := lifecycle.NewOrchestrator(lifecycle.Config{
 		Events:          events,
 		Checkpoints:     checkpoints,
 		Handler:         handler,
-		Projections:     projections,
 		LifecycleEvents: events,
 	},
 		lifecycle.WithProcessorOptions(processor.WithPollInterval(2*time.Millisecond)),
@@ -1018,22 +1021,21 @@ func TestRetire_CompletionFailureIsRepairableAfterTeardown(t *testing.T) {
 
 	events := newEventStore(t)
 
-	inner, err := lifecycle.NewStore(events)
-	if err != nil {
-		t.Fatalf("creating lifecycle store: %v", err)
-	}
-
-	projections := &refusingStore{Store: inner}
 	model := newReadModel()
 	factory := &countingFactory{model: model}
 	checkpoints := cpmemory.NewCheckpointStore()
+
+	var projections *refusingStore
 
 	orchestrator, err := lifecycle.NewOrchestrator(lifecycle.Config{
 		Events:          events,
 		Checkpoints:     checkpoints,
 		Handler:         factory.handler,
-		Projections:     projections,
 		LifecycleEvents: events,
+		DecorateProjections: func(base aggregatestore.Store[lifecycle.State]) (aggregatestore.Store[lifecycle.State], error) {
+			projections = &refusingStore{Store: base}
+			return projections, nil
+		},
 	},
 		lifecycle.WithProcessorOptions(processor.WithPollInterval(2*time.Millisecond)),
 		lifecycle.WithReconcileInterval(10*time.Millisecond),
@@ -1521,13 +1523,12 @@ func TestPromote_RecordedDespiteSaveFailure(t *testing.T) {
 
 	events := newEventStore(t)
 
-	inner, err := lifecycle.NewStore(events)
-	if err != nil {
-		t.Fatalf("creating lifecycle store: %v", err)
-	}
+	var projections *eventsAppendedStore
 
-	projections := &eventsAppendedStore{Store: inner}
-	h := buildHarness(t, events, projections)
+	h := buildHarness(t, events, func(base aggregatestore.Store[lifecycle.State]) (aggregatestore.Store[lifecycle.State], error) {
+		projections = &eventsAppendedStore{Store: base}
+		return projections, nil
+	})
 	h.appendDomain(3)
 
 	r := h.begin("events-appended failure")
@@ -1536,8 +1537,7 @@ func TestPromote_RecordedDespiteSaveFailure(t *testing.T) {
 
 	projections.armFailure()
 
-	err = r.Promote(t.Context())
-	if !errors.Is(err, aggregatestore.ErrEventsAppended) {
+	if err := r.Promote(t.Context()); !errors.Is(err, aggregatestore.ErrEventsAppended) {
 		t.Fatalf("want an error carrying ErrEventsAppended, got %v", err)
 	}
 
@@ -1567,13 +1567,12 @@ func TestPromoteFailure_DoesNotLeakIntoAbandon(t *testing.T) {
 
 	events := newEventStore(t)
 
-	inner, err := lifecycle.NewStore(events)
-	if err != nil {
-		t.Fatalf("creating lifecycle store: %v", err)
-	}
+	var projections *refusingStore
 
-	projections := &refusingStore{Store: inner}
-	h := buildHarness(t, events, projections)
+	h := buildHarness(t, events, func(base aggregatestore.Store[lifecycle.State]) (aggregatestore.Store[lifecycle.State], error) {
+		projections = &refusingStore{Store: base}
+		return projections, nil
+	})
 	h.appendDomain(3)
 
 	r := h.begin("save will fail")
@@ -1621,12 +1620,7 @@ func TestStaleHandle_DoesNotReplayDurableTransition(t *testing.T) {
 	events := newEventStore(t)
 	writer := &truncatingWriter{Store: events}
 
-	projections, err := lifecycle.NewStore(writer)
-	if err != nil {
-		t.Fatalf("creating lifecycle store: %v", err)
-	}
-
-	h := buildHarness(t, events, projections)
+	h := buildHarnessWithLifecycleEvents(t, events, writer, nil)
 	h.appendDomain(3)
 
 	v1 := h.promoteFirstVersion()
@@ -1637,8 +1631,7 @@ func TestStaleHandle_DoesNotReplayDurableTransition(t *testing.T) {
 
 	writer.armFailure()
 
-	err = r2.Promote(t.Context())
-	if !errors.Is(err, aggregatestore.ErrEventsAppended) {
+	if err := r2.Promote(t.Context()); !errors.Is(err, aggregatestore.ErrEventsAppended) {
 		t.Fatalf("want an error carrying ErrEventsAppended, got %v", err)
 	}
 
@@ -1687,17 +1680,11 @@ func TestBegin_DurableAdmissionIsResumableByName(t *testing.T) {
 	events := newEventStore(t)
 	writer := &truncatingWriter{Store: events}
 
-	projections, err := lifecycle.NewStore(writer)
-	if err != nil {
-		t.Fatalf("creating lifecycle store: %v", err)
-	}
-
-	h := buildHarness(t, events, projections)
+	h := buildHarnessWithLifecycleEvents(t, events, writer, nil)
 
 	writer.armFailure()
 
-	_, err = h.orchestrator.Begin(t.Context(), "orders", "durable admission")
-	if !errors.Is(err, aggregatestore.ErrEventsAppended) {
+	if _, err := h.orchestrator.Begin(t.Context(), "orders", "durable admission"); !errors.Is(err, aggregatestore.ErrEventsAppended) {
 		t.Fatalf("want the error to carry ErrEventsAppended, got %v", err)
 	}
 
@@ -1782,7 +1769,6 @@ func TestRun_RecertifiesCaughtUpAttempt(t *testing.T) {
 		Events:          h.events,
 		Checkpoints:     h.checkpoints,
 		Handler:         h.model.handler,
-		Projections:     h.projections,
 		LifecycleEvents: h.events,
 	},
 		lifecycle.WithAutoPromote(true),
@@ -1964,13 +1950,12 @@ func TestRun_ClaimSaveFailureStartsNothing(t *testing.T) {
 
 	events := newEventStore(t)
 
-	inner, err := lifecycle.NewStore(events)
-	if err != nil {
-		t.Fatalf("creating lifecycle store: %v", err)
-	}
+	var projections *refusingStore
 
-	projections := &refusingStore{Store: inner}
-	h := buildHarness(t, events, projections)
+	h := buildHarness(t, events, func(base aggregatestore.Store[lifecycle.State]) (aggregatestore.Store[lifecycle.State], error) {
+		projections = &refusingStore{Store: base}
+		return projections, nil
+	})
 	h.appendDomain(3)
 
 	r := h.begin("claim save refused")
@@ -1999,12 +1984,7 @@ func TestRun_UnobservedClaimStartsWhenWon(t *testing.T) {
 	events := newEventStore(t)
 	writer := &truncatingWriter{Store: events}
 
-	projections, err := lifecycle.NewStore(writer)
-	if err != nil {
-		t.Fatalf("creating lifecycle store: %v", err)
-	}
-
-	h := buildHarness(t, events, projections)
+	h := buildHarnessWithLifecycleEvents(t, events, writer, nil)
 	h.appendDomain(3)
 
 	r := h.begin("unobserved claim, won")
@@ -2042,13 +2022,8 @@ func TestRun_UnobservedClaimRefusedWhenSuperseded(t *testing.T) {
 	events := newEventStore(t)
 	writer := &truncatingWriter{Store: events}
 
-	inner, err := lifecycle.NewStore(writer)
-	if err != nil {
-		t.Fatalf("creating lifecycle store: %v", err)
-	}
-
-	authority := &interceptingEventStore{Store: events}
-	h := buildHarnessWithAuthority(t, events, authority, inner, lifecycle.WithReconcileInterval(time.Hour))
+	authority := &interceptingEventStore{Store: writer}
+	h := buildHarnessWithLifecycleEvents(t, events, authority, nil, lifecycle.WithReconcileInterval(time.Hour))
 	h.appendDomain(3)
 	h.model.armGate()
 
@@ -2075,7 +2050,7 @@ func TestRun_UnobservedClaimRefusedWhenSuperseded(t *testing.T) {
 	attemptID := resumed.State().Attempt.ID
 
 	writer.armFailure()
-	authority.armHydrateBefore(func(ctx context.Context) error {
+	authority.armHydrateBefore(1, func(ctx context.Context) error {
 		competing, err := json.Marshal(lifecycle.RunnerClaimed{
 			Attempt: attemptID,
 			Runner:  uuid.Must(uuid.NewV4()),
@@ -2122,13 +2097,8 @@ func TestRun_ClaimRecoveryFailurePreservesEventsAppended(t *testing.T) {
 	events := newEventStore(t)
 	writer := &truncatingWriter{Store: events}
 
-	inner, err := lifecycle.NewStore(writer)
-	if err != nil {
-		t.Fatalf("creating lifecycle store: %v", err)
-	}
-
-	authority := &interceptingEventStore{Store: events}
-	h := buildHarnessWithAuthority(t, events, authority, inner)
+	authority := &interceptingEventStore{Store: writer}
+	h := buildHarnessWithLifecycleEvents(t, events, authority, nil)
 	h.appendDomain(3)
 
 	r := h.begin("recovery load will fail")
@@ -2138,7 +2108,7 @@ func TestRun_ClaimRecoveryFailurePreservesEventsAppended(t *testing.T) {
 	// The entry refresh stays on the wired projections store, so the
 	// recovery reload is the first authority-level read, and it fails.
 	writer.armFailure()
-	authority.armHydrateIntercept(func(context.Context) error { return errRecovery })
+	authority.armHydrateIntercept(1, func(context.Context) error { return errRecovery })
 
 	runErr := r.Run(t.Context())
 
@@ -2164,12 +2134,7 @@ func TestRun_UnobservedClaimRecoversFromMisappliedSave(t *testing.T) {
 	events := newEventStore(t)
 	writer := &misreportingWriter{Store: events}
 
-	projections, err := lifecycle.NewStore(writer)
-	if err != nil {
-		t.Fatalf("creating lifecycle store: %v", err)
-	}
-
-	h := buildHarness(t, events, projections)
+	h := buildHarnessWithLifecycleEvents(t, events, writer, nil)
 	h.appendDomain(3)
 
 	r := h.begin("misapplied claim save")
@@ -2206,12 +2171,7 @@ func TestRun_LostCatchUpToCompetingClaimIsDisplacement(t *testing.T) {
 	events := newEventStore(t)
 	writer := &racingWriter{Store: events}
 
-	projections, err := lifecycle.NewStore(writer)
-	if err != nil {
-		t.Fatalf("creating lifecycle store: %v", err)
-	}
-
-	h := buildHarness(t, events, projections, lifecycle.WithReconcileInterval(time.Hour))
+	h := buildHarnessWithLifecycleEvents(t, events, writer, nil, lifecycle.WithReconcileInterval(time.Hour))
 	h.appendDomain(3)
 	h.model.armGate()
 
@@ -2243,12 +2203,7 @@ func TestRun_LostCatchUpToClaimThenAbandonIsDisplacement(t *testing.T) {
 	events := newEventStore(t)
 	writer := &racingWriter{Store: events}
 
-	projections, err := lifecycle.NewStore(writer)
-	if err != nil {
-		t.Fatalf("creating lifecycle store: %v", err)
-	}
-
-	h := buildHarness(t, events, projections, lifecycle.WithReconcileInterval(time.Hour))
+	h := buildHarnessWithLifecycleEvents(t, events, writer, nil, lifecycle.WithReconcileInterval(time.Hour))
 	h.appendDomain(3)
 	h.model.armGate()
 
@@ -2286,13 +2241,8 @@ func TestRun_LostCatchUpDisplacementSurvivesReconciledEnd(t *testing.T) {
 
 	events := newEventStore(t)
 
-	inner, err := lifecycle.NewStore(events)
-	if err != nil {
-		t.Fatalf("creating lifecycle store: %v", err)
-	}
-
 	authority := &interceptingEventStore{Store: events}
-	h := buildHarnessWithAuthority(t, events, authority, inner)
+	h := buildHarnessWithLifecycleEvents(t, events, authority, nil)
 	h.appendDomain(3)
 	h.model.armGate()
 
@@ -2385,12 +2335,7 @@ func TestRun_InitialClaimLostToClaimThenAbandonIsDisplacement(t *testing.T) {
 	events := newEventStore(t)
 	writer := &racingWriter{Store: events}
 
-	projections, err := lifecycle.NewStore(writer)
-	if err != nil {
-		t.Fatalf("creating lifecycle store: %v", err)
-	}
-
-	h := buildHarness(t, events, projections, lifecycle.WithReconcileInterval(time.Hour))
+	h := buildHarnessWithLifecycleEvents(t, events, writer, nil, lifecycle.WithReconcileInterval(time.Hour))
 	h.appendDomain(3)
 
 	r := h.begin("claim lost to a claim that then abandons")
@@ -2434,13 +2379,12 @@ func TestRun_ProcessorDeathDuringLostCatchUpSurfacesItsError(t *testing.T) {
 	events := newEventStore(t)
 	writer := &racingWriter{Store: events}
 
-	inner, err := lifecycle.NewStore(writer)
-	if err != nil {
-		t.Fatalf("creating lifecycle store: %v", err)
-	}
+	var projections *parkingSaveStore
 
-	projections := &parkingSaveStore{Store: inner}
-	h := buildHarness(t, events, projections, lifecycle.WithReconcileInterval(time.Hour))
+	h := buildHarnessWithLifecycleEvents(t, events, writer, func(base aggregatestore.Store[lifecycle.State]) (aggregatestore.Store[lifecycle.State], error) {
+		projections = &parkingSaveStore{Store: base}
+		return projections, nil
+	}, lifecycle.WithReconcileInterval(time.Hour))
 	h.appendDomain(3)
 
 	r := h.begin("processor dies during the lost catch-up")
@@ -2511,13 +2455,12 @@ func TestRun_LateCancellationKeepsAnEarlierIndependentResult(t *testing.T) {
 	events := newEventStore(t)
 	writer := &racingWriter{Store: events}
 
-	inner, err := lifecycle.NewStore(writer)
-	if err != nil {
-		t.Fatalf("creating lifecycle store: %v", err)
-	}
+	var projections *parkingSaveStore
 
-	projections := &parkingSaveStore{Store: inner}
-	h := buildHarness(t, events, projections, lifecycle.WithReconcileInterval(time.Hour))
+	h := buildHarnessWithLifecycleEvents(t, events, writer, func(base aggregatestore.Store[lifecycle.State]) (aggregatestore.Store[lifecycle.State], error) {
+		projections = &parkingSaveStore{Store: base}
+		return projections, nil
+	}, lifecycle.WithReconcileInterval(time.Hour))
 	h.appendDomain(3)
 
 	r := h.begin("canceled after an independent cancellation-shaped death")
@@ -2589,13 +2532,12 @@ func TestRun_OwnCancellationAtTheReturnSubsumesTheLostAppend(t *testing.T) {
 	events := newEventStore(t)
 	writer := &racingWriter{Store: events}
 
-	inner, err := lifecycle.NewStore(writer)
-	if err != nil {
-		t.Fatalf("creating lifecycle store: %v", err)
-	}
+	var projections *parkingSaveStore
 
-	projections := &parkingSaveStore{Store: inner}
-	h := buildHarness(t, events, projections, lifecycle.WithReconcileInterval(time.Hour))
+	h := buildHarnessWithLifecycleEvents(t, events, writer, func(base aggregatestore.Store[lifecycle.State]) (aggregatestore.Store[lifecycle.State], error) {
+		projections = &parkingSaveStore{Store: base}
+		return projections, nil
+	}, lifecycle.WithReconcileInterval(time.Hour))
 	h.appendDomain(3)
 
 	r := h.begin("canceled before the processor returned")
@@ -2701,12 +2643,7 @@ func TestRun_UnobservedCatchUpSurfacesEventsAppended(t *testing.T) {
 	events := newEventStore(t)
 	writer := &truncatingWriter{Store: events}
 
-	projections, err := lifecycle.NewStore(writer)
-	if err != nil {
-		t.Fatalf("creating lifecycle store: %v", err)
-	}
-
-	h := buildHarness(t, events, projections, lifecycle.WithReconcileInterval(time.Hour))
+	h := buildHarnessWithLifecycleEvents(t, events, writer, nil, lifecycle.WithReconcileInterval(time.Hour))
 	h.appendDomain(3)
 	h.model.armGate()
 
@@ -2751,12 +2688,7 @@ func TestRun_LostAutoPromotionToCompetingClaimIsDisplacement(t *testing.T) {
 	events := newEventStore(t)
 	writer := &racingWriter{Store: events}
 
-	projections, err := lifecycle.NewStore(writer)
-	if err != nil {
-		t.Fatalf("creating lifecycle store: %v", err)
-	}
-
-	h := buildHarness(t, events, projections, lifecycle.WithAutoPromote(true), lifecycle.WithReconcileInterval(time.Hour))
+	h := buildHarnessWithLifecycleEvents(t, events, writer, nil, lifecycle.WithAutoPromote(true), lifecycle.WithReconcileInterval(time.Hour))
 	h.appendDomain(3)
 	h.model.armGate()
 
@@ -2792,12 +2724,7 @@ func TestRun_InitialClaimLostToCompetingClaimIsDisplacement(t *testing.T) {
 	events := newEventStore(t)
 	writer := &racingWriter{Store: events}
 
-	projections, err := lifecycle.NewStore(writer)
-	if err != nil {
-		t.Fatalf("creating lifecycle store: %v", err)
-	}
-
-	h := buildHarness(t, events, projections, lifecycle.WithReconcileInterval(time.Hour))
+	h := buildHarnessWithLifecycleEvents(t, events, writer, nil, lifecycle.WithReconcileInterval(time.Hour))
 	h.appendDomain(3)
 
 	r := h.begin("will lose the claim to a competitor")
@@ -2830,12 +2757,7 @@ func TestRun_InitialClaimLostToEndedAttemptWindsDownNil(t *testing.T) {
 	events := newEventStore(t)
 	writer := &racingWriter{Store: events}
 
-	projections, err := lifecycle.NewStore(writer)
-	if err != nil {
-		t.Fatalf("creating lifecycle store: %v", err)
-	}
-
-	h := buildHarness(t, events, projections, lifecycle.WithReconcileInterval(time.Hour))
+	h := buildHarnessWithLifecycleEvents(t, events, writer, nil, lifecycle.WithReconcileInterval(time.Hour))
 	h.appendDomain(3)
 
 	r := h.begin("will lose the claim to an abandonment")
@@ -2873,13 +2795,8 @@ func TestAbandon_CompletesWhileReconcileLoadBlocked(t *testing.T) {
 
 	events := newEventStore(t)
 
-	inner, err := lifecycle.NewStore(events)
-	if err != nil {
-		t.Fatalf("creating lifecycle store: %v", err)
-	}
-
 	authority := &interceptingEventStore{Store: events}
-	h := buildHarnessWithAuthority(t, events, authority, inner)
+	h := buildHarnessWithLifecycleEvents(t, events, authority, nil)
 	h.appendDomain(3)
 	h.model.armGate()
 
@@ -2887,7 +2804,7 @@ func TestAbandon_CompletesWhileReconcileLoadBlocked(t *testing.T) {
 	_, done := runAsync(t, r)
 	waitPhase(t, r, lifecycle.PhaseBuilding)
 
-	entered := authority.armHydrateIntercept(func(ctx context.Context) error {
+	entered := authority.armHydrateIntercept(0, func(ctx context.Context) error {
 		<-ctx.Done()
 		return ctx.Err()
 	})
@@ -2925,19 +2842,11 @@ func TestReconcile_BypassesAggregateCache(t *testing.T) {
 
 	events := newEventStore(t)
 
-	inner, err := lifecycle.NewStore(events)
-	if err != nil {
-		t.Fatalf("creating lifecycle store: %v", err)
-	}
-
 	cache := newMemoryAggregateCache()
 
-	projections, err := aggregatestore.NewCachedStore(inner, cache)
-	if err != nil {
-		t.Fatalf("creating cached lifecycle store: %v", err)
-	}
-
-	h := buildHarness(t, events, projections)
+	h := buildHarness(t, events, func(base aggregatestore.Store[lifecycle.State]) (aggregatestore.Store[lifecycle.State], error) {
+		return aggregatestore.NewCachedStore(base, cache)
+	})
 	h.appendDomain(3)
 	h.model.armGate()
 
@@ -2976,19 +2885,11 @@ func TestRun_ClaimRecoveryBypassesAggregateCache(t *testing.T) {
 	events := newEventStore(t)
 	writer := &truncatingWriter{Store: events}
 
-	inner, err := lifecycle.NewStore(writer)
-	if err != nil {
-		t.Fatalf("creating lifecycle store: %v", err)
-	}
-
 	cache := newMemoryAggregateCache()
 
-	projections, err := aggregatestore.NewCachedStore(inner, cache)
-	if err != nil {
-		t.Fatalf("creating cached lifecycle store: %v", err)
-	}
-
-	h := buildHarness(t, events, projections)
+	h := buildHarnessWithLifecycleEvents(t, events, writer, func(base aggregatestore.Store[lifecycle.State]) (aggregatestore.Store[lifecycle.State], error) {
+		return aggregatestore.NewCachedStore(base, cache)
+	})
 	h.appendDomain(3)
 
 	r := h.begin("unobserved claim behind the cache")
@@ -3021,13 +2922,8 @@ func TestReconcile_StaleReadDoesNotOverwriteCertifiedState(t *testing.T) {
 
 	events := newEventStore(t)
 
-	inner, err := lifecycle.NewStore(events)
-	if err != nil {
-		t.Fatalf("creating lifecycle store: %v", err)
-	}
-
 	authority := &interceptingEventStore{Store: events}
-	h := buildHarnessWithAuthority(t, events, authority, inner)
+	h := buildHarnessWithLifecycleEvents(t, events, authority, nil)
 	h.appendDomain(3)
 	h.model.armGate()
 
@@ -3103,13 +2999,12 @@ func TestRun_ProcessorDeathAtCaughtUpSurfacesItsError(t *testing.T) {
 	events := newEventStore(t)
 	writer := &racingWriter{Store: events}
 
-	inner, err := lifecycle.NewStore(writer)
-	if err != nil {
-		t.Fatalf("creating lifecycle store: %v", err)
-	}
+	var projections *parkingSaveStore
 
-	projections := &parkingSaveStore{Store: inner}
-	h := buildHarness(t, events, projections, lifecycle.WithAutoPromote(true), lifecycle.WithReconcileInterval(time.Hour))
+	h := buildHarnessWithLifecycleEvents(t, events, writer, func(base aggregatestore.Store[lifecycle.State]) (aggregatestore.Store[lifecycle.State], error) {
+		projections = &parkingSaveStore{Store: base}
+		return projections, nil
+	}, lifecycle.WithAutoPromote(true), lifecycle.WithReconcileInterval(time.Hour))
 	h.appendDomain(3)
 
 	r := h.begin("processor dies at auto-promotion")
@@ -3308,12 +3203,7 @@ func TestRacingBegins_LoserRefused(t *testing.T) {
 
 	writer := &racingWriter{Store: events, competitor: competitorData}
 
-	projections, err := lifecycle.NewStore(writer)
-	if err != nil {
-		t.Fatalf("creating lifecycle store: %v", err)
-	}
-
-	h := buildHarness(t, events, projections)
+	h := buildHarnessWithLifecycleEvents(t, events, writer, nil)
 
 	writer.armRace()
 
@@ -3393,9 +3283,9 @@ func TestResumeAfterCrash(t *testing.T) {
 }
 
 // TestCompetingOrchestrators pins the coordination story: two handles racing
-// to end the same attempt are arbitrated by optimistic concurrency on the
-// lifecycle stream, and the loser observes the winner's transition after
-// reloading.
+// to end the same attempt are arbitrated by the lifecycle stream, and the
+// loser's command refolds the events first, observing the winner's
+// transition and refusing before it can append anything.
 func TestCompetingOrchestrators(t *testing.T) {
 	t.Parallel()
 
@@ -3421,8 +3311,8 @@ func TestCompetingOrchestrators(t *testing.T) {
 	}
 
 	err = second.Abandon(t.Context(), "the losing abandon")
-	if !errors.Is(err, eventstore.StreamVersionMismatchError{}) {
-		t.Fatalf("want the losing abandonment refused with a version mismatch, got %v", err)
+	if err == nil || !strings.Contains(err.Error(), "no rebuild in flight") {
+		t.Fatalf("want the losing abandonment refused on the vacated slot, got %v", err)
 	}
 
 	state, err := h.orchestrator.Get(t.Context(), "orders")
@@ -3452,11 +3342,6 @@ func TestSeparateLifecycleStore(t *testing.T) {
 	domainEvents := newEventStore(t)
 	lifecycleEvents := newEventStore(t)
 
-	projections, err := lifecycle.NewStore(lifecycleEvents)
-	if err != nil {
-		t.Fatalf("creating lifecycle store: %v", err)
-	}
-
 	checkpoints := cpmemory.NewCheckpointStore()
 	router := lifecycle.NewMemoryRouter()
 	model := newReadModel()
@@ -3465,7 +3350,6 @@ func TestSeparateLifecycleStore(t *testing.T) {
 		Events:          domainEvents,
 		Checkpoints:     checkpoints,
 		Handler:         model.handler,
-		Projections:     projections,
 		LifecycleEvents: lifecycleEvents,
 	},
 		lifecycle.WithAutoPromote(true),
@@ -3550,11 +3434,26 @@ func TestBegin_InvalidName(t *testing.T) {
 	}
 }
 
-// TestBegin_RejectsForeignStoreType pins that a projection store not
-// managing estoria.projection streams is refused before anything is
-// recorded: its cutover events would be invisible to the effect worker and
-// StreamRouter folds.
-func TestBegin_RejectsForeignStoreType(t *testing.T) {
+// foreignServingStore serves loads from a store managing a foreign stream
+// type, modeling a decorator that substitutes storage instead of wrapping
+// the base it was given.
+type foreignServingStore struct {
+	aggregatestore.Store[lifecycle.State]
+	foreign *aggregatestore.EventSourcedStore[lifecycle.State]
+}
+
+func (s *foreignServingStore) Load(_ context.Context, id uuid.UUID, _ *aggregatestore.LoadOptions) (*aggregatestore.Aggregate[lifecycle.State], error) {
+	return s.foreign.New(id), nil
+}
+
+// TestObservation_RejectsForeignTypedAggregates pins the observation
+// boundary's address validation: a decorator serving aggregates of a
+// foreign stream type cannot stand in for lifecycle state — reads through
+// it are refused with ErrInvalidState. Commands are structurally immune:
+// they fold the lifecycle events directly and never read the decorated
+// store, so the substitution surfaces at the read boundary instead of
+// steering anything.
+func TestObservation_RejectsForeignTypedAggregates(t *testing.T) {
 	t.Parallel()
 
 	events := newEventStore(t)
@@ -3564,10 +3463,18 @@ func TestBegin_RejectsForeignStoreType(t *testing.T) {
 		t.Fatalf("creating foreign-typed store: %v", err)
 	}
 
-	h := buildHarness(t, events, foreign)
+	h := buildHarness(t, events, func(base aggregatestore.Store[lifecycle.State]) (aggregatestore.Store[lifecycle.State], error) {
+		return &foreignServingStore{Store: base, foreign: foreign}, nil
+	})
 
-	if _, err := h.orchestrator.Begin(t.Context(), "orders", "wrong store"); !errors.Is(err, lifecycle.ErrInvalidState) {
-		t.Errorf("want Begin to reject a foreign-typed store with ErrInvalidState, got %v", err)
+	_ = h.begin("foreign observation store")
+
+	if _, err := h.orchestrator.Get(t.Context(), "orders"); !errors.Is(err, lifecycle.ErrInvalidState) {
+		t.Errorf("want observation of a foreign-typed aggregate refused with ErrInvalidState, got %v", err)
+	}
+
+	if _, err := h.orchestrator.Resume(t.Context(), "orders"); !errors.Is(err, lifecycle.ErrInvalidState) {
+		t.Errorf("want Resume of a foreign-typed aggregate refused with ErrInvalidState, got %v", err)
 	}
 }
 
@@ -3599,17 +3506,11 @@ func TestNewOrchestrator_RejectsInvalidOptions(t *testing.T) {
 
 	events := newEventStore(t)
 
-	projections, err := lifecycle.NewStore(events)
-	if err != nil {
-		t.Fatalf("creating lifecycle store: %v", err)
-	}
-
 	model := newReadModel()
 	config := lifecycle.Config{
 		Events:          events,
 		Checkpoints:     cpmemory.NewCheckpointStore(),
 		Handler:         model.handler,
-		Projections:     projections,
 		LifecycleEvents: events,
 	}
 
@@ -3641,7 +3542,6 @@ func TestNewOrchestrator_Validation(t *testing.T) {
 		Events:          h.events,
 		Checkpoints:     h.checkpoints,
 		Handler:         h.model.handler,
-		Projections:     h.projections,
 		LifecycleEvents: h.events,
 	}
 
@@ -3652,8 +3552,19 @@ func TestNewOrchestrator_Validation(t *testing.T) {
 		{"rejects a nil global reader", func(c *lifecycle.Config) { c.Events = nil }},
 		{"rejects a nil checkpoint store", func(c *lifecycle.Config) { c.Checkpoints = nil }},
 		{"rejects a nil handler factory", func(c *lifecycle.Config) { c.Handler = nil }},
-		{"rejects a nil projection store", func(c *lifecycle.Config) { c.Projections = nil }},
 		{"rejects a nil lifecycle event store", func(c *lifecycle.Config) { c.LifecycleEvents = nil }},
+		{"rejects a decorator error", func(c *lifecycle.Config) {
+			// The error wins even alongside a usable store: a decoration
+			// that failed cannot be silently served.
+			c.DecorateProjections = func(base aggregatestore.Store[lifecycle.State]) (aggregatestore.Store[lifecycle.State], error) {
+				return base, errors.New("decoration failed")
+			}
+		}},
+		{"rejects a nil decorated store", func(c *lifecycle.Config) {
+			c.DecorateProjections = func(aggregatestore.Store[lifecycle.State]) (aggregatestore.Store[lifecycle.State], error) {
+				return nil, nil
+			}
+		}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
@@ -3693,27 +3604,26 @@ func newSnapshottingOrchestrator(t *testing.T, policy aggregatestore.SnapshotPol
 	t.Helper()
 
 	events := newEventStore(t)
-
-	inner, err := lifecycle.NewStore(events)
-	if err != nil {
-		t.Fatalf("creating lifecycle store: %v", err)
-	}
-
 	snapshots := ssmemory.NewSnapshotStore()
-
-	projections, err := aggregatestore.NewSnapshottingStore(inner, snapshots, policy)
-	if err != nil {
-		t.Fatalf("creating snapshotting store: %v", err)
-	}
-
 	model := newReadModel()
+
+	var projections aggregatestore.Store[lifecycle.State]
 
 	orchestrator, err := lifecycle.NewOrchestrator(lifecycle.Config{
 		Events:          events,
 		Checkpoints:     cpmemory.NewCheckpointStore(),
 		Handler:         model.handler,
-		Projections:     projections,
 		LifecycleEvents: events,
+		DecorateProjections: func(base aggregatestore.Store[lifecycle.State]) (aggregatestore.Store[lifecycle.State], error) {
+			decorated, err := aggregatestore.NewSnapshottingStore(base, snapshots, policy)
+			if err != nil {
+				return nil, err
+			}
+
+			projections = decorated
+
+			return decorated, nil
+		},
 	},
 		lifecycle.WithProcessorOptions(processor.WithPollInterval(2*time.Millisecond)),
 		lifecycle.WithReconcileInterval(10*time.Millisecond),
@@ -3986,21 +3896,21 @@ func TestSnapshotRoundTrip_PreservesCutoverRevision(t *testing.T) {
 	})
 }
 
-// TestCutoverCommands_RefuseAnExhaustedRevision pins the overflow guard: at
-// the revision ceiling, the increment would wrap negative, the fold's own
-// wrapped comparison would accept it as continuity, and the worker's decode
-// would then refuse the negative event — routing frozen while the lifecycle
-// advances. No legitimate history reaches the ceiling; persisted state is
-// trusted if it validates, so the states arrive through the snapshot layer,
-// shaped realizably: the ceiling is exactly what 1<<62 completed allocations
-// can record, the in-flight attempt holds one further allocation that
-// validation discounts, and certification refusals keep their precedence —
-// the guard sits with the append, not above the license protocol.
-func TestCutoverCommands_RefuseAnExhaustedRevision(t *testing.T) {
+// TestPromote_CertificationPrecedesTheExhaustionGuard pins the license
+// protocol's precedence: an uncertified promotion is refused with
+// ErrNotCertified before the revision-exhaustion guard is consulted — the
+// guard sits with the append, not above the license protocol. The guard's
+// own trigger is unreachable through an event-anchored fold, which every
+// command now installs: revisions rise by exactly one per recorded cutover,
+// so an exhausted revision cannot precede version exhaustion. The fold's
+// ceiling arms pin the wrap protection where a corrupt history could still
+// present it; the resumed view here carries the exhausted revision through
+// the snapshot layer, which observation serves and no command trusts.
+func TestPromote_CertificationPrecedesTheExhaustionGuard(t *testing.T) {
 	t.Parallel()
 
 	if strconv.IntSize < 64 {
-		t.Skip("the revision ceiling is reachable only with 64-bit allocation counts")
+		t.Skip("the revision ceiling is representable only with 64-bit allocation counts")
 	}
 
 	// Assembled from int64 variables at runtime: as untyped constants these
@@ -4009,158 +3919,49 @@ func TestCutoverCommands_RefuseAnExhaustedRevision(t *testing.T) {
 	exhaustedAllocations := int(completedAllocations) + 1
 
 	ordersV1 := projection.ID{Name: "orders", Version: 1}
-	ordersPrior := projection.ID{Name: "orders", Version: int(completedAllocations)}
 	ordersTop := projection.ID{Name: "orders", Version: exhaustedAllocations}
 	at := time.Date(2026, 8, 18, 16, 0, 0, 0, time.UTC)
 
-	t.Run("promote refuses with a live certificate", func(t *testing.T) {
-		t.Parallel()
+	events, snapshots, _, _, orchestrator := newSnapshottingOrchestrator(t,
+		snapshotstore.EventCountSnapshotPolicy{})
 
-		events, snapshots, _, _, orchestrator := newSnapshottingOrchestrator(t,
-			snapshotstore.EventCountSnapshotPolicy{})
+	if _, err := orchestrator.Begin(t.Context(), "orders", "exhausted but uncertified"); err != nil {
+		t.Fatalf("beginning: %v", err)
+	}
 
-		appendDomainTo(t, events, 2)
+	writeLifecycleSnapshot(t, snapshots, lifecycle.State{
+		Name:            "orders",
+		Live:            ordersV1,
+		CutoverRevision: math.MaxInt64,
+		Allocated:       exhaustedAllocations,
+		Attempt: lifecycle.AttemptState{
+			ID:          uuid.Must(uuid.NewV4()),
+			Target:      ordersTop,
+			Previous:    ordersV1,
+			Phase:       lifecycle.PhaseCaughtUp,
+			Runner:      uuid.Must(uuid.NewV4()),
+			InitiatedAt: at,
+			CaughtUpAt:  at,
+		},
+	}, 1)
 
-		if _, err := orchestrator.Begin(t.Context(), "orders", "exhausted promote"); err != nil {
-			t.Fatalf("beginning: %v", err)
-		}
+	handle, err := orchestrator.Resume(t.Context(), "orders")
+	if err != nil {
+		t.Fatalf("resuming over the exhausted state: %v", err)
+	}
 
-		// A building attempt whose projection has exhausted its revisions,
-		// installed over the admission's single event: the run below claims
-		// it, drains to the head, and certifies — every certification check
-		// passes, so only the exhaustion guard can refuse the promotion.
-		writeLifecycleSnapshot(t, snapshots, lifecycle.State{
-			Name:            "orders",
-			Live:            ordersV1,
-			CutoverRevision: math.MaxInt64,
-			Allocated:       exhaustedAllocations,
-			Attempt: lifecycle.AttemptState{
-				ID:          uuid.Must(uuid.NewV4()),
-				Target:      ordersTop,
-				Previous:    ordersV1,
-				Phase:       lifecycle.PhaseBuilding,
-				Runner:      uuid.Must(uuid.NewV4()),
-				InitiatedAt: at,
-			},
-		}, 1)
+	err = handle.Promote(t.Context())
+	if !errors.Is(err, lifecycle.ErrNotCertified) {
+		t.Fatalf("want the uncertified promotion refused with ErrNotCertified, got %v", err)
+	}
 
-		handle, err := orchestrator.Resume(t.Context(), "orders")
-		if err != nil {
-			t.Fatalf("resuming over the exhausted state: %v", err)
-		}
+	if strings.Contains(err.Error(), "exhausted") {
+		t.Errorf("want certification precedence over the exhaustion guard, got %v", err)
+	}
 
-		cancel, done := runAsync(t, handle)
-		waitPhase(t, handle, lifecycle.PhaseCaughtUp)
-
-		err = handle.Promote(t.Context())
-		if err == nil || !strings.Contains(err.Error(), "cutover revision is exhausted") {
-			t.Fatalf("want the certified promotion refused on revision exhaustion, got %v", err)
-		}
-
-		if errors.Is(err, lifecycle.ErrNotCertified) {
-			t.Errorf("want the refusal past certification, not a license refusal, got %v", err)
-		}
-
-		if got := countEventsOfType(t, events, lifecycle.Promoted{}.EventType()); got != 0 {
-			t.Errorf("want no promotion recorded at the exhausted revision, got %d", got)
-		}
-
-		cancel()
-
-		if err := waitDone(t, done); !errors.Is(err, context.Canceled) {
-			t.Fatalf("want the run to end on its cancellation, got %v", err)
-		}
-	})
-
-	t.Run("certification refusals take precedence", func(t *testing.T) {
-		t.Parallel()
-
-		events, snapshots, _, _, orchestrator := newSnapshottingOrchestrator(t,
-			snapshotstore.EventCountSnapshotPolicy{})
-
-		if _, err := orchestrator.Begin(t.Context(), "orders", "exhausted but uncertified"); err != nil {
-			t.Fatalf("beginning: %v", err)
-		}
-
-		writeLifecycleSnapshot(t, snapshots, lifecycle.State{
-			Name:            "orders",
-			Live:            ordersV1,
-			CutoverRevision: math.MaxInt64,
-			Allocated:       exhaustedAllocations,
-			Attempt: lifecycle.AttemptState{
-				ID:          uuid.Must(uuid.NewV4()),
-				Target:      ordersTop,
-				Previous:    ordersV1,
-				Phase:       lifecycle.PhaseCaughtUp,
-				Runner:      uuid.Must(uuid.NewV4()),
-				InitiatedAt: at,
-				CaughtUpAt:  at,
-			},
-		}, 1)
-
-		handle, err := orchestrator.Resume(t.Context(), "orders")
-		if err != nil {
-			t.Fatalf("resuming over the exhausted state: %v", err)
-		}
-
-		err = handle.Promote(t.Context())
-		if !errors.Is(err, lifecycle.ErrNotCertified) {
-			t.Fatalf("want the uncertified promotion refused with ErrNotCertified, got %v", err)
-		}
-
-		if strings.Contains(err.Error(), "exhausted") {
-			t.Errorf("want certification precedence over the exhaustion guard, got %v", err)
-		}
-
-		if got := countEventsOfType(t, events, lifecycle.Promoted{}.EventType()); got != 0 {
-			t.Errorf("want no promotion recorded, got %d", got)
-		}
-	})
-
-	t.Run("rollback", func(t *testing.T) {
-		t.Parallel()
-
-		events, snapshots, _, _, orchestrator := newSnapshottingOrchestrator(t,
-			snapshotstore.EventCountSnapshotPolicy{})
-
-		if _, err := orchestrator.Begin(t.Context(), "orders", "exhausted rollback"); err != nil {
-			t.Fatalf("beginning: %v", err)
-		}
-
-		// One cutover of the ceiling is this attempt's own promotion, so the
-		// completed allocations sit one below their maximum: the last of them
-		// promoted without rolling back and is the version this promotion
-		// retained.
-		writeLifecycleSnapshot(t, snapshots, lifecycle.State{
-			Name:            "orders",
-			Live:            ordersTop,
-			CutoverRevision: math.MaxInt64,
-			Allocated:       exhaustedAllocations,
-			Attempt: lifecycle.AttemptState{
-				ID:          uuid.Must(uuid.NewV4()),
-				Target:      ordersTop,
-				Previous:    ordersPrior,
-				Phase:       lifecycle.PhasePromoted,
-				Runner:      uuid.Must(uuid.NewV4()),
-				InitiatedAt: at,
-				PromotedAt:  at,
-			},
-		}, 1)
-
-		handle, err := orchestrator.Resume(t.Context(), "orders")
-		if err != nil {
-			t.Fatalf("resuming over the exhausted state: %v", err)
-		}
-
-		err = handle.Rollback(t.Context())
-		if err == nil || !strings.Contains(err.Error(), "cutover revision is exhausted") {
-			t.Fatalf("want the rollback refused on revision exhaustion, got %v", err)
-		}
-
-		if got := countEventsOfType(t, events, lifecycle.RolledBack{}.EventType()); got != 0 {
-			t.Errorf("want no rollback recorded at the exhausted revision, got %d", got)
-		}
-	})
+	if got := countEventsOfType(t, events, lifecycle.Promoted{}.EventType()); got != 0 {
+		t.Errorf("want no promotion recorded, got %d", got)
+	}
 }
 
 // foreignLifecycleState returns a structurally valid "customers" lifecycle
@@ -4314,6 +4115,353 @@ func TestForeignStateViaSnapshot(t *testing.T) {
 			t.Errorf("want the true rebuild live, got %s", got)
 		}
 	})
+}
+
+// completeFirstBuild drives the orchestrator's "orders" projection through a
+// complete first build: begun, run to catch-up, promoted, and completed, so
+// v1 is live with the attempt slot vacant.
+func completeFirstBuild(t *testing.T, orchestrator *lifecycle.Orchestrator) {
+	t.Helper()
+
+	r, err := orchestrator.Begin(t.Context(), "orders", "first build")
+	if err != nil {
+		t.Fatalf("beginning first build: %v", err)
+	}
+
+	_, done := runAsync(t, r)
+	waitPhase(t, r, lifecycle.PhaseCaughtUp)
+
+	if err := r.Promote(t.Context()); err != nil {
+		t.Fatalf("promoting first build: %v", err)
+	}
+
+	if err := r.Retire(t.Context()); err != nil {
+		t.Fatalf("completing first build: %v", err)
+	}
+
+	if err := waitDone(t, done); err != nil {
+		t.Fatalf("first build run: %v", err)
+	}
+}
+
+// replayCleanState refolds the "orders" lifecycle stream event-only and
+// fails the test if the fold is poisoned, returning the refolded state.
+func replayCleanState(t *testing.T, events *esmemory.EventStore) lifecycle.State {
+	t.Helper()
+
+	replay, err := lifecycle.NewStore(events)
+	if err != nil {
+		t.Fatalf("creating the replay store: %v", err)
+	}
+
+	refolded, err := replay.Load(t.Context(), lifecycle.StreamUUID("orders"), nil)
+	if err != nil {
+		t.Fatalf("replaying the lifecycle stream: %v", err)
+	}
+
+	state := refolded.State()
+	if state.InvalidReason != "" {
+		t.Errorf("want the event-only replay clean, got poisoned: %s", state.InvalidReason)
+	}
+
+	return state
+}
+
+// TestRun_SnapshotCannotRedirectTheClaim pins Run's entry against decorated
+// state: a structurally valid same-name snapshot at the real stream's version
+// carries a created attempt targeting a version the history never allocated.
+// A run that trusted it would claim the forged attempt — poisoning the real
+// fold with a claim no fold of the events can attribute — and aim the build,
+// its storage, and its checkpoint at the forged target. The entry fold is
+// event-only, so the run binds to the real attempt and the snapshot never
+// governs.
+func TestRun_SnapshotCannotRedirectTheClaim(t *testing.T) {
+	t.Parallel()
+
+	events, snapshots, _, model, orchestrator := newSnapshottingOrchestrator(t,
+		snapshotstore.EventCountSnapshotPolicy{})
+
+	appendDomainTo(t, events, 2)
+
+	r, err := orchestrator.Begin(t.Context(), "orders", "the real first build")
+	if err != nil {
+		t.Fatalf("beginning: %v", err)
+	}
+
+	v1 := projection.ID{Name: "orders", Version: 1}
+	v2 := projection.ID{Name: "orders", Version: 2}
+
+	forged := lifecycle.State{
+		Name:            "orders",
+		Live:            v1,
+		CutoverRevision: 1,
+		Allocated:       2,
+		Attempt: lifecycle.AttemptState{
+			ID:          uuid.Must(uuid.NewV4()),
+			Target:      v2,
+			Previous:    v1,
+			Phase:       lifecycle.PhaseCreated,
+			Reason:      "forged second attempt",
+			InitiatedAt: time.Date(2026, 8, 20, 10, 0, 0, 0, time.UTC),
+		},
+	}
+	writeLifecycleSnapshot(t, snapshots, forged, 1)
+
+	_, done := runAsync(t, r)
+	waitPhase(t, r, lifecycle.PhaseCaughtUp)
+
+	if got := r.State().Attempt.Target; got != v1 {
+		t.Errorf("want the run bound to the real attempt's target %s, got %s", v1, got)
+	}
+
+	if model.hasTable(v2) {
+		t.Error("want no handler invoked for the forged target")
+	}
+
+	if got := model.table(v1); len(got) == 0 {
+		t.Error("want the real target's build handling events")
+	}
+
+	replayCleanState(t, events)
+
+	// Terminal for the attempt, so the run returns cleanly.
+	if err := r.Abandon(t.Context(), "test complete"); err != nil {
+		t.Fatalf("abandoning: %v", err)
+	}
+
+	if err := waitDone(t, done); err != nil {
+		t.Errorf("want Run to return nil after the abandonment, got %v", err)
+	}
+}
+
+// TestBegin_SnapshotCannotConcealTheInFlightAttempt pins admission against
+// decorated state: a same-name snapshot showing a vacant attempt slot at the
+// real stream's version would let a second admission through — recording an
+// initiation over the occupied slot and poisoning the fold. Begin decides
+// from the events, so it refuses.
+func TestBegin_SnapshotCannotConcealTheInFlightAttempt(t *testing.T) {
+	t.Parallel()
+
+	events, snapshots, _, _, orchestrator := newSnapshottingOrchestrator(t,
+		snapshotstore.EventCountSnapshotPolicy{})
+
+	if _, err := orchestrator.Begin(t.Context(), "orders", "the real attempt"); err != nil {
+		t.Fatalf("beginning: %v", err)
+	}
+
+	// Vacant and idle: the shape under which admission is legal.
+	writeLifecycleSnapshot(t, snapshots, lifecycle.State{Name: "orders", Allocated: 1}, 1)
+
+	_, err := orchestrator.Begin(t.Context(), "orders", "concealed by the snapshot")
+	if err == nil || !strings.Contains(err.Error(), "already has a rebuild in flight") {
+		t.Fatalf("want the second admission refused from the events, got %v", err)
+	}
+
+	if got := countEventsOfType(t, events, lifecycle.RebuildInitiated{}.EventType()); got != 1 {
+		t.Errorf("want exactly the real admission recorded, got %d", got)
+	}
+
+	replayCleanState(t, events)
+}
+
+// TestSetRetirementPolicy_SnapshotCannotAdvanceTheGeneration pins the policy
+// transition against decorated state: a snapshot claiming a later generation
+// would make the successor generation discontinuous with the recorded one,
+// poisoning the fold while reporting success. The transition derives from
+// the events, so the recorded generation's successor is appended.
+func TestSetRetirementPolicy_SnapshotCannotAdvanceTheGeneration(t *testing.T) {
+	t.Parallel()
+
+	events, snapshots, _, _, orchestrator := newSnapshottingOrchestrator(t,
+		snapshotstore.EventCountSnapshotPolicy{})
+
+	if _, err := orchestrator.Begin(t.Context(), "orders", "the real attempt"); err != nil {
+		t.Fatalf("beginning: %v", err)
+	}
+
+	if err := orchestrator.SetRetirementPolicy(t.Context(), "orders", lifecycle.RetirementPolicyChange{
+		Witnesses: []string{"router"}, Actor: "op", Reason: "initial policy",
+	}); err != nil {
+		t.Fatalf("recording the initial policy: %v", err)
+	}
+
+	forged, err := orchestrator.Get(t.Context(), "orders")
+	if err != nil {
+		t.Fatalf("reading state to forge: %v", err)
+	}
+
+	forged.RetirementPolicy.Generation = 5
+	writeLifecycleSnapshot(t, snapshots, forged, 2)
+
+	if err := orchestrator.SetRetirementPolicy(t.Context(), "orders", lifecycle.RetirementPolicyChange{
+		Witnesses: []string{"auditor", "router"}, Actor: "op", Reason: "tightened",
+	}); err != nil {
+		t.Fatalf("recording the second policy: %v", err)
+	}
+
+	state := replayCleanState(t, events)
+	if got := state.RetirementPolicy.Generation; got != 2 {
+		t.Errorf("want the recorded generation's successor 2, got %d", got)
+	}
+}
+
+// TestSetRetirementPolicy_RefusesAPoisonedStream pins the policy
+// transition's fold validation: a lifecycle whose event-only fold is
+// poisoned must refuse the transition with ErrInvalidState instead of
+// recording a generation over an unusable history.
+func TestSetRetirementPolicy_RefusesAPoisonedStream(t *testing.T) {
+	t.Parallel()
+
+	h := newHarness(t)
+	_ = h.begin("to be poisoned")
+
+	// A second admission over the occupied slot poisons the fold.
+	appendRawLifecycleEvent(t, h.events, lifecycle.RebuildInitiated{
+		Attempt: uuid.Must(uuid.NewV4()),
+		Target:  projection.ID{Name: "orders", Version: 2},
+		Reason:  "poisoning admission",
+		At:      time.Now(),
+	})
+
+	err := h.orchestrator.SetRetirementPolicy(t.Context(), "orders", lifecycle.RetirementPolicyChange{
+		Witnesses: []string{"router"}, Actor: "op", Reason: "over poison",
+	})
+	if !errors.Is(err, lifecycle.ErrInvalidState) {
+		t.Fatalf("want the transition refused with ErrInvalidState, got %v", err)
+	}
+
+	if got := countEventsOfType(t, h.events, lifecycle.RetirementPolicySet{}.EventType()); got != 0 {
+		t.Errorf("want no transition recorded over the poisoned fold, got %d", got)
+	}
+}
+
+// TestRollback_SnapshotCannotForgeAPromotion pins Rollback against decorated
+// state: a same-name snapshot dressing a created rebuild as promoted would
+// let a resumed handle record a rollback the history cannot arbitrate —
+// poisoning the fold and flipping routing to a revision no promotion
+// recorded. Rollback decides from the events, so it refuses on the true
+// phase, and the refusal itself re-establishes the handle's view from the
+// fold.
+func TestRollback_SnapshotCannotForgeAPromotion(t *testing.T) {
+	t.Parallel()
+
+	events, snapshots, projections, _, orchestrator := newSnapshottingOrchestrator(t,
+		snapshotstore.EventCountSnapshotPolicy{})
+
+	appendDomainTo(t, events, 2)
+	completeFirstBuild(t, orchestrator)
+
+	if _, err := orchestrator.Begin(t.Context(), "orders", "second build"); err != nil {
+		t.Fatalf("beginning the second build: %v", err)
+	}
+
+	v1 := projection.ID{Name: "orders", Version: 1}
+	v2 := projection.ID{Name: "orders", Version: 2}
+
+	forged, err := orchestrator.Get(t.Context(), "orders")
+	if err != nil {
+		t.Fatalf("reading state to forge: %v", err)
+	}
+
+	forged.Attempt.Phase = lifecycle.PhasePromoted
+	forged.Attempt.Runner = uuid.Must(uuid.NewV4())
+	forged.Live = v2
+	forged.CutoverRevision = 2
+
+	loaded, err := projections.Load(t.Context(), lifecycle.StreamUUID("orders"), nil)
+	if err != nil {
+		t.Fatalf("loading the stream version: %v", err)
+	}
+
+	writeLifecycleSnapshot(t, snapshots, forged, loaded.Version())
+
+	resumed, err := orchestrator.Resume(t.Context(), "orders")
+	if err != nil {
+		t.Fatalf("resuming: %v", err)
+	}
+
+	err = resumed.Rollback(t.Context())
+	if err == nil || !strings.Contains(err.Error(), "cannot roll back a rebuild that is created") {
+		t.Fatalf("want the rollback refused from the events, got %v", err)
+	}
+
+	// The refusal alone does not prove the handle was refreshed: the refusal
+	// must derive from installed state, not a discarded local.
+	if got := resumed.State().Attempt.Phase; got != lifecycle.PhaseCreated {
+		t.Errorf("want the handle re-established on the recorded phase, got %s", got)
+	}
+
+	if got := countEventsOfType(t, events, lifecycle.RolledBack{}.EventType()); got != 0 {
+		t.Errorf("want no rollback recorded through forged state, got %d", got)
+	}
+
+	replayCleanState(t, events)
+	_ = v1
+}
+
+// TestAbandon_SnapshotCannotRewindAPromotion pins Abandon against decorated
+// state: a same-name snapshot rewinding a promoted rebuild to caught-up
+// would let a resumed handle abandon it — vacating a promoted attempt and
+// poisoning the fold. Abandon decides from the events, so it refuses on the
+// true phase.
+func TestAbandon_SnapshotCannotRewindAPromotion(t *testing.T) {
+	t.Parallel()
+
+	events, snapshots, projections, _, orchestrator := newSnapshottingOrchestrator(t,
+		snapshotstore.EventCountSnapshotPolicy{})
+
+	appendDomainTo(t, events, 2)
+
+	r, err := orchestrator.Begin(t.Context(), "orders", "the real attempt")
+	if err != nil {
+		t.Fatalf("beginning: %v", err)
+	}
+
+	cancel, done := runAsync(t, r)
+	waitPhase(t, r, lifecycle.PhaseCaughtUp)
+
+	if err := r.Promote(t.Context()); err != nil {
+		t.Fatalf("promoting: %v", err)
+	}
+
+	cancel()
+	<-done
+
+	forged, err := orchestrator.Get(t.Context(), "orders")
+	if err != nil {
+		t.Fatalf("reading state to forge: %v", err)
+	}
+
+	forged.Attempt.Phase = lifecycle.PhaseCaughtUp
+	forged.Live = projection.ID{}
+	forged.CutoverRevision = 0
+
+	loaded, err := projections.Load(t.Context(), lifecycle.StreamUUID("orders"), nil)
+	if err != nil {
+		t.Fatalf("loading the stream version: %v", err)
+	}
+
+	writeLifecycleSnapshot(t, snapshots, forged, loaded.Version())
+
+	resumed, err := orchestrator.Resume(t.Context(), "orders")
+	if err != nil {
+		t.Fatalf("resuming: %v", err)
+	}
+
+	err = resumed.Abandon(t.Context(), "rewound by the snapshot")
+	if err == nil || !strings.Contains(err.Error(), "cannot abandon a rebuild that is promoted") {
+		t.Fatalf("want the abandonment refused from the events, got %v", err)
+	}
+
+	if got := resumed.State().Attempt.Phase; got != lifecycle.PhasePromoted {
+		t.Errorf("want the handle re-established on the recorded phase, got %s", got)
+	}
+
+	if got := countEventsOfType(t, events, lifecycle.Abandoned{}.EventType()); got != 0 {
+		t.Errorf("want no abandonment recorded through forged state, got %d", got)
+	}
+
+	replayCleanState(t, events)
 }
 
 // TestResume_RefusesCoveredUpSequences pins the fold's cover-up poisons
@@ -4592,13 +4740,8 @@ func TestRun_ProcessorFailureSurfacesDespiteHeldReconcile(t *testing.T) {
 
 	events := newEventStore(t)
 
-	inner, err := lifecycle.NewStore(events)
-	if err != nil {
-		t.Fatalf("creating lifecycle store: %v", err)
-	}
-
 	authority := &interceptingEventStore{Store: events}
-	h := buildHarnessWithAuthority(t, events, authority, inner)
+	h := buildHarnessWithLifecycleEvents(t, events, authority, nil)
 	h.appendDomain(3)
 
 	r := h.begin("processor failure under a held reconciliation")
@@ -4608,7 +4751,7 @@ func TestRun_ProcessorFailureSurfacesDespiteHeldReconcile(t *testing.T) {
 
 	// The next reconcile load parks inside the store, releasing only when
 	// the run's wind-down cancels it.
-	entered := authority.armHydrateIntercept(func(ctx context.Context) error {
+	entered := authority.armHydrateIntercept(0, func(ctx context.Context) error {
 		<-ctx.Done()
 		return ctx.Err()
 	})
@@ -4647,13 +4790,8 @@ func TestRun_HydrationFailureNotLaunderedByCancellation(t *testing.T) {
 
 	events := newEventStore(t)
 
-	inner, err := lifecycle.NewStore(events)
-	if err != nil {
-		t.Fatalf("creating lifecycle store: %v", err)
-	}
-
 	authority := &interceptingEventStore{Store: events}
-	h := buildHarnessWithAuthority(t, events, authority, inner)
+	h := buildHarnessWithLifecycleEvents(t, events, authority, nil)
 	h.appendDomain(3)
 
 	r := h.begin("failure racing cancellation")
@@ -4665,7 +4803,7 @@ func TestRun_HydrationFailureNotLaunderedByCancellation(t *testing.T) {
 	// land, and then fails with a distinct error: the exact race the
 	// discrimination must not launder.
 	errWindDown := errors.New("store failure during wind-down")
-	entered := authority.armHydrateIntercept(func(ctx context.Context) error {
+	entered := authority.armHydrateIntercept(0, func(ctx context.Context) error {
 		cancel()
 		<-ctx.Done()
 
@@ -4693,13 +4831,8 @@ func TestRun_CancellationDuringCatchUpSurfacesRecordedFailure(t *testing.T) {
 
 	events := newEventStore(t)
 
-	inner, err := lifecycle.NewStore(events)
-	if err != nil {
-		t.Fatalf("creating lifecycle store: %v", err)
-	}
-
 	authority := &interceptingEventStore{Store: events}
-	h := buildHarnessWithAuthority(t, events, authority, inner)
+	h := buildHarnessWithLifecycleEvents(t, events, authority, nil)
 
 	// The gate holds the build mid-replay, so the run is still catching up
 	// when the failure and the cancellation race.
@@ -4712,7 +4845,7 @@ func TestRun_CancellationDuringCatchUpSurfacesRecordedFailure(t *testing.T) {
 	waitPhase(t, r, lifecycle.PhaseBuilding)
 
 	errWindDown := errors.New("store failure during wind-down")
-	entered := authority.armHydrateIntercept(func(ctx context.Context) error {
+	entered := authority.armHydrateIntercept(0, func(ctx context.Context) error {
 		cancel()
 		<-ctx.Done()
 
@@ -4740,13 +4873,8 @@ func TestRun_JoinedCancellationDoesNotLaunderFailure(t *testing.T) {
 
 	events := newEventStore(t)
 
-	inner, err := lifecycle.NewStore(events)
-	if err != nil {
-		t.Fatalf("creating lifecycle store: %v", err)
-	}
-
 	authority := &interceptingEventStore{Store: events}
-	h := buildHarnessWithAuthority(t, events, authority, inner)
+	h := buildHarnessWithLifecycleEvents(t, events, authority, nil)
 	h.appendDomain(3)
 
 	r := h.begin("joined failure racing cancellation")
@@ -4755,7 +4883,7 @@ func TestRun_JoinedCancellationDoesNotLaunderFailure(t *testing.T) {
 	waitPhase(t, r, lifecycle.PhaseCaughtUp)
 
 	errStoreFailure := errors.New("store failure joined to the cancellation")
-	entered := authority.armHydrateIntercept(func(ctx context.Context) error {
+	entered := authority.armHydrateIntercept(0, func(ctx context.Context) error {
 		cancel()
 		<-ctx.Done()
 
@@ -4784,13 +4912,8 @@ func TestRun_ProcessorFailureDuringCatchUpSurfacesDespiteHeldReconcile(t *testin
 
 	events := newEventStore(t)
 
-	inner, err := lifecycle.NewStore(events)
-	if err != nil {
-		t.Fatalf("creating lifecycle store: %v", err)
-	}
-
 	authority := &interceptingEventStore{Store: events}
-	h := buildHarnessWithAuthority(t, events, authority, inner)
+	h := buildHarnessWithLifecycleEvents(t, events, authority, nil)
 
 	// The gate holds the build mid-replay: the run never reaches catch-up.
 	h.model.armGate()
@@ -4801,7 +4924,7 @@ func TestRun_ProcessorFailureDuringCatchUpSurfacesDespiteHeldReconcile(t *testin
 	_, done := runAsync(t, r)
 	waitPhase(t, r, lifecycle.PhaseBuilding)
 
-	entered := authority.armHydrateIntercept(func(ctx context.Context) error {
+	entered := authority.armHydrateIntercept(0, func(ctx context.Context) error {
 		<-ctx.Done()
 		return ctx.Err()
 	})
@@ -5074,10 +5197,10 @@ func (s *refusingStore) Save(ctx context.Context, aggregate *aggregatestore.Aggr
 }
 
 // interceptingEventStore delegates and lets tests hook the authority-level
-// stream read every runtime verdict flows through — the entry refresh, the
-// reconcile loop's fresh view, claim recovery, defeat classification, and
-// retirement authority each hydrate through exactly one read of the
-// lifecycle stream. A hook fires once, after a configured number of
+// stream read every command entry and runtime verdict flows through —
+// command entry refolds, the reconcile loop's fresh view, claim recovery,
+// defeat classification, and retirement authority each hydrate through
+// exactly one read of the lifecycle stream. A hook fires once, after a configured number of
 // untouched calls: replacing the read, running ahead of it, or running
 // after the inner read returned its frozen view but before the fold
 // consumes it. Versioned hydrates — the defeat-classification read, the
@@ -5088,7 +5211,9 @@ type interceptingEventStore struct {
 	mu             sync.Mutex
 	replace        func(context.Context) error
 	replaceEntered chan struct{}
+	replaceSkip    int
 	before         func(context.Context) error
+	beforeSkip     int
 	after          func(context.Context) error
 	afterEntered   chan struct{}
 
@@ -5096,26 +5221,29 @@ type interceptingEventStore struct {
 	versionedBeforeEntered chan struct{}
 }
 
-// armHydrateIntercept arms fn to run in place of the next authority read —
-// which fails with fn's result; the returned channel closes when the
-// intercepted read begins.
-func (s *interceptingEventStore) armHydrateIntercept(fn func(context.Context) error) <-chan struct{} {
+// armHydrateIntercept arms fn to run in place of the first authority read
+// after skip untouched unversioned reads — the intercepted read fails with
+// fn's result; the returned channel closes when it begins.
+func (s *interceptingEventStore) armHydrateIntercept(skip int, fn func(context.Context) error) <-chan struct{} {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	s.replace = fn
+	s.replaceSkip = skip
 	s.replaceEntered = make(chan struct{})
 
 	return s.replaceEntered
 }
 
-// armHydrateBefore arms fn to run ahead of the next delegated authority
-// read: the read then disarms the hook and proceeds for real.
-func (s *interceptingEventStore) armHydrateBefore(fn func(context.Context) error) {
+// armHydrateBefore arms fn to run ahead of the first delegated authority
+// read after skip untouched unversioned reads: that read then disarms the
+// hook and proceeds for real.
+func (s *interceptingEventStore) armHydrateBefore(skip int, fn func(context.Context) error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	s.before = fn
+	s.beforeSkip = skip
 }
 
 // armHydrateAfter arms fn to run after the next delegated Hydrate completes,
@@ -5171,13 +5299,21 @@ func (s *interceptingEventStore) ReadStream(ctx context.Context, streamID typeid
 	}
 
 	if s.replace != nil {
-		replace, replaceEntered = s.replace, s.replaceEntered
-		s.replace, s.replaceEntered = nil, nil
+		if s.replaceSkip > 0 {
+			s.replaceSkip--
+		} else {
+			replace, replaceEntered = s.replace, s.replaceEntered
+			s.replace, s.replaceEntered = nil, nil
+		}
 	}
 
 	if replace == nil && s.before != nil {
-		before = s.before
-		s.before = nil
+		if s.beforeSkip > 0 {
+			s.beforeSkip--
+		} else {
+			before = s.before
+			s.before = nil
+		}
 	}
 
 	if replace == nil && s.after != nil {
@@ -5712,46 +5848,6 @@ func (w *gateWitness) AppliedCutover(context.Context, string) (lifecycle.Cutover
 	}
 
 	return w.cutover, nil
-}
-
-// ceilingEventStore records appends and reports them written at one past the
-// expected version, and reads as an absent stream. It stands in for a
-// lifecycle stream whose tip no real fixture can reach event by event, so an
-// append at the top of the version space can be observed succeeding.
-type ceilingEventStore struct {
-	mu       sync.Mutex
-	appended []*eventstore.WritableEvent
-	expects  []int64
-}
-
-func (s *ceilingEventStore) ReadStream(context.Context, typeid.ID, eventstore.ReadStreamOptions) (eventstore.StreamIterator, error) {
-	return nil, eventstore.ErrStreamNotFound
-}
-
-func (s *ceilingEventStore) AppendStream(_ context.Context, streamID typeid.ID, events []*eventstore.WritableEvent, opts eventstore.AppendStreamOptions) ([]*eventstore.Event, error) {
-	expect := int64(0)
-	if opts.ExpectVersion != nil {
-		expect = *opts.ExpectVersion
-	}
-
-	s.mu.Lock()
-	s.appended = append(s.appended, events...)
-	s.expects = append(s.expects, expect)
-	s.mu.Unlock()
-
-	written := make([]*eventstore.Event, len(events))
-	for i, event := range events {
-		written[i] = &eventstore.Event{
-			ID:              typeid.NewV4(event.Type),
-			StreamID:        streamID,
-			StreamVersion:   expect + int64(i) + 1,
-			Timestamp:       time.Now(),
-			Data:            event.Data,
-			DataContentType: event.DataContentType,
-		}
-	}
-
-	return written, nil
 }
 
 // injectingEventStore delegates to an inner store and, once armed, runs
@@ -6294,7 +6390,6 @@ func TestRetire_RetryUsesCapturedMembership(t *testing.T) {
 		Events:          h.events,
 		Checkpoints:     h.checkpoints,
 		Handler:         h.model.handler,
-		Projections:     h.projections,
 		LifecycleEvents: h.events,
 	})
 	if err != nil {
@@ -6598,17 +6693,9 @@ func TestRetire_RetainedStoreMutationCannotWeakenThePolicy(t *testing.T) {
 
 	events := newEventStore(t)
 
-	inner, err := lifecycle.NewStore(events)
-	if err != nil {
-		t.Fatalf("creating lifecycle store: %v", err)
-	}
-
-	projections, err := aggregatestore.NewCachedStore(inner, newMemoryAggregateCache())
-	if err != nil {
-		t.Fatalf("creating cached lifecycle store: %v", err)
-	}
-
-	h := buildHarness(t, events, projections)
+	h := buildHarness(t, events, func(base aggregatestore.Store[lifecycle.State]) (aggregatestore.Store[lifecycle.State], error) {
+		return aggregatestore.NewCachedStore(base, newMemoryAggregateCache())
+	})
 	_, _, v2, done := promotedSecondVersion(t, h)
 
 	if err := h.orchestrator.SetRetirementPolicy(t.Context(), "orders", lifecycle.RetirementPolicyChange{
@@ -6621,7 +6708,7 @@ func TestRetire_RetainedStoreMutationCannotWeakenThePolicy(t *testing.T) {
 	// to name it would attest cleanly and destroy storage.
 	h.waitLive(v2)
 
-	tampered, err := projections.Load(t.Context(), lifecycle.StreamUUID("orders"), nil)
+	tampered, err := h.projections.Load(t.Context(), lifecycle.StreamUUID("orders"), nil)
 	if err != nil {
 		t.Fatalf("loading through the retained store: %v", err)
 	}
@@ -6683,19 +6770,11 @@ func TestRetire_SnapshotCannotWeakenThePolicy(t *testing.T) {
 
 	events := newEventStore(t)
 
-	inner, err := lifecycle.NewStore(events)
-	if err != nil {
-		t.Fatalf("creating lifecycle store: %v", err)
-	}
-
 	snapshots := ssmemory.NewSnapshotStore()
 
-	projections, err := aggregatestore.NewSnapshottingStore(inner, snapshots, snapshotstore.EventCountSnapshotPolicy{})
-	if err != nil {
-		t.Fatalf("creating snapshotting lifecycle store: %v", err)
-	}
-
-	h := buildHarness(t, events, projections)
+	h := buildHarness(t, events, func(base aggregatestore.Store[lifecycle.State]) (aggregatestore.Store[lifecycle.State], error) {
+		return aggregatestore.NewSnapshottingStore(base, snapshots, snapshotstore.EventCountSnapshotPolicy{})
+	})
 	_, _, v2, done := promotedSecondVersion(t, h)
 
 	if err := h.orchestrator.SetRetirementPolicy(t.Context(), "orders", lifecycle.RetirementPolicyChange{
@@ -6717,7 +6796,7 @@ func TestRetire_SnapshotCannotWeakenThePolicy(t *testing.T) {
 		t.Fatalf("fixture: want the recorded policy to require the auditor, got %+v", truth.RetirementPolicy)
 	}
 
-	current, err := projections.Load(t.Context(), lifecycle.StreamUUID("orders"), nil)
+	current, err := h.projections.Load(t.Context(), lifecycle.StreamUUID("orders"), nil)
 	if err != nil {
 		t.Fatalf("loading the current version: %v", err)
 	}
@@ -6777,17 +6856,9 @@ func TestRetire_CacheMutationDuringRecheckCannotAmendTheReservation(t *testing.T
 
 	events := newEventStore(t)
 
-	inner, err := lifecycle.NewStore(events)
-	if err != nil {
-		t.Fatalf("creating lifecycle store: %v", err)
-	}
-
-	projections, err := aggregatestore.NewCachedStore(inner, newMemoryAggregateCache())
-	if err != nil {
-		t.Fatalf("creating cached lifecycle store: %v", err)
-	}
-
-	h := buildHarness(t, events, projections,
+	h := buildHarness(t, events, func(base aggregatestore.Store[lifecycle.State]) (aggregatestore.Store[lifecycle.State], error) {
+		return aggregatestore.NewCachedStore(base, newMemoryAggregateCache())
+	},
 		lifecycle.WithRetirementWitness("gate_a", stubWitness{cutover: live}),
 		lifecycle.WithRetirementWitness("gate_b", gateB),
 	)
@@ -6813,7 +6884,7 @@ func TestRetire_CacheMutationDuringRecheckCannotAmendTheReservation(t *testing.T
 	// The reservation is durable and its save republished the handle's state
 	// to the cache. Rewrite the required and captured membership through the
 	// cache entry while the recheck is paused between attestations.
-	tampered, err := projections.Load(t.Context(), lifecycle.StreamUUID("orders"), nil)
+	tampered, err := h.projections.Load(t.Context(), lifecycle.StreamUUID("orders"), nil)
 	if err != nil {
 		t.Fatalf("loading through the retained store: %v", err)
 	}
@@ -6891,12 +6962,7 @@ func reservationWindowHarness(t *testing.T, live lifecycle.Cutover) (*harness, *
 	events := newEventStore(t)
 	hooked := &injectingEventStore{Store: events}
 
-	projections, err := lifecycle.NewStore(events)
-	if err != nil {
-		t.Fatalf("creating lifecycle store: %v", err)
-	}
-
-	h := buildHarnessWithAuthority(t, events, hooked, projections,
+	h := buildHarnessWithLifecycleEvents(t, events, hooked, nil,
 		lifecycle.WithRetirementWitness("gate_a", stubWitness{cutover: live}),
 		lifecycle.WithRetirementWitness("gate_b", stubWitness{cutover: live}),
 	)
@@ -7126,17 +7192,9 @@ func TestGet_ReturnsDetachedState(t *testing.T) {
 
 	events := newEventStore(t)
 
-	inner, err := lifecycle.NewStore(events)
-	if err != nil {
-		t.Fatalf("creating lifecycle store: %v", err)
-	}
-
-	projections, err := aggregatestore.NewCachedStore(inner, newMemoryAggregateCache())
-	if err != nil {
-		t.Fatalf("creating cached lifecycle store: %v", err)
-	}
-
-	h := buildHarness(t, events, projections)
+	h := buildHarness(t, events, func(base aggregatestore.Store[lifecycle.State]) (aggregatestore.Store[lifecycle.State], error) {
+		return aggregatestore.NewCachedStore(base, newMemoryAggregateCache())
+	})
 	h.promoteFirstVersion()
 
 	if err := h.orchestrator.SetRetirementPolicy(t.Context(), "orders", lifecycle.RetirementPolicyChange{
@@ -7229,21 +7287,20 @@ func TestRetire_ReservationSaveFailureDestroysNothing(t *testing.T) {
 
 	events := newEventStore(t)
 
-	inner, err := lifecycle.NewStore(events)
-	if err != nil {
-		t.Fatalf("creating lifecycle store: %v", err)
-	}
-
-	projections := &refusingStore{Store: inner}
 	model := newReadModel()
 	checkpoints := cpmemory.NewCheckpointStore()
+
+	var projections *refusingStore
 
 	orchestrator, err := lifecycle.NewOrchestrator(lifecycle.Config{
 		Events:          events,
 		Checkpoints:     checkpoints,
 		Handler:         model.handler,
-		Projections:     projections,
 		LifecycleEvents: events,
+		DecorateProjections: func(base aggregatestore.Store[lifecycle.State]) (aggregatestore.Store[lifecycle.State], error) {
+			projections = &refusingStore{Store: base}
+			return projections, nil
+		},
 	},
 		lifecycle.WithProcessorOptions(processor.WithPollInterval(2*time.Millisecond)),
 		lifecycle.WithReconcileInterval(10*time.Millisecond),
@@ -7317,11 +7374,6 @@ func TestRetire_UnobservedReservationDestroysNothing(t *testing.T) {
 	events := newEventStore(t)
 	writer := &truncatingWriter{Store: events}
 
-	projections, err := lifecycle.NewStore(writer)
-	if err != nil {
-		t.Fatalf("creating lifecycle store: %v", err)
-	}
-
 	model := newReadModel()
 	checkpoints := cpmemory.NewCheckpointStore()
 
@@ -7329,8 +7381,7 @@ func TestRetire_UnobservedReservationDestroysNothing(t *testing.T) {
 		Events:          events,
 		Checkpoints:     checkpoints,
 		Handler:         model.handler,
-		Projections:     projections,
-		LifecycleEvents: events,
+		LifecycleEvents: writer,
 	},
 		lifecycle.WithProcessorOptions(processor.WithPollInterval(2*time.Millisecond)),
 		lifecycle.WithReconcileInterval(10*time.Millisecond),
@@ -7495,171 +7546,5 @@ func TestRetire_RetryCannotBeOverridden(t *testing.T) {
 
 	if err := waitDone(t, done); err != nil {
 		t.Errorf("want Run to return nil after the rebuild completes, got %v", err)
-	}
-}
-
-// TestSetRetirementPolicy_RefusesExhaustedGeneration pins the command-side
-// ceiling: at the final representable generation the transition is refused
-// outright instead of wrapping into an invalid lifecycle.
-func TestSetRetirementPolicy_RefusesExhaustedGeneration(t *testing.T) {
-	t.Parallel()
-
-	events, snapshots, _, _, orchestrator := newSnapshottingOrchestrator(t,
-		snapshotstore.EventCountSnapshotPolicy{})
-
-	if _, err := orchestrator.Begin(t.Context(), "orders", "exhaustion fixture"); err != nil {
-		t.Fatalf("beginning: %v", err)
-	}
-
-	// A structurally valid state at the generation ceiling, installed through
-	// the snapshot layer in the one composition that reaches it: a first
-	// attempt still in PhaseCreated, whose initiation plus MaxInt64-1
-	// recorded transitions fill the stream to aggregate version MaxInt64.
-	writeLifecycleSnapshot(t, snapshots, lifecycle.State{
-		Name:      "orders",
-		Allocated: 1,
-		Attempt: lifecycle.AttemptState{
-			ID:          uuid.Must(uuid.NewV4()),
-			Target:      projection.ID{Name: "orders", Version: 1},
-			Phase:       lifecycle.PhaseCreated,
-			Reason:      "exhaustion fixture",
-			InitiatedAt: time.Now(),
-		},
-		RetirementPolicy: lifecycle.RetirementPolicy{
-			Generation: math.MaxInt64 - 1,
-			Witnesses:  []string{"router"},
-		},
-	}, math.MaxInt64)
-
-	err := orchestrator.SetRetirementPolicy(t.Context(), "orders", lifecycle.RetirementPolicyChange{
-		Witnesses: []string{"router"}, Actor: "op", Reason: "one transition too many",
-	})
-	if err == nil || !strings.Contains(err.Error(), "exhausted") {
-		t.Fatalf("want the exhausted generation refused, got %v", err)
-	}
-
-	if got := countEventsOfType(t, events, lifecycle.RetirementPolicySet{}.EventType()); got != 0 {
-		t.Errorf("want no transition recorded at the ceiling, got %d", got)
-	}
-}
-
-// TestSetRetirementPolicy_RefusesExhaustedStreamVersion pins the version
-// dimension of exhaustion: the policy generation counts only its own
-// transitions, so a stream whose other events have carried the aggregate to
-// version MaxInt64 exhausts the append space while the generation sits below
-// its ceiling. The command must refuse at the version guard rather than let
-// the append arithmetic wrap.
-func TestSetRetirementPolicy_RefusesExhaustedStreamVersion(t *testing.T) {
-	t.Parallel()
-
-	events, snapshots, _, _, orchestrator := newSnapshottingOrchestrator(t,
-		snapshotstore.EventCountSnapshotPolicy{})
-
-	if _, err := orchestrator.Begin(t.Context(), "orders", "exhaustion fixture"); err != nil {
-		t.Fatalf("beginning: %v", err)
-	}
-
-	// A claimed first attempt still in PhaseCreated: the initiation, one
-	// runner claim, and MaxInt64-2 policy transitions fill the stream to
-	// aggregate version MaxInt64 with the generation one short of its
-	// ceiling, so only the version guard stands between the command and a
-	// wrapped append.
-	writeLifecycleSnapshot(t, snapshots, lifecycle.State{
-		Name:      "orders",
-		Allocated: 1,
-		Attempt: lifecycle.AttemptState{
-			ID:          uuid.Must(uuid.NewV4()),
-			Target:      projection.ID{Name: "orders", Version: 1},
-			Phase:       lifecycle.PhaseCreated,
-			Reason:      "exhaustion fixture",
-			InitiatedAt: time.Now(),
-			Runner:      uuid.Must(uuid.NewV4()),
-			ClaimedAt:   time.Now(),
-		},
-		RetirementPolicy: lifecycle.RetirementPolicy{
-			Generation: math.MaxInt64 - 2,
-			Witnesses:  []string{"router"},
-		},
-	}, math.MaxInt64)
-
-	err := orchestrator.SetRetirementPolicy(t.Context(), "orders", lifecycle.RetirementPolicyChange{
-		Witnesses: []string{"router"}, Actor: "op", Reason: "one event too many",
-	})
-	if err == nil || !strings.Contains(err.Error(), "aggregate versions end at") {
-		t.Fatalf("want the exhausted stream version refused, got %v", err)
-	}
-
-	if got := countEventsOfType(t, events, lifecycle.RetirementPolicySet{}.EventType()); got != 0 {
-		t.Errorf("want no transition recorded past the version space, got %d", got)
-	}
-}
-
-// TestSetRetirementPolicy_AcceptsTheFinalReachableTransition pins the
-// acceptance neighbor of both exhaustion guards: from generation MaxInt64-2
-// at aggregate version MaxInt64-1 — the initiation plus MaxInt64-2 recorded
-// transitions — the transition to the ceiling generation is admitted, and
-// its append lands in the stream's final slot.
-func TestSetRetirementPolicy_AcceptsTheFinalReachableTransition(t *testing.T) {
-	t.Parallel()
-
-	ceiling := &ceilingEventStore{}
-
-	inner, err := lifecycle.NewStore(ceiling)
-	if err != nil {
-		t.Fatalf("creating lifecycle store: %v", err)
-	}
-
-	snapshots := ssmemory.NewSnapshotStore()
-
-	projections, err := aggregatestore.NewSnapshottingStore(inner, snapshots, snapshotstore.EventCountSnapshotPolicy{})
-	if err != nil {
-		t.Fatalf("creating snapshotting lifecycle store: %v", err)
-	}
-
-	orchestrator, err := lifecycle.NewOrchestrator(lifecycle.Config{
-		Events:          newEventStore(t),
-		Checkpoints:     cpmemory.NewCheckpointStore(),
-		Handler:         newReadModel().handler,
-		Projections:     projections,
-		LifecycleEvents: ceiling,
-	})
-	if err != nil {
-		t.Fatalf("creating orchestrator: %v", err)
-	}
-
-	writeLifecycleSnapshot(t, snapshots, lifecycle.State{
-		Name:      "orders",
-		Allocated: 1,
-		Attempt: lifecycle.AttemptState{
-			ID:          uuid.Must(uuid.NewV4()),
-			Target:      projection.ID{Name: "orders", Version: 1},
-			Phase:       lifecycle.PhaseCreated,
-			Reason:      "ceiling fixture",
-			InitiatedAt: time.Now(),
-		},
-		RetirementPolicy: lifecycle.RetirementPolicy{
-			Generation: math.MaxInt64 - 2,
-			Witnesses:  []string{"router"},
-		},
-	}, math.MaxInt64-1)
-
-	if err := orchestrator.SetRetirementPolicy(t.Context(), "orders", lifecycle.RetirementPolicyChange{
-		Witnesses: []string{"router"}, Actor: "op", Reason: "the final transition",
-	}); err != nil {
-		t.Fatalf("want the final reachable transition admitted, got %v", err)
-	}
-
-	if len(ceiling.appended) != 1 || ceiling.expects[0] != math.MaxInt64-1 {
-		t.Fatalf("want one append into the final slot, got %d appends expecting %v",
-			len(ceiling.appended), ceiling.expects)
-	}
-
-	var recorded lifecycle.RetirementPolicySet
-	if err := json.Unmarshal(ceiling.appended[0].Data, &recorded); err != nil {
-		t.Fatalf("decoding the recorded transition: %v", err)
-	}
-
-	if recorded.Generation != math.MaxInt64-1 {
-		t.Errorf("want the ceiling generation recorded, got %d", recorded.Generation)
 	}
 }

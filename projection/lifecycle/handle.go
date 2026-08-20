@@ -212,16 +212,15 @@ func (r *Rebuild) Run(ctx context.Context) error {
 
 	r.ran = true
 
-	// Refresh before deciding: a stale handle would otherwise claim and
+	// Refold before deciding: a stale handle would otherwise claim and
 	// start a processor for an attempt that was since rolled back, abandoned,
 	// or retired — and a tailing processor appends nothing that would ever
-	// surface the conflict.
-	if err := r.orchestrator.config.Projections.Hydrate(ctx, r.aggregate, nil); err != nil {
-		r.mu.Unlock()
-		return fmt.Errorf("refreshing lifecycle state: %w", err)
-	}
-
-	if err := checkLifecycleAggregate(r.aggregate, r.name); err != nil {
+	// surface the conflict. The fold is event-only because the claim it
+	// authorizes binds the attempt identity and aims the build, its storage,
+	// and its checkpoint: a decorated view carrying a different history at
+	// the same version would pass the append's version arbitration while
+	// redirecting all of it.
+	if err := r.refoldLocked(ctx); err != nil {
 		r.mu.Unlock()
 		return err
 	}
@@ -795,14 +794,35 @@ func attributeExit(ctxErr error, returnedFirst bool, exitErr, local error) error
 	return errors.Join(exitErr, local)
 }
 
+// refoldLocked re-establishes the handle's state from an event-only fold of
+// the lifecycle stream, installing it in place of whatever view the handle
+// retained. Every command that appends lifecycle events or starts external
+// work calls this before deciding anything: the retained aggregate may
+// descend from a cache-served load — whose state can share memory with the
+// cache and with every caller the wired store served — or from snapshot
+// state installed in place of replay, and no version arithmetic
+// distinguishes a different history at the same version. The caller must
+// hold r.mu.
+func (r *Rebuild) refoldLocked(ctx context.Context) error {
+	loaded, err := r.hydrateFresh(ctx, 0)
+	if err != nil {
+		return fmt.Errorf("refreshing lifecycle state: %w", err)
+	}
+
+	r.aggregate = loaded
+
+	return checkLifecycleAggregate(r.aggregate, r.name)
+}
+
 // hydrateFresh reads the projection's lifecycle stream into a new aggregate,
-// to the given version or to the head when toVersion is 0. Verdicts about
-// what the stream records — reconciliation, claim recovery, defeat
-// classification, retirement authority — must come from the durable events,
-// so the fold runs through the orchestrator's event-only authority store:
-// the configured Projections store may serve a read-through cache entry
-// (aggregatestore.CachedStore) or install snapshot state in place of replay
-// (aggregatestore.SnapshottingStore), and neither is trusted here.
+// to the given version or to the head when toVersion is 0. Command entries
+// and verdicts about what the stream records — reconciliation, claim
+// recovery, defeat classification, retirement authority — must come from
+// the durable events, so the fold runs through the orchestrator's
+// event-only authority store: the decorated projection store may serve a
+// read-through cache entry (aggregatestore.CachedStore) or install snapshot
+// state in place of replay (aggregatestore.SnapshottingStore), and neither
+// is trusted here.
 func (r *Rebuild) hydrateFresh(ctx context.Context, toVersion int64) (*aggregatestore.Aggregate[State], error) {
 	var opts *aggregatestore.HydrateOptions
 	if toVersion > 0 {
@@ -997,6 +1017,12 @@ func (r *Rebuild) recordLostAppend(ctx context.Context, attemptID, runnerID uuid
 // resumed or read a caught-up rebuild must Run it, re-certifying against
 // the current head, before it can promote; the refusal wraps
 // ErrNotCertified.
+//
+// Promotion decides from no decorated view: the certificate is minted only
+// by a run on this handle, a run's entry installs an event-only fold, and
+// every input the flip records descends from that fold through this
+// handle's own appends — so the certificate protocol, not a refold, anchors
+// promotion to the events.
 func (r *Rebuild) Promote(ctx context.Context) error {
 	r.mu.Lock()
 
@@ -1121,7 +1147,7 @@ func (r *Rebuild) Promote(ctx context.Context) error {
 func (r *Rebuild) Rollback(ctx context.Context) error {
 	r.mu.Lock()
 
-	if err := checkLifecycleAggregate(r.aggregate, r.name); err != nil {
+	if err := r.refoldLocked(ctx); err != nil {
 		r.mu.Unlock()
 		return err
 	}
@@ -1188,7 +1214,7 @@ func (r *Rebuild) Rollback(ctx context.Context) error {
 func (r *Rebuild) Abandon(ctx context.Context, cause string) error {
 	r.mu.Lock()
 
-	if err := checkLifecycleAggregate(r.aggregate, r.name); err != nil {
+	if err := r.refoldLocked(ctx); err != nil {
 		r.mu.Unlock()
 		return err
 	}
@@ -1317,23 +1343,11 @@ func (r *Rebuild) Retire(ctx context.Context, opts ...RetireOption) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	// Re-establish authority from the durable fold before any destructive
-	// effect: the handle's aggregate may descend from a cache-served load —
-	// whose state can share memory with the cache and with every caller the
-	// wired store served — or from snapshot state installed in place of
-	// replay, so the membership and teardown target that govern destruction
-	// are refolded from the events themselves, never trusted from a retained
-	// or decorated view. The fresh fold also refreshes the common
-	// stale-handle case into a fast phase error; the reservation append
-	// remains the arbiter.
-	loaded, err := r.hydrateFresh(ctx, 0)
-	if err != nil {
-		return fmt.Errorf("refreshing lifecycle state: %w", err)
-	}
-
-	r.aggregate = loaded
-
-	if err := checkLifecycleAggregate(r.aggregate, r.name); err != nil {
+	// Re-establish authority before any destructive effect: the membership
+	// and teardown target that govern destruction come from the event-only
+	// fold. The fresh fold also refreshes the common stale-handle case into
+	// a fast phase error; the reservation append remains the arbiter.
+	if err := r.refoldLocked(ctx); err != nil {
 		return err
 	}
 
@@ -1597,7 +1611,7 @@ func (r *Rebuild) awaitProcessorStop(ctx context.Context) error {
 func (r *Rebuild) appendLocked(ctx context.Context, events ...estoria.DomainEvent[State]) error {
 	r.aggregate.Append(events...)
 
-	if err := r.orchestrator.config.Projections.Save(ctx, r.aggregate, nil); err != nil {
+	if err := r.orchestrator.projections.Save(ctx, r.aggregate, nil); err != nil {
 		// Discard the failed append: left queued, it would ride along with a
 		// later command's save and durably record both transitions. When the
 		// error carries ErrEventsAppended the events are durable regardless,
