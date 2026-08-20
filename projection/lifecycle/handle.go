@@ -151,12 +151,14 @@ func (r *Rebuild) Name() string {
 	return r.aggregate.State().Name
 }
 
-// State returns a snapshot of the projection's folded lifecycle state.
+// State returns a snapshot of the projection's folded lifecycle state,
+// detached from the handle: writing through it cannot alter what later
+// commands act on.
 func (r *Rebuild) State() State {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	return r.aggregate.State()
+	return r.aggregate.State().clone()
 }
 
 // Checkpoint returns the checkpoint of the version being built. Its recency
@@ -1252,8 +1254,10 @@ func WithRetirementOverride(actor, reason string) RetireOption {
 // delete run only after the reservation is durable; PreviousRetired records
 // completion, vacating the attempt slot. A Retire interrupted between
 // reservation and completion is repaired by calling Retire again — from
-// PhaseRetiring it skips the reservation and re-runs the contractually
-// idempotent teardown.
+// PhaseRetiring it skips the reservation and re-runs the teardown, which
+// the projection.Teardowner contract requires to be idempotent and
+// concurrent-safe: independent handles can repair the same retirement, and
+// nothing serializes their teardowns across processes.
 //
 // Destruction is gated on the durable retirement policy. Every witness the
 // policy requires is resolved from the orchestrator's registrations and
@@ -1264,7 +1268,8 @@ func WithRetirementOverride(actor, reason string) RetireOption {
 // unless the call carries an audited WithRetirementOverride; an explicitly
 // unwitnessed policy retires without attestation. A retry from
 // PhaseRetiring re-attests the membership the reservation captured, never
-// current process configuration.
+// current process configuration, and refuses an override: the reservation
+// records what authorized it, and a retry cannot amend that durably.
 //
 // Retiring a nonzero previous version requires its handler to implement
 // projection.Teardowner. The capability and the witness gate are resolved
@@ -1272,9 +1277,12 @@ func WithRetirementOverride(actor, reason string) RetireOption {
 // available — and the same resolved handler performs the teardown. The
 // previous version's steady-state processor must be stopped and joined
 // before Retire: teardown does not fence a running processor, and its
-// writes would race the removal. Read quiescence is what the witnesses
-// attest: a route still serving the version about to be destroyed cannot
-// vouch for the live cutover.
+// writes would race the removal. Witnesses attest route convergence — no
+// governed route still resolves new reads to the version about to be
+// destroyed — not read quiescence: reads already resolved against the
+// previous version are invisible here, and the caller retains the
+// obligation to drain them, or retain the storage they read, before
+// calling Retire.
 //
 // A first rebuild has no previous version, so there is nothing to tear down
 // and — rollback being impossible without a rollback target — nothing to
@@ -1348,6 +1356,10 @@ func (r *Rebuild) Retire(ctx context.Context, opts ...RetireOption) error {
 	var required []string
 
 	if state.Attempt.Phase == PhaseRetiring {
+		if config.override != (RetirementOverride{}) {
+			return fmt.Errorf("cannot retire %s: the retirement is already reserved; a retry re-attests the reservation's captured membership and cannot be overridden", previous)
+		}
+
 		required = state.Attempt.RetiringWitnesses
 	} else {
 		switch {
@@ -1407,8 +1419,11 @@ func (r *Rebuild) Retire(ctx context.Context, opts ...RetireOption) error {
 
 	// The checkpoint goes last, and only after the teardown succeeded: it is
 	// the durable marker that a build of this identity existed, so it must
-	// outlive any failure to remove the storage it marks.
-	if err := r.orchestrator.config.Checkpoints.Delete(ctx, previous); err != nil && !errors.Is(err, checkpointstore.ErrCheckpointNotFound) {
+	// outlive any failure to remove the storage it marks. Absence is benign
+	// only when it is the whole story — every leaf of the delete error must
+	// be the not-found sentinel, or an independent failure would launder
+	// through and completion would record over a surviving checkpoint.
+	if err := r.orchestrator.config.Checkpoints.Delete(ctx, previous); err != nil && !leavesMatch(err, checkpointstore.ErrCheckpointNotFound) {
 		return fmt.Errorf("deleting checkpoint for %s: %w", previous, err)
 	}
 

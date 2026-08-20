@@ -27,6 +27,7 @@ package lifecycle
 import (
 	"errors"
 	"fmt"
+	"slices"
 	"strconv"
 	"time"
 
@@ -230,6 +231,20 @@ func (a AttemptState) Vacant() bool {
 		len(a.RetiringWitnesses) == 0
 }
 
+// clone returns a State sharing no mutable memory with the receiver: the
+// slice-typed fields are deep-copied, so writing through a returned copy
+// cannot alter the state the fold owns. Every State that leaves the package
+// passes through here — retirement resolves its witnesses from the folded
+// policy and captured membership, so an aliased copy would let a caller
+// amend retirement authority without an event. TestStateClone sweeps State's
+// reference fields reflectively so a new one cannot silently escape.
+func (s State) clone() State {
+	s.Attempt.RetiringWitnesses = slices.Clone(s.Attempt.RetiringWitnesses)
+	s.RetirementPolicy.Witnesses = slices.Clone(s.RetirementPolicy.Witnesses)
+
+	return s
+}
+
 // NewState is the estoria.StateFactory for projection lifecycle aggregates.
 // State carries no copy of the stream UUID: the projection name, recorded by
 // the stream's first event, is the identity that matters.
@@ -424,6 +439,22 @@ func (s State) validateAttempt() error {
 
 	if err := invalidWitnessSet(a.RetiringWitnesses); err != nil {
 		return fmt.Errorf("captured retirement witnesses: %w", err)
+	}
+
+	// A capture testifies that a witnessed policy required exactly that set
+	// when the retirement was reserved. Generations only rise, so a capture
+	// with no policy ever recorded is unreachable, and under a sole recorded
+	// generation the active policy is the reservation's: it must be witnessed
+	// with the captured membership.
+	if len(a.RetiringWitnesses) != 0 {
+		switch {
+		case s.RetirementPolicy.Generation == 0:
+			return errors.New("captured retirement witnesses with no recorded policy")
+		case s.RetirementPolicy.Generation == 1 && s.RetirementPolicy.Unwitnessed:
+			return errors.New("captured retirement witnesses under a sole unwitnessed policy generation")
+		case s.RetirementPolicy.Generation == 1 && !slices.Equal(a.RetiringWitnesses, s.RetirementPolicy.Witnesses):
+			return errors.New("captured retirement witnesses diverge from the sole policy generation")
+		}
 	}
 
 	if a.ID.IsNil() {

@@ -77,7 +77,11 @@ type EventHandler interface {
 // version's predecessor requires the capability: the lifecycle orchestrator
 // discovers it by type assertion and refuses the retirement without it.
 // Teardown must be idempotent — tearing down storage that is already absent
-// must succeed — because retirement retries it after partial failures.
+// must succeed — because retirement retries it after partial failures, and
+// concurrent-safe for the same ID: retries run from whichever handles hold
+// the reserved retirement, nothing serializes them across processes, and
+// overlapping teardowns of the same version must not corrupt or fail
+// spuriously.
 type Teardowner interface {
 	Teardown(ctx context.Context, id ID) error
 }

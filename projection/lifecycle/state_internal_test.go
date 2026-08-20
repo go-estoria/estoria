@@ -746,6 +746,60 @@ func TestFold_PoisonBranches(t *testing.T) {
 			wantReason: "do not re-attest the captured witnesses",
 			applied:    func(*testing.T, State) {},
 		},
+		{
+			name:       "policy recorded before initialization",
+			prior:      State{},
+			event:      RetirementPolicySet{Generation: 1, Witnesses: []string{"router"}, Actor: "op", Reason: "gate", At: internalAt},
+			wantReason: "before lifecycle initialization",
+			applied: func(t *testing.T, got State) {
+				t.Helper()
+
+				if got.RetirementPolicy.Generation != 1 {
+					t.Errorf("want the transition applied as recorded, got %+v", got.RetirementPolicy)
+				}
+			},
+		},
+		{
+			name:       "policy generations exhausted",
+			prior:      withPolicy(State{Name: "orders", Live: ordersV6, CutoverRevision: 1, Allocated: 6}, math.MaxInt64, "router"),
+			event:      RetirementPolicySet{Generation: math.MinInt64, Witnesses: []string{"router"}, Actor: "op", Reason: "gate", At: internalAt},
+			wantReason: "generations are exhausted",
+			applied: func(t *testing.T, got State) {
+				t.Helper()
+
+				if got.RetirementPolicy.Generation != math.MinInt64 {
+					t.Errorf("want the transition applied as recorded, got %+v", got.RetirementPolicy)
+				}
+			},
+		},
+		{
+			name:       "retirement receipt attests the wrong witness",
+			prior:      withPolicy(stateInPhase(PhasePromoted), 1, "router"),
+			event:      RetireStarted{Retiring: ordersV6, PolicyGeneration: 1, Witnesses: []string{"router"}, Receipts: []WitnessReceipt{{Witness: "auditor", Cutover: Cutover{Live: ordersV7, Revision: 2}}}, At: internalAt},
+			wantReason: "do not attest the live cutover",
+			applied:    func(*testing.T, State) {},
+		},
+		{
+			name:       "overridden retirement records receipts",
+			prior:      stateInPhase(PhasePromoted),
+			event:      RetireStarted{Retiring: ordersV6, Override: RetirementOverride{Actor: "op", Reason: "emergency"}, Receipts: []WitnessReceipt{{Witness: "router", Cutover: Cutover{Live: ordersV7, Revision: 2}}}, At: internalAt},
+			wantReason: "overridden retirement records witnesses",
+			applied:    func(*testing.T, State) {},
+		},
+		{
+			name:       "unwitnessed retirement records receipts",
+			prior:      withUnwitnessedPolicy(stateInPhase(PhasePromoted), 1),
+			event:      RetireStarted{Retiring: ordersV6, PolicyGeneration: 1, Receipts: []WitnessReceipt{{Witness: "router", Cutover: Cutover{Live: ordersV7, Revision: 2}}}, At: internalAt},
+			wantReason: "unwitnessed retirement records witnesses",
+			applied:    func(*testing.T, State) {},
+		},
+		{
+			name:       "retirement override without a reason",
+			prior:      stateInPhase(PhasePromoted),
+			event:      RetireStarted{Retiring: ordersV6, Override: RetirementOverride{Actor: "op"}, At: internalAt},
+			wantReason: "override recorded without an actor and reason",
+			applied:    func(*testing.T, State) {},
+		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
@@ -1292,8 +1346,12 @@ func TestValidate_RetirementPolicyAndCapture(t *testing.T) {
 			state: withUnwitnessedPolicy(stateInPhase(PhasePromoted), 1),
 		},
 		{
-			name:  "captured witnesses in the retiring phase",
-			state: withCapturedWitnesses(stateInPhase(PhaseRetiring), "router"),
+			name:  "captured witnesses matching the sole policy generation",
+			state: withPolicy(withCapturedWitnesses(stateInPhase(PhaseRetiring), "router"), 1, "router"),
+		},
+		{
+			name:  "captured witnesses surviving a policy supersede",
+			state: withUnwitnessedPolicy(withCapturedWitnesses(stateInPhase(PhaseRetiring), "router"), 2),
 		},
 		{
 			name:    "policy content with no generation",
@@ -1347,6 +1405,21 @@ func TestValidate_RetirementPolicyAndCapture(t *testing.T) {
 			name:    "a non-canonical captured set",
 			state:   withCapturedWitnesses(stateInPhase(PhaseRetiring), "router", "auditor"),
 			wantErr: "captured retirement witnesses",
+		},
+		{
+			name:    "captured witnesses with no recorded policy",
+			state:   withCapturedWitnesses(stateInPhase(PhaseRetiring), "router"),
+			wantErr: "no recorded policy",
+		},
+		{
+			name:    "captured witnesses under a sole unwitnessed generation",
+			state:   withUnwitnessedPolicy(withCapturedWitnesses(stateInPhase(PhaseRetiring), "router"), 1),
+			wantErr: "sole unwitnessed policy generation",
+		},
+		{
+			name:    "captured witnesses diverging from the sole generation",
+			state:   withPolicy(withCapturedWitnesses(stateInPhase(PhaseRetiring), "auditor"), 1, "router"),
+			wantErr: "diverge from the sole policy generation",
 		},
 		{
 			name: "policy on an empty state",
@@ -1422,6 +1495,71 @@ func TestAttemptStateVacant(t *testing.T) {
 	}
 }
 
+// TestStateClone pins the detachment clone guarantees: writing through a
+// clone's slices leaves the receiver untouched, and a reflective sweep of
+// State's type tree fails on any reference-typed field the hand-written
+// clone does not sever — so a new slice, map, or pointer field cannot
+// silently re-alias state handed out at the package boundary.
+func TestStateClone(t *testing.T) {
+	t.Parallel()
+
+	t.Run("severs the witness slices", func(t *testing.T) {
+		t.Parallel()
+
+		original := withPolicy(withCapturedWitnesses(stateInPhase(PhaseRetiring), "router"), 1, "router")
+
+		mutated := original.clone()
+		mutated.RetirementPolicy.Witnesses[0] = "tampered"
+		mutated.Attempt.RetiringWitnesses[0] = "tampered"
+
+		if original.RetirementPolicy.Witnesses[0] != "router" {
+			t.Error("want the policy membership severed from the clone, got the write visible")
+		}
+
+		if original.Attempt.RetiringWitnesses[0] != "router" {
+			t.Error("want the captured membership severed from the clone, got the write visible")
+		}
+	})
+
+	t.Run("covers every reference field", func(t *testing.T) {
+		t.Parallel()
+
+		cloned := map[string]bool{
+			"Attempt.RetiringWitnesses":  true,
+			"RetirementPolicy.Witnesses": true,
+		}
+
+		var walk func(typ reflect.Type, path string)
+		walk = func(typ reflect.Type, path string) {
+			if typ == reflect.TypeFor[time.Time]() {
+				return // Opaque and immutable by convention; nothing to sever.
+			}
+
+			//nolint:exhaustive // The default arm covers every value kind; only reference kinds and containers matter here.
+			switch typ.Kind() {
+			case reflect.Slice, reflect.Map, reflect.Pointer, reflect.Chan, reflect.Func, reflect.Interface, reflect.UnsafePointer:
+				if !cloned[path] {
+					t.Errorf("field %s holds a reference clone does not sever: extend clone and this sweep together", path)
+				}
+			case reflect.Struct:
+				for field := range typ.Fields() {
+					name := field.Name
+					if path != "" {
+						name = path + "." + field.Name
+					}
+
+					walk(field.Type, name)
+				}
+			case reflect.Array:
+				walk(typ.Elem(), path)
+			default:
+			}
+		}
+
+		walk(reflect.TypeFor[State](), "")
+	})
+}
+
 // TestValidateSnapshotState_Contract pins the decode-boundary contract
 // directly, independent of what fallback replay would reconstruct: a
 // poisoned payload is accepted — it is valid testimony of a poisoned fold,
@@ -1488,6 +1626,8 @@ func TestValidateSnapshotState_Contract(t *testing.T) {
 		{name: "clean payload with policy content and no generation is rejected", state: withPolicy(stateInPhase(PhaseNone), 0, "router"), accept: false},
 		{name: "clean payload with captured witnesses outside retiring is rejected", state: withCapturedWitnesses(stateInPhase(PhasePromoted), "router"), accept: false},
 		{name: "witnessed retiring payload is accepted", state: withPolicy(withCapturedWitnesses(stateInPhase(PhaseRetiring), "router"), 1, "router"), accept: true},
+		{name: "clean payload with captured witnesses and no policy is rejected", state: withCapturedWitnesses(stateInPhase(PhaseRetiring), "router"), accept: false},
+		{name: "clean payload whose capture diverges from the sole generation is rejected", state: withPolicy(withCapturedWitnesses(stateInPhase(PhaseRetiring), "auditor"), 1, "router"), accept: false},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()

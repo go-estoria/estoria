@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"slices"
 	"time"
 
@@ -181,7 +182,7 @@ func (o *Orchestrator) Get(ctx context.Context, name string) (State, error) {
 		return State{}, err
 	}
 
-	return aggregate.State(), nil
+	return aggregate.State().clone(), nil
 }
 
 // SetRetirementPolicy records an audited transition of the named
@@ -215,8 +216,13 @@ func (o *Orchestrator) SetRetirementPolicy(ctx context.Context, name string, cha
 		return err
 	}
 
+	current := aggregate.State().RetirementPolicy.Generation
+	if current == math.MaxInt64 {
+		return fmt.Errorf("cannot record a retirement policy for projection %q: the policy generation is exhausted", name)
+	}
+
 	aggregate.Append(RetirementPolicySet{
-		Generation:  aggregate.State().RetirementPolicy.Generation + 1,
+		Generation:  current + 1,
 		Witnesses:   witnesses,
 		Unwitnessed: change.Unwitnessed,
 		Reason:      change.Reason,

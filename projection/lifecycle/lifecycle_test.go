@@ -368,6 +368,26 @@ func TestFold_WitnessedRetirement(t *testing.T) {
 	}
 }
 
+// TestFold_PolicyBeforeInitializationPoisons pins that a raw policy event on
+// an uninitialized stream cannot be laundered into a valid history by the
+// admission that follows it: the fold marks the premature policy at the
+// moment it applies, and no later event clears the mark.
+func TestFold_PolicyBeforeInitializationPoisons(t *testing.T) {
+	t.Parallel()
+
+	state := policySet().ApplyTo(lifecycle.State{})
+	state = lifecycle.RebuildInitiated{
+		Attempt: attemptID,
+		Target:  projection.ID{Name: "orders", Version: 1},
+		Reason:  "first build",
+		At:      initiatedAt,
+	}.ApplyTo(state)
+
+	if state.InvalidReason == "" {
+		t.Fatal("want the premature policy to poison the fold, got a clean state")
+	}
+}
+
 // TestFold_NeverReuseAfterRollback pins the allocation semantics: rolling v7
 // back to v6 reverts Live but not Allocated, so the next rebuild targets v8.
 func TestFold_NeverReuseAfterRollback(t *testing.T) {
@@ -453,6 +473,14 @@ func TestEvents_RoundTripJSON(t *testing.T) {
 				t.Fatalf("unmarshaling: %v", err)
 			}
 
+			// Payload identity, not just fold identity: the fold discards the
+			// audit fields — actors, reasons, overrides, receipts — so a codec
+			// dropping one would still fold identically. The stream is the
+			// audit record; the payload must survive verbatim.
+			if got := reflect.ValueOf(decoded).Elem().Interface(); !reflect.DeepEqual(got, event) {
+				t.Errorf("want the decoded payload identical to the original:\nwant %+v\ngot  %+v", event, got)
+			}
+
 			if got, want := decoded.ApplyTo(prior), event.ApplyTo(prior); !reflect.DeepEqual(got, want) {
 				t.Errorf("want the decoded event to fold identically:\nwant %+v\ngot  %+v", want, got)
 			}
@@ -533,8 +561,8 @@ func allEvents() []estoria.DomainEvent[lifecycle.State] {
 		lifecycle.RunnerClaimed{Attempt: attemptID, Runner: runnerID, FromPosition: 1_000, At: claimedAt},
 		lifecycle.BuildStarted{},
 		caughtUp(),
-		promoted(),
-		lifecycle.RolledBack{From: targetID, RevertedTo: previousID, At: promotedAt},
+		promotedUnderPolicy(),
+		lifecycle.RolledBack{From: targetID, RevertedTo: previousID, Revision: 3, At: promotedAt},
 		lifecycle.Abandoned{Cause: "handler bug discovered mid-replay"},
 		lifecycle.RetireStarted{
 			Retiring:         previousID,
