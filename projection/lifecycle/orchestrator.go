@@ -45,8 +45,19 @@ type Config struct {
 
 	// Projections is the aggregate store holding projection lifecycle
 	// aggregates. NewStore wires one; back it with the domain event store or
-	// with separate storage.
+	// with separate storage. Decorations such as caching
+	// (aggregatestore.CachedStore) or snapshotting
+	// (aggregatestore.SnapshottingStore) serve reads; verdicts that authorize
+	// destruction fold LifecycleEvents directly and never consult them.
 	Projections aggregatestore.Store[State]
+
+	// LifecycleEvents is the event store holding projection lifecycle
+	// streams: the same store Projections was wired over via NewStore.
+	// Destructive authority — which witnesses gate a retirement, and what a
+	// reservation captured — and every other verdict about what a lifecycle
+	// stream records are refolded from this store directly, so snapshot or
+	// cache decorations on Projections can never stand in for the events.
+	LifecycleEvents eventstore.Store
 }
 
 // An Orchestrator is a process manager for projection rebuilds: it loads a
@@ -65,6 +76,11 @@ type Orchestrator struct {
 	witnesses         map[string]RetirementWitness
 	log               estoria.Logger
 
+	// authority folds lifecycle streams directly from LifecycleEvents,
+	// bypassing whatever read decorations Projections carries: every verdict
+	// about what a stream records is derived through it.
+	authority aggregatestore.Store[State]
+
 	// optionErr collects invalid options for NewOrchestrator to report, so a
 	// nil logger or option fails construction instead of panicking at use.
 	optionErr error
@@ -81,6 +97,13 @@ func NewOrchestrator(config Config, opts ...OrchestratorOption) (*Orchestrator, 
 		return nil, errors.New("handler factory is required")
 	case config.Projections == nil:
 		return nil, errors.New("projection aggregate store is required")
+	case config.LifecycleEvents == nil:
+		return nil, errors.New("lifecycle event store is required")
+	}
+
+	authority, err := NewStore(config.LifecycleEvents)
+	if err != nil {
+		return nil, fmt.Errorf("wiring the lifecycle authority store: %w", err)
 	}
 
 	orchestrator := &Orchestrator{
@@ -88,6 +111,7 @@ func NewOrchestrator(config Config, opts ...OrchestratorOption) (*Orchestrator, 
 		reconcileInterval: DefaultReconcileInterval,
 		witnesses:         map[string]RetirementWitness{},
 		log:               estoria.GetLogger().WithGroup("lifecycle"),
+		authority:         authority,
 	}
 
 	for _, opt := range opts {

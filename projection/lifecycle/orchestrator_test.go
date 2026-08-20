@@ -73,15 +73,25 @@ func newEventStore(t *testing.T) *esmemory.EventStore {
 func buildHarness(t *testing.T, events *esmemory.EventStore, projections aggregatestore.Store[lifecycle.State], opts ...lifecycle.OrchestratorOption) *harness {
 	t.Helper()
 
+	return buildHarnessWithAuthority(t, events, events, projections, opts...)
+}
+
+// buildHarnessWithAuthority additionally separates the lifecycle authority
+// reads, so tests can interpose on the event-only folds every runtime
+// verdict derives from.
+func buildHarnessWithAuthority(t *testing.T, events *esmemory.EventStore, lifecycleEvents eventstore.Store, projections aggregatestore.Store[lifecycle.State], opts ...lifecycle.OrchestratorOption) *harness {
+	t.Helper()
+
 	checkpoints := cpmemory.NewCheckpointStore()
 	router := lifecycle.NewMemoryRouter()
 	model := newReadModel()
 
 	orchestrator, err := lifecycle.NewOrchestrator(lifecycle.Config{
-		Events:      events,
-		Checkpoints: checkpoints,
-		Handler:     model.handler,
-		Projections: projections,
+		Events:          events,
+		Checkpoints:     checkpoints,
+		Handler:         model.handler,
+		Projections:     projections,
+		LifecycleEvents: lifecycleEvents,
 	}, append([]lifecycle.OrchestratorOption{
 		lifecycle.WithProcessorOptions(processor.WithPollInterval(2 * time.Millisecond)),
 		lifecycle.WithReconcileInterval(10 * time.Millisecond),
@@ -118,10 +128,11 @@ func bareOrchestrator(t *testing.T, events *esmemory.EventStore, checkpoints che
 	}
 
 	orchestrator, err := lifecycle.NewOrchestrator(lifecycle.Config{
-		Events:      events,
-		Checkpoints: checkpoints,
-		Handler:     handler,
-		Projections: projections,
+		Events:          events,
+		Checkpoints:     checkpoints,
+		Handler:         handler,
+		Projections:     projections,
+		LifecycleEvents: events,
 	},
 		lifecycle.WithProcessorOptions(processor.WithPollInterval(2*time.Millisecond)),
 		lifecycle.WithReconcileInterval(10*time.Millisecond),
@@ -1018,10 +1029,11 @@ func TestRetire_CompletionFailureIsRepairableAfterTeardown(t *testing.T) {
 	checkpoints := cpmemory.NewCheckpointStore()
 
 	orchestrator, err := lifecycle.NewOrchestrator(lifecycle.Config{
-		Events:      events,
-		Checkpoints: checkpoints,
-		Handler:     factory.handler,
-		Projections: projections,
+		Events:          events,
+		Checkpoints:     checkpoints,
+		Handler:         factory.handler,
+		Projections:     projections,
+		LifecycleEvents: events,
 	},
 		lifecycle.WithProcessorOptions(processor.WithPollInterval(2*time.Millisecond)),
 		lifecycle.WithReconcileInterval(10*time.Millisecond),
@@ -1767,10 +1779,11 @@ func TestRun_RecertifiesCaughtUpAttempt(t *testing.T) {
 	// rebuild; entering at caught-up must re-certify against the current
 	// head before promoting.
 	auto, err := lifecycle.NewOrchestrator(lifecycle.Config{
-		Events:      h.events,
-		Checkpoints: h.checkpoints,
-		Handler:     h.model.handler,
-		Projections: h.projections,
+		Events:          h.events,
+		Checkpoints:     h.checkpoints,
+		Handler:         h.model.handler,
+		Projections:     h.projections,
+		LifecycleEvents: h.events,
 	},
 		lifecycle.WithAutoPromote(true),
 		lifecycle.WithProcessorOptions(processor.WithPollInterval(2*time.Millisecond)),
@@ -2034,8 +2047,8 @@ func TestRun_UnobservedClaimRefusedWhenSuperseded(t *testing.T) {
 		t.Fatalf("creating lifecycle store: %v", err)
 	}
 
-	projections := &interceptingStore{Store: inner}
-	h := buildHarness(t, events, projections, lifecycle.WithReconcileInterval(time.Hour))
+	authority := &interceptingEventStore{Store: events}
+	h := buildHarnessWithAuthority(t, events, authority, inner, lifecycle.WithReconcileInterval(time.Hour))
 	h.appendDomain(3)
 	h.model.armGate()
 
@@ -2057,12 +2070,12 @@ func TestRun_UnobservedClaimRefusedWhenSuperseded(t *testing.T) {
 
 	// The resumed run's claim append is truncated — durable but unobserved —
 	// and a competing claim lands before the recovery reload observes it:
-	// the reload is the second wrapper-level hydrate, after the entry
-	// refresh.
+	// the entry refresh stays on the wired projections store, so the reload
+	// is the first authority-level read.
 	attemptID := resumed.State().Attempt.ID
 
 	writer.armFailure()
-	projections.armHydrateBefore(1, func(ctx context.Context) error {
+	authority.armHydrateBefore(func(ctx context.Context) error {
 		competing, err := json.Marshal(lifecycle.RunnerClaimed{
 			Attempt: attemptID,
 			Runner:  uuid.Must(uuid.NewV4()),
@@ -2114,18 +2127,18 @@ func TestRun_ClaimRecoveryFailurePreservesEventsAppended(t *testing.T) {
 		t.Fatalf("creating lifecycle store: %v", err)
 	}
 
-	projections := &interceptingStore{Store: inner}
-	h := buildHarness(t, events, projections)
+	authority := &interceptingEventStore{Store: events}
+	h := buildHarnessWithAuthority(t, events, authority, inner)
 	h.appendDomain(3)
 
 	r := h.begin("recovery load will fail")
 
 	errRecovery := errors.New("recovery load refused")
 
-	// The entry refresh is the first wrapper-level hydrate; the recovery
-	// reload is the second, and it fails.
+	// The entry refresh stays on the wired projections store, so the
+	// recovery reload is the first authority-level read, and it fails.
 	writer.armFailure()
-	projections.armHydrateIntercept(1, func(context.Context) error { return errRecovery })
+	authority.armHydrateIntercept(func(context.Context) error { return errRecovery })
 
 	runErr := r.Run(t.Context())
 
@@ -2278,8 +2291,8 @@ func TestRun_LostCatchUpDisplacementSurvivesReconciledEnd(t *testing.T) {
 		t.Fatalf("creating lifecycle store: %v", err)
 	}
 
-	projections := &interceptingStore{Store: inner}
-	h := buildHarness(t, events, projections)
+	authority := &interceptingEventStore{Store: events}
+	h := buildHarnessWithAuthority(t, events, authority, inner)
 	h.appendDomain(3)
 	h.model.armGate()
 
@@ -2291,7 +2304,7 @@ func TestRun_LostCatchUpDisplacementSurvivesReconciledEnd(t *testing.T) {
 	// unparked tick can observe the terminal events below early and end the
 	// run before its CaughtUp ever contends.
 	release1 := make(chan struct{})
-	entered1 := projections.armHydrateAfter(func(ctx context.Context) error {
+	entered1 := authority.armHydrateAfter(func(ctx context.Context) error {
 		select {
 		case <-release1:
 		case <-ctx.Done():
@@ -2317,13 +2330,13 @@ func TestRun_LostCatchUpDisplacementSurvivesReconciledEnd(t *testing.T) {
 	})
 	appendRawLifecycleEvent(t, events, lifecycle.Abandoned{Cause: "the winning claimant gave up"})
 
-	entered2 := projections.armHydrateAfter(func(ctx context.Context) error {
+	entered2 := authority.armHydrateAfter(func(ctx context.Context) error {
 		<-ctx.Done()
 		return nil
 	})
 
 	release := make(chan struct{})
-	classifying := projections.armVersionedHydrateBefore(func(ctx context.Context) error {
+	classifying := authority.armVersionedHydrateBefore(func(ctx context.Context) error {
 		select {
 		case <-release:
 		case <-ctx.Done():
@@ -2865,8 +2878,8 @@ func TestAbandon_CompletesWhileReconcileLoadBlocked(t *testing.T) {
 		t.Fatalf("creating lifecycle store: %v", err)
 	}
 
-	projections := &interceptingStore{Store: inner}
-	h := buildHarness(t, events, projections)
+	authority := &interceptingEventStore{Store: events}
+	h := buildHarnessWithAuthority(t, events, authority, inner)
 	h.appendDomain(3)
 	h.model.armGate()
 
@@ -2874,7 +2887,7 @@ func TestAbandon_CompletesWhileReconcileLoadBlocked(t *testing.T) {
 	_, done := runAsync(t, r)
 	waitPhase(t, r, lifecycle.PhaseBuilding)
 
-	entered := projections.armHydrateIntercept(0, func(ctx context.Context) error {
+	entered := authority.armHydrateIntercept(func(ctx context.Context) error {
 		<-ctx.Done()
 		return ctx.Err()
 	})
@@ -3013,8 +3026,8 @@ func TestReconcile_StaleReadDoesNotOverwriteCertifiedState(t *testing.T) {
 		t.Fatalf("creating lifecycle store: %v", err)
 	}
 
-	projections := &interceptingStore{Store: inner}
-	h := buildHarness(t, events, projections)
+	authority := &interceptingEventStore{Store: events}
+	h := buildHarnessWithAuthority(t, events, authority, inner)
 	h.appendDomain(3)
 	h.model.armGate()
 
@@ -3025,7 +3038,7 @@ func TestReconcile_StaleReadDoesNotOverwriteCertifiedState(t *testing.T) {
 	// The next reconcile tick reads the pre-catch-up fold, then parks before
 	// returning it.
 	release1 := make(chan struct{})
-	entered1 := projections.armHydrateAfter(func(ctx context.Context) error {
+	entered1 := authority.armHydrateAfter(func(ctx context.Context) error {
 		select {
 		case <-release1:
 		case <-ctx.Done():
@@ -3043,7 +3056,7 @@ func TestReconcile_StaleReadDoesNotOverwriteCertifiedState(t *testing.T) {
 	// Pre-arm the tick after it, so the promotion below runs strictly
 	// between the stale view's verdict and any fresher read.
 	release2 := make(chan struct{})
-	entered2 := projections.armHydrateAfter(func(ctx context.Context) error {
+	entered2 := authority.armHydrateAfter(func(ctx context.Context) error {
 		select {
 		case <-release2:
 		case <-ctx.Done():
@@ -3449,10 +3462,11 @@ func TestSeparateLifecycleStore(t *testing.T) {
 	model := newReadModel()
 
 	orchestrator, err := lifecycle.NewOrchestrator(lifecycle.Config{
-		Events:      domainEvents,
-		Checkpoints: checkpoints,
-		Handler:     model.handler,
-		Projections: projections,
+		Events:          domainEvents,
+		Checkpoints:     checkpoints,
+		Handler:         model.handler,
+		Projections:     projections,
+		LifecycleEvents: lifecycleEvents,
 	},
 		lifecycle.WithAutoPromote(true),
 		lifecycle.WithProcessorOptions(processor.WithPollInterval(2*time.Millisecond)),
@@ -3592,10 +3606,11 @@ func TestNewOrchestrator_RejectsInvalidOptions(t *testing.T) {
 
 	model := newReadModel()
 	config := lifecycle.Config{
-		Events:      events,
-		Checkpoints: cpmemory.NewCheckpointStore(),
-		Handler:     model.handler,
-		Projections: projections,
+		Events:          events,
+		Checkpoints:     cpmemory.NewCheckpointStore(),
+		Handler:         model.handler,
+		Projections:     projections,
+		LifecycleEvents: events,
 	}
 
 	for _, tt := range []struct {
@@ -3623,10 +3638,11 @@ func TestNewOrchestrator_Validation(t *testing.T) {
 
 	h := newHarness(t)
 	valid := lifecycle.Config{
-		Events:      h.events,
-		Checkpoints: h.checkpoints,
-		Handler:     h.model.handler,
-		Projections: h.projections,
+		Events:          h.events,
+		Checkpoints:     h.checkpoints,
+		Handler:         h.model.handler,
+		Projections:     h.projections,
+		LifecycleEvents: h.events,
 	}
 
 	for _, tt := range []struct {
@@ -3637,6 +3653,7 @@ func TestNewOrchestrator_Validation(t *testing.T) {
 		{"rejects a nil checkpoint store", func(c *lifecycle.Config) { c.Checkpoints = nil }},
 		{"rejects a nil handler factory", func(c *lifecycle.Config) { c.Handler = nil }},
 		{"rejects a nil projection store", func(c *lifecycle.Config) { c.Projections = nil }},
+		{"rejects a nil lifecycle event store", func(c *lifecycle.Config) { c.LifecycleEvents = nil }},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
@@ -3649,6 +3666,16 @@ func TestNewOrchestrator_Validation(t *testing.T) {
 			}
 		})
 	}
+
+	// The control: the unmutated config constructs, so each rejection above
+	// is attributable to its own mutation.
+	t.Run("accepts a complete config", func(t *testing.T) {
+		t.Parallel()
+
+		if _, err := lifecycle.NewOrchestrator(valid); err != nil {
+			t.Errorf("want the complete config accepted, got %v", err)
+		}
+	})
 }
 
 // ordersLifecycleStreamID is the typeid of the "orders" projection's
@@ -3682,10 +3709,11 @@ func newSnapshottingOrchestrator(t *testing.T, policy aggregatestore.SnapshotPol
 	model := newReadModel()
 
 	orchestrator, err := lifecycle.NewOrchestrator(lifecycle.Config{
-		Events:      events,
-		Checkpoints: cpmemory.NewCheckpointStore(),
-		Handler:     model.handler,
-		Projections: projections,
+		Events:          events,
+		Checkpoints:     cpmemory.NewCheckpointStore(),
+		Handler:         model.handler,
+		Projections:     projections,
+		LifecycleEvents: events,
 	},
 		lifecycle.WithProcessorOptions(processor.WithPollInterval(2*time.Millisecond)),
 		lifecycle.WithReconcileInterval(10*time.Millisecond),
@@ -4184,23 +4212,24 @@ func writeLifecycleSnapshot(t *testing.T, snapshots *ssmemory.SnapshotStore, sta
 	}
 }
 
-// TestRetainedHandle_RefusesForeignStateViaSnapshot pins that Run, Retire,
-// and the reconcile loop check hydrated state against the handle's immutable
-// address, not just against the state's own invariants. Foreign state
-// arrives through the snapshot layer as structurally valid — the fold never
-// sees it, so nothing poisons — and a check that only ran State validation
-// would accept it and aim commands at another projection's storage.
-func TestRetainedHandle_RefusesForeignStateViaSnapshot(t *testing.T) {
+// TestForeignStateViaSnapshot pins how each surface treats structurally
+// valid foreign state arriving through the snapshot layer. Reads consult the
+// snapshot and must refuse state that fails the handle's immutable address —
+// the fold never saw it, so nothing poisons, and a check reduced to State
+// validation would accept it. Execution verdicts — Retire's authority, the
+// reconcile loop, promotion — fold the lifecycle events directly, so the
+// foreign snapshot never governs them at all: commands act on the true
+// state, and nothing is ever aimed at another projection's storage.
+func TestForeignStateViaSnapshot(t *testing.T) {
 	t.Parallel()
 
-	t.Run("run refused", func(t *testing.T) {
+	t.Run("resume refuses at the read boundary", func(t *testing.T) {
 		t.Parallel()
 
-		events, snapshots, _, _, orchestrator := newSnapshottingOrchestrator(t,
+		_, snapshots, _, _, orchestrator := newSnapshottingOrchestrator(t,
 			snapshotstore.EventCountSnapshotPolicy{})
 
-		r, err := orchestrator.Begin(t.Context(), "orders", "to be hijacked")
-		if err != nil {
+		if _, err := orchestrator.Begin(t.Context(), "orders", "to be hijacked"); err != nil {
 			t.Fatalf("beginning: %v", err)
 		}
 
@@ -4208,18 +4237,12 @@ func TestRetainedHandle_RefusesForeignStateViaSnapshot(t *testing.T) {
 		// 1 leaves no tail to fold.
 		writeLifecycleSnapshot(t, snapshots, foreignLifecycleState(), 1)
 
-		_, done := runAsync(t, r)
-
-		if err := waitDone(t, done); !errors.Is(err, lifecycle.ErrInvalidState) {
-			t.Fatalf("want Run refused with ErrInvalidState on foreign state, got %v", err)
-		}
-
-		if got := countEventsOfType(t, events, lifecycle.BuildStarted{}.EventType()); got != 0 {
-			t.Errorf("want no transition recorded through foreign state, got %d", got)
+		if _, err := orchestrator.Resume(t.Context(), "orders"); !errors.Is(err, lifecycle.ErrInvalidState) {
+			t.Fatalf("want Resume refused with ErrInvalidState on foreign state, got %v", err)
 		}
 	})
 
-	t.Run("retire refused", func(t *testing.T) {
+	t.Run("retire consults only the events", func(t *testing.T) {
 		t.Parallel()
 
 		events, snapshots, _, model, orchestrator := newSnapshottingOrchestrator(t,
@@ -4231,11 +4254,15 @@ func TestRetainedHandle_RefusesForeignStateViaSnapshot(t *testing.T) {
 		}
 
 		// Structurally valid, promoted, with a nonzero previous: exactly the
-		// shape whose retirement would tear down another projection's storage.
+		// shape whose retirement would tear down another projection's
+		// storage, were it consulted. The refusal must instead name the true
+		// state's phase — the event fold holds a first attempt still in
+		// PhaseCreated.
 		writeLifecycleSnapshot(t, snapshots, foreignLifecycleState(), 1)
 
-		if err := r.Retire(t.Context()); !errors.Is(err, lifecycle.ErrInvalidState) {
-			t.Fatalf("want Retire refused with ErrInvalidState on foreign state, got %v", err)
+		err = r.Retire(t.Context())
+		if err == nil || !strings.Contains(err.Error(), "rebuild that is created") {
+			t.Fatalf("want Retire acting on the true created phase, got %v", err)
 		}
 
 		if dropped := model.droppedTables(); len(dropped) != 0 {
@@ -4247,7 +4274,7 @@ func TestRetainedHandle_RefusesForeignStateViaSnapshot(t *testing.T) {
 		}
 	})
 
-	t.Run("reconcile fails closed", func(t *testing.T) {
+	t.Run("a running rebuild never consults it", func(t *testing.T) {
 		t.Parallel()
 
 		events, snapshots, _, _, orchestrator := newSnapshottingOrchestrator(t,
@@ -4264,15 +4291,27 @@ func TestRetainedHandle_RefusesForeignStateViaSnapshot(t *testing.T) {
 		waitPhase(t, r, lifecycle.PhaseCaughtUp)
 
 		// The stream holds admission, claim, start, and catch-up; a snapshot
-		// at version 4 covers all of it, so the next reconcile hydration
-		// installs the foreign state with no tail to fold. The foreign
-		// attempt ID also differs from the running one, so a check reduced
-		// to State validation would classify this as an ordinary benign
-		// wind-down instead of failing closed.
+		// at version 4 covers all of it, so a hydration that consulted the
+		// snapshot layer would install the foreign state with no tail to
+		// fold. Reconciliation and the completion protocol fold the events
+		// directly, so the rebuild promotes and completes as if the foreign
+		// snapshot did not exist.
 		writeLifecycleSnapshot(t, snapshots, foreignLifecycleState(), 4)
 
-		if err := waitDone(t, done); !errors.Is(err, lifecycle.ErrInvalidState) {
-			t.Errorf("want Run to fail closed with ErrInvalidState via reconciliation, got %v", err)
+		if err := r.Promote(t.Context()); err != nil {
+			t.Fatalf("promoting past the foreign snapshot: %v", err)
+		}
+
+		if err := r.Retire(t.Context()); err != nil {
+			t.Fatalf("completing past the foreign snapshot: %v", err)
+		}
+
+		if err := waitDone(t, done); err != nil {
+			t.Errorf("want Run to return nil after the completion, got %v", err)
+		}
+
+		if got := r.State().Live; got != (projection.ID{Name: "orders", Version: 1}) {
+			t.Errorf("want the true rebuild live, got %s", got)
 		}
 	})
 }
@@ -4558,8 +4597,8 @@ func TestRun_ProcessorFailureSurfacesDespiteHeldReconcile(t *testing.T) {
 		t.Fatalf("creating lifecycle store: %v", err)
 	}
 
-	projections := &interceptingStore{Store: inner}
-	h := buildHarness(t, events, projections)
+	authority := &interceptingEventStore{Store: events}
+	h := buildHarnessWithAuthority(t, events, authority, inner)
 	h.appendDomain(3)
 
 	r := h.begin("processor failure under a held reconciliation")
@@ -4569,7 +4608,7 @@ func TestRun_ProcessorFailureSurfacesDespiteHeldReconcile(t *testing.T) {
 
 	// The next reconcile load parks inside the store, releasing only when
 	// the run's wind-down cancels it.
-	entered := projections.armHydrateIntercept(0, func(ctx context.Context) error {
+	entered := authority.armHydrateIntercept(func(ctx context.Context) error {
 		<-ctx.Done()
 		return ctx.Err()
 	})
@@ -4613,8 +4652,8 @@ func TestRun_HydrationFailureNotLaunderedByCancellation(t *testing.T) {
 		t.Fatalf("creating lifecycle store: %v", err)
 	}
 
-	projections := &interceptingStore{Store: inner}
-	h := buildHarness(t, events, projections)
+	authority := &interceptingEventStore{Store: events}
+	h := buildHarnessWithAuthority(t, events, authority, inner)
 	h.appendDomain(3)
 
 	r := h.begin("failure racing cancellation")
@@ -4626,7 +4665,7 @@ func TestRun_HydrationFailureNotLaunderedByCancellation(t *testing.T) {
 	// land, and then fails with a distinct error: the exact race the
 	// discrimination must not launder.
 	errWindDown := errors.New("store failure during wind-down")
-	entered := projections.armHydrateIntercept(0, func(ctx context.Context) error {
+	entered := authority.armHydrateIntercept(func(ctx context.Context) error {
 		cancel()
 		<-ctx.Done()
 
@@ -4659,8 +4698,8 @@ func TestRun_CancellationDuringCatchUpSurfacesRecordedFailure(t *testing.T) {
 		t.Fatalf("creating lifecycle store: %v", err)
 	}
 
-	projections := &interceptingStore{Store: inner}
-	h := buildHarness(t, events, projections)
+	authority := &interceptingEventStore{Store: events}
+	h := buildHarnessWithAuthority(t, events, authority, inner)
 
 	// The gate holds the build mid-replay, so the run is still catching up
 	// when the failure and the cancellation race.
@@ -4673,7 +4712,7 @@ func TestRun_CancellationDuringCatchUpSurfacesRecordedFailure(t *testing.T) {
 	waitPhase(t, r, lifecycle.PhaseBuilding)
 
 	errWindDown := errors.New("store failure during wind-down")
-	entered := projections.armHydrateIntercept(0, func(ctx context.Context) error {
+	entered := authority.armHydrateIntercept(func(ctx context.Context) error {
 		cancel()
 		<-ctx.Done()
 
@@ -4706,8 +4745,8 @@ func TestRun_JoinedCancellationDoesNotLaunderFailure(t *testing.T) {
 		t.Fatalf("creating lifecycle store: %v", err)
 	}
 
-	projections := &interceptingStore{Store: inner}
-	h := buildHarness(t, events, projections)
+	authority := &interceptingEventStore{Store: events}
+	h := buildHarnessWithAuthority(t, events, authority, inner)
 	h.appendDomain(3)
 
 	r := h.begin("joined failure racing cancellation")
@@ -4716,7 +4755,7 @@ func TestRun_JoinedCancellationDoesNotLaunderFailure(t *testing.T) {
 	waitPhase(t, r, lifecycle.PhaseCaughtUp)
 
 	errStoreFailure := errors.New("store failure joined to the cancellation")
-	entered := projections.armHydrateIntercept(0, func(ctx context.Context) error {
+	entered := authority.armHydrateIntercept(func(ctx context.Context) error {
 		cancel()
 		<-ctx.Done()
 
@@ -4750,8 +4789,8 @@ func TestRun_ProcessorFailureDuringCatchUpSurfacesDespiteHeldReconcile(t *testin
 		t.Fatalf("creating lifecycle store: %v", err)
 	}
 
-	projections := &interceptingStore{Store: inner}
-	h := buildHarness(t, events, projections)
+	authority := &interceptingEventStore{Store: events}
+	h := buildHarnessWithAuthority(t, events, authority, inner)
 
 	// The gate holds the build mid-replay: the run never reaches catch-up.
 	h.model.armGate()
@@ -4762,7 +4801,7 @@ func TestRun_ProcessorFailureDuringCatchUpSurfacesDespiteHeldReconcile(t *testin
 	_, done := runAsync(t, r)
 	waitPhase(t, r, lifecycle.PhaseBuilding)
 
-	entered := projections.armHydrateIntercept(0, func(ctx context.Context) error {
+	entered := authority.armHydrateIntercept(func(ctx context.Context) error {
 		<-ctx.Done()
 		return ctx.Err()
 	})
@@ -5034,28 +5073,22 @@ func (s *refusingStore) Save(ctx context.Context, aggregate *aggregatestore.Aggr
 	return s.Store.Save(ctx, aggregate, opts)
 }
 
-// interceptingStore delegates and, when armed, runs the configured function
-// in place of the next Load call, signaling entry and then disarming. Tests
-// use it to park the reconcile loop inside its fresh load or to fail one
-// deterministically at a chosen moment. A before-hook variant runs a
-// function ahead of a delegated Load instead of replacing it, after a
-// configured number of pass-through calls, so tests can land competing
-// events at the exact moment a reload begins.
-// interceptingStore delegates and lets tests hook the wrapper-level Hydrate —
-// the read every runtime verdict flows through: the entry refresh, the
-// reconcile loop's fresh view, claim recovery, and defeat classification. A
-// hook fires once, after a configured number of untouched calls: replacing
-// the hydrate, running ahead of it, or running after the inner hydrate
-// completed but before the call returns.
-type interceptingStore struct {
-	aggregatestore.Store[lifecycle.State]
+// interceptingEventStore delegates and lets tests hook the authority-level
+// stream read every runtime verdict flows through — the entry refresh, the
+// reconcile loop's fresh view, claim recovery, defeat classification, and
+// retirement authority each hydrate through exactly one read of the
+// lifecycle stream. A hook fires once, after a configured number of
+// untouched calls: replacing the read, running ahead of it, or running
+// after the inner read returned its frozen view but before the fold
+// consumes it. Versioned hydrates — the defeat-classification read, the
+// only one that bounds its version — arrive with a positive event count.
+type interceptingEventStore struct {
+	eventstore.Store
 
 	mu             sync.Mutex
 	replace        func(context.Context) error
-	replaceSkip    int
 	replaceEntered chan struct{}
 	before         func(context.Context) error
-	beforeSkip     int
 	after          func(context.Context) error
 	afterEntered   chan struct{}
 
@@ -5063,36 +5096,33 @@ type interceptingStore struct {
 	versionedBeforeEntered chan struct{}
 }
 
-// armHydrateIntercept arms fn to run in place of a Hydrate call — which
-// fails with fn's result — after skip calls pass through untouched; the
-// returned channel closes when the intercepted call begins.
-func (s *interceptingStore) armHydrateIntercept(skip int, fn func(context.Context) error) <-chan struct{} {
+// armHydrateIntercept arms fn to run in place of the next authority read —
+// which fails with fn's result; the returned channel closes when the
+// intercepted read begins.
+func (s *interceptingEventStore) armHydrateIntercept(fn func(context.Context) error) <-chan struct{} {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	s.replace = fn
-	s.replaceSkip = skip
 	s.replaceEntered = make(chan struct{})
 
 	return s.replaceEntered
 }
 
-// armHydrateBefore arms fn to run ahead of a delegated Hydrate: skip calls
-// pass through untouched, then the next call runs fn, disarms, and hydrates
-// for real.
-func (s *interceptingStore) armHydrateBefore(skip int, fn func(context.Context) error) {
+// armHydrateBefore arms fn to run ahead of the next delegated authority
+// read: the read then disarms the hook and proceeds for real.
+func (s *interceptingEventStore) armHydrateBefore(fn func(context.Context) error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	s.before = fn
-	s.beforeSkip = skip
 }
 
 // armHydrateAfter arms fn to run after the next delegated Hydrate completes,
 // before the call returns; the returned channel closes when fn begins — the
 // inner hydrate's view is settled by then, so a parked fn holds exactly that
 // view open.
-func (s *interceptingStore) armHydrateAfter(fn func(context.Context) error) <-chan struct{} {
+func (s *interceptingEventStore) armHydrateAfter(fn func(context.Context) error) <-chan struct{} {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -5107,7 +5137,7 @@ func (s *interceptingStore) armHydrateAfter(fn func(context.Context) error) <-ch
 // versioned read the handle performs — leaving the unversioned reconcile,
 // entry, and recovery hydrates untouched; the returned channel closes when
 // fn begins.
-func (s *interceptingStore) armVersionedHydrateBefore(fn func(context.Context) error) <-chan struct{} {
+func (s *interceptingEventStore) armVersionedHydrateBefore(fn func(context.Context) error) <-chan struct{} {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -5117,8 +5147,8 @@ func (s *interceptingStore) armVersionedHydrateBefore(fn func(context.Context) e
 	return s.versionedBeforeEntered
 }
 
-func (s *interceptingStore) Hydrate(ctx context.Context, aggregate *aggregatestore.Aggregate[lifecycle.State], opts *aggregatestore.HydrateOptions) error {
-	versioned := opts != nil && opts.ToVersion > 0
+func (s *interceptingEventStore) ReadStream(ctx context.Context, streamID typeid.ID, opts eventstore.ReadStreamOptions) (eventstore.StreamIterator, error) {
+	versioned := opts.Count > 0
 
 	s.mu.Lock()
 
@@ -5134,28 +5164,20 @@ func (s *interceptingStore) Hydrate(ctx context.Context, aggregate *aggregatesto
 		close(entered)
 
 		if err := fn(ctx); err != nil {
-			return err
+			return nil, err
 		}
 
-		return s.Store.Hydrate(ctx, aggregate, opts)
+		return s.Store.ReadStream(ctx, streamID, opts)
 	}
 
 	if s.replace != nil {
-		if s.replaceSkip > 0 {
-			s.replaceSkip--
-		} else {
-			replace, replaceEntered = s.replace, s.replaceEntered
-			s.replace, s.replaceEntered = nil, nil
-		}
+		replace, replaceEntered = s.replace, s.replaceEntered
+		s.replace, s.replaceEntered = nil, nil
 	}
 
 	if replace == nil && s.before != nil {
-		if s.beforeSkip > 0 {
-			s.beforeSkip--
-		} else {
-			before = s.before
-			s.before = nil
-		}
+		before = s.before
+		s.before = nil
 	}
 
 	if replace == nil && s.after != nil {
@@ -5166,26 +5188,31 @@ func (s *interceptingStore) Hydrate(ctx context.Context, aggregate *aggregatesto
 
 	if replace != nil {
 		close(replaceEntered)
-		return replace(ctx)
+
+		if err := replace(ctx); err != nil {
+			return nil, err
+		}
+
+		return s.Store.ReadStream(ctx, streamID, opts)
 	}
 
 	if before != nil {
 		if err := before(ctx); err != nil {
-			return err
+			return nil, err
 		}
 	}
 
-	err := s.Store.Hydrate(ctx, aggregate, opts)
+	iter, err := s.Store.ReadStream(ctx, streamID, opts)
 
 	if after != nil {
 		close(afterEntered)
 
 		if afterErr := after(ctx); afterErr != nil && err == nil {
-			err = afterErr
+			return nil, afterErr
 		}
 	}
 
-	return err
+	return iter, err
 }
 
 // truncatingWriter delegates appends and, when armed, truncates the next
@@ -5659,6 +5686,134 @@ func (w *sequenceWitness) AppliedCutover(context.Context, string) (lifecycle.Cut
 	}
 
 	return cutover, nil
+}
+
+// gateWitness reports a fixed cutover attestation, blocking its Nth call
+// until released so a test can act while the retirement protocol is paused
+// mid-attestation.
+type gateWitness struct {
+	mu      sync.Mutex
+	calls   int
+	blockOn int
+	entered chan struct{}
+	release chan struct{}
+	cutover lifecycle.Cutover
+}
+
+func (w *gateWitness) AppliedCutover(context.Context, string) (lifecycle.Cutover, error) {
+	w.mu.Lock()
+	w.calls++
+	blocked := w.calls == w.blockOn
+	w.mu.Unlock()
+
+	if blocked {
+		close(w.entered)
+		<-w.release
+	}
+
+	return w.cutover, nil
+}
+
+// ceilingEventStore records appends and reports them written at one past the
+// expected version, and reads as an absent stream. It stands in for a
+// lifecycle stream whose tip no real fixture can reach event by event, so an
+// append at the top of the version space can be observed succeeding.
+type ceilingEventStore struct {
+	mu       sync.Mutex
+	appended []*eventstore.WritableEvent
+	expects  []int64
+}
+
+func (s *ceilingEventStore) ReadStream(context.Context, typeid.ID, eventstore.ReadStreamOptions) (eventstore.StreamIterator, error) {
+	return nil, eventstore.ErrStreamNotFound
+}
+
+func (s *ceilingEventStore) AppendStream(_ context.Context, streamID typeid.ID, events []*eventstore.WritableEvent, opts eventstore.AppendStreamOptions) ([]*eventstore.Event, error) {
+	expect := int64(0)
+	if opts.ExpectVersion != nil {
+		expect = *opts.ExpectVersion
+	}
+
+	s.mu.Lock()
+	s.appended = append(s.appended, events...)
+	s.expects = append(s.expects, expect)
+	s.mu.Unlock()
+
+	written := make([]*eventstore.Event, len(events))
+	for i, event := range events {
+		written[i] = &eventstore.Event{
+			ID:              typeid.NewV4(event.Type),
+			StreamID:        streamID,
+			StreamVersion:   expect + int64(i) + 1,
+			Timestamp:       time.Now(),
+			Data:            event.Data,
+			DataContentType: event.DataContentType,
+		}
+	}
+
+	return written, nil
+}
+
+// injectingEventStore delegates to an inner store and, once armed, runs
+// its injection exactly once, immediately before serving the first read that
+// can observe a recorded retirement reservation: the window between a
+// reservation's save and the retirement protocol's post-reservation refold.
+type injectingEventStore struct {
+	eventstore.Store
+	mu     sync.Mutex
+	inject func()
+	fired  bool
+}
+
+func (s *injectingEventStore) arm(inject func()) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.inject = inject
+	s.fired = false
+}
+
+func (s *injectingEventStore) ReadStream(ctx context.Context, streamID typeid.ID, opts eventstore.ReadStreamOptions) (eventstore.StreamIterator, error) {
+	s.mu.Lock()
+	pending := s.inject != nil && !s.fired
+	s.mu.Unlock()
+
+	if pending && s.holdsReservation(ctx, streamID) {
+		s.mu.Lock()
+		inject := s.inject
+		fire := !s.fired
+		s.fired = true
+		s.mu.Unlock()
+
+		if fire {
+			inject()
+		}
+	}
+
+	return s.Store.ReadStream(ctx, streamID, opts)
+}
+
+// holdsReservation reports whether the stream already records a retirement
+// reservation, so the injection fires only after a reservation's save.
+func (s *injectingEventStore) holdsReservation(ctx context.Context, streamID typeid.ID) bool {
+	iter, err := s.Store.ReadStream(ctx, streamID, eventstore.ReadStreamOptions{})
+	if err != nil {
+		return false
+	}
+	defer iter.Close(ctx)
+
+	reservation := lifecycle.RetireStarted{}.EventType()
+
+	for {
+		event, err := iter.Next(ctx)
+		if err != nil {
+			return false
+		}
+
+		if event.ID.Type == reservation {
+			return true
+		}
+	}
 }
 
 // recordedReservations decodes every recorded RetireStarted event in order.
@@ -6136,10 +6291,11 @@ func TestRetire_RetryUsesCapturedMembership(t *testing.T) {
 	// A process without the router registered cannot weaken the reservation:
 	// the captured membership still governs the retry.
 	bare, err := lifecycle.NewOrchestrator(lifecycle.Config{
-		Events:      h.events,
-		Checkpoints: h.checkpoints,
-		Handler:     h.model.handler,
-		Projections: h.projections,
+		Events:          h.events,
+		Checkpoints:     h.checkpoints,
+		Handler:         h.model.handler,
+		Projections:     h.projections,
+		LifecycleEvents: h.events,
 	})
 	if err != nil {
 		t.Fatalf("creating witnessless orchestrator: %v", err)
@@ -6487,6 +6643,14 @@ func TestRetire_RetainedStoreMutationCannotWeakenThePolicy(t *testing.T) {
 		t.Fatalf("want retirement authority derived from the durable fold, got %v", err)
 	}
 
+	// The refusal alone does not prove the handle was refreshed: a Retire
+	// that derived its verdict from the fresh fold without installing it
+	// would refuse identically while the handle kept exposing the tampered
+	// membership.
+	if got := resumed.State().RetirementPolicy.Witnesses; !reflect.DeepEqual(got, []string{"auditor"}) {
+		t.Fatalf("want the refused Retire to install the event-recorded policy on the handle, got %v", got)
+	}
+
 	if got := countEventsOfType(t, h.events, lifecycle.RetireStarted{}.EventType()); got != 0 {
 		t.Errorf("want no reservation through the tampered cache, got %d", got)
 	}
@@ -6504,6 +6668,368 @@ func TestRetire_RetainedStoreMutationCannotWeakenThePolicy(t *testing.T) {
 
 	if err := waitDone(t, done); err != nil {
 		t.Errorf("want Run to return nil after the rollback, got %v", err)
+	}
+}
+
+// TestRetire_SnapshotCannotWeakenThePolicy pins retirement authority against
+// the snapshot layer: a structurally valid snapshot at the current version is
+// exactly what a snapshotting store installs in place of replaying events, so
+// a forged snapshot that renames the policy's membership to a converged,
+// registered witness must not change which witnesses a retirement resolves —
+// destruction derives its authority from an event-only fold, never from
+// snapshot state.
+func TestRetire_SnapshotCannotWeakenThePolicy(t *testing.T) {
+	t.Parallel()
+
+	events := newEventStore(t)
+
+	inner, err := lifecycle.NewStore(events)
+	if err != nil {
+		t.Fatalf("creating lifecycle store: %v", err)
+	}
+
+	snapshots := ssmemory.NewSnapshotStore()
+
+	projections, err := aggregatestore.NewSnapshottingStore(inner, snapshots, snapshotstore.EventCountSnapshotPolicy{})
+	if err != nil {
+		t.Fatalf("creating snapshotting lifecycle store: %v", err)
+	}
+
+	h := buildHarness(t, events, projections)
+	_, _, v2, done := promotedSecondVersion(t, h)
+
+	if err := h.orchestrator.SetRetirementPolicy(t.Context(), "orders", lifecycle.RetirementPolicyChange{
+		Witnesses: []string{"auditor"}, Actor: "op", Reason: "gate retirements",
+	}); err != nil {
+		t.Fatalf("recording the policy: %v", err)
+	}
+
+	// The registered router serves the live cutover, so a membership swapped
+	// to name it would attest cleanly and destroy storage.
+	h.waitLive(v2)
+
+	truth, err := h.orchestrator.Get(t.Context(), "orders")
+	if err != nil {
+		t.Fatalf("reading the recorded state: %v", err)
+	}
+
+	if !reflect.DeepEqual(truth.RetirementPolicy.Witnesses, []string{"auditor"}) {
+		t.Fatalf("fixture: want the recorded policy to require the auditor, got %+v", truth.RetirementPolicy)
+	}
+
+	current, err := projections.Load(t.Context(), lifecycle.StreamUUID("orders"), nil)
+	if err != nil {
+		t.Fatalf("loading the current version: %v", err)
+	}
+
+	forged := truth
+	forged.RetirementPolicy.Witnesses = []string{"router"}
+	writeLifecycleSnapshot(t, snapshots, forged, current.Version())
+
+	resumed, err := h.orchestrator.Resume(t.Context(), "orders")
+	if err != nil {
+		t.Fatalf("resuming: %v", err)
+	}
+
+	err = resumed.Retire(t.Context())
+	if err == nil || !strings.Contains(err.Error(), `"auditor"`) || !strings.Contains(err.Error(), "not registered") {
+		t.Fatalf("want retirement authority derived from the event-only fold, got %v", err)
+	}
+
+	if got := resumed.State().RetirementPolicy.Witnesses; !reflect.DeepEqual(got, []string{"auditor"}) {
+		t.Fatalf("want the refused Retire to install the event-recorded policy on the handle, got %v", got)
+	}
+
+	if got := countEventsOfType(t, h.events, lifecycle.RetireStarted{}.EventType()); got != 0 {
+		t.Errorf("want no reservation through the forged snapshot, got %d", got)
+	}
+
+	if dropped := h.model.droppedTables(); len(dropped) != 0 {
+		t.Fatalf("want nothing destroyed through the forged snapshot, got %v", dropped)
+	}
+
+	// The refused Retire installed the fresh fold, so this handle is current
+	// enough to contend.
+	if err := resumed.Rollback(t.Context()); err != nil {
+		t.Errorf("want rollback still possible, got %v", err)
+	}
+
+	if err := waitDone(t, done); err != nil {
+		t.Errorf("want Run to return nil after the rollback, got %v", err)
+	}
+}
+
+// TestRetire_CacheMutationDuringRecheckCannotAmendTheReservation pins the
+// protocol's post-reservation authority: saving the reservation publishes the
+// handle's state to the wired cache, so a mutation through the cache while
+// the recheck is mid-attestation must not change which witnesses are
+// re-attested or how their receipts are attributed — the completion must
+// record the reservation's captured membership, and an event-only replay of
+// the stream must accept it.
+func TestRetire_CacheMutationDuringRecheckCannotAmendTheReservation(t *testing.T) {
+	t.Parallel()
+
+	live := lifecycle.Cutover{Live: projection.ID{Name: "orders", Version: 2}, Revision: 2}
+
+	// gate_b's second attestation is the recheck's: the preflight attests
+	// each gate once before the reservation is appended.
+	gateB := &gateWitness{cutover: live, blockOn: 2, entered: make(chan struct{}), release: make(chan struct{})}
+
+	events := newEventStore(t)
+
+	inner, err := lifecycle.NewStore(events)
+	if err != nil {
+		t.Fatalf("creating lifecycle store: %v", err)
+	}
+
+	projections, err := aggregatestore.NewCachedStore(inner, newMemoryAggregateCache())
+	if err != nil {
+		t.Fatalf("creating cached lifecycle store: %v", err)
+	}
+
+	h := buildHarness(t, events, projections,
+		lifecycle.WithRetirementWitness("gate_a", stubWitness{cutover: live}),
+		lifecycle.WithRetirementWitness("gate_b", gateB),
+	)
+	r2, v1, _, done := promotedSecondVersion(t, h)
+
+	if err := h.orchestrator.SetRetirementPolicy(t.Context(), "orders", lifecycle.RetirementPolicyChange{
+		Witnesses: []string{"gate_a", "gate_b"}, Actor: "op", Reason: "gate retirements",
+	}); err != nil {
+		t.Fatalf("recording the policy: %v", err)
+	}
+
+	retired := make(chan error, 1)
+	go func() {
+		retired <- r2.Retire(t.Context())
+	}()
+
+	select {
+	case <-gateB.entered:
+	case <-time.After(waitTimeout):
+		t.Fatal("timed out waiting for the recheck to reach gate_b")
+	}
+
+	// The reservation is durable and its save republished the handle's state
+	// to the cache. Rewrite the required and captured membership through the
+	// cache entry while the recheck is paused between attestations.
+	tampered, err := projections.Load(t.Context(), lifecycle.StreamUUID("orders"), nil)
+	if err != nil {
+		t.Fatalf("loading through the retained store: %v", err)
+	}
+
+	state := tampered.State()
+	if state.Attempt.Phase != lifecycle.PhaseRetiring ||
+		len(state.RetirementPolicy.Witnesses) != 2 || len(state.Attempt.RetiringWitnesses) != 2 {
+		t.Fatalf("fixture: want the reserved retirement visible through the cache, got %+v", state.Attempt)
+	}
+
+	state.RetirementPolicy.Witnesses[1] = "gate_a"
+	state.Attempt.RetiringWitnesses[1] = "gate_a"
+
+	close(gateB.release)
+
+	var retireErr error
+	select {
+	case retireErr = <-retired:
+	case <-time.After(waitTimeout):
+		t.Fatal("timed out waiting for the retirement to finish")
+	}
+
+	if retireErr != nil {
+		t.Fatalf("retiring: %v", retireErr)
+	}
+
+	want := []lifecycle.WitnessReceipt{{Witness: "gate_a", Cutover: live}, {Witness: "gate_b", Cutover: live}}
+
+	reservations := recordedReservations(t, h.events)
+	if len(reservations) != 1 {
+		t.Fatalf("want exactly one reservation, got %d", len(reservations))
+	}
+
+	if r := reservations[0]; !reflect.DeepEqual(r.Witnesses, []string{"gate_a", "gate_b"}) || !reflect.DeepEqual(r.Receipts, want) {
+		t.Errorf("want the reservation to capture the recorded membership, got %+v", r)
+	}
+
+	completions := recordedCompletions(t, h.events)
+	if last := completions[len(completions)-1]; !reflect.DeepEqual(last.Receipts, want) {
+		t.Errorf("want the completion to re-attest the reservation's captured membership, got %+v", last)
+	}
+
+	// The stream must hold the whole story: an event-only replay accepts the
+	// completion against the reservation it folded.
+	replay, err := lifecycle.NewStore(events)
+	if err != nil {
+		t.Fatalf("creating the replay store: %v", err)
+	}
+
+	refolded, err := replay.Load(t.Context(), lifecycle.StreamUUID("orders"), nil)
+	if err != nil {
+		t.Fatalf("replaying the lifecycle stream: %v", err)
+	}
+
+	if reason := refolded.State().InvalidReason; reason != "" {
+		t.Errorf("want the event-only replay to accept the completion, got poisoned: %s", reason)
+	}
+
+	if dropped := h.model.droppedTables(); len(dropped) != 1 || dropped[0] != v1 {
+		t.Errorf("want %s torn down exactly once, got %v", v1, dropped)
+	}
+
+	if err := waitDone(t, done); err != nil {
+		t.Errorf("want Run to return nil after the rebuild completes, got %v", err)
+	}
+}
+
+// reservationWindowHarness wires the standard harness with the lifecycle
+// authority reads intercepted, so a test can inject a stream event into the
+// window between a retirement reservation's save and the protocol's
+// post-reservation refold.
+func reservationWindowHarness(t *testing.T, live lifecycle.Cutover) (*harness, *injectingEventStore) {
+	t.Helper()
+
+	events := newEventStore(t)
+	hooked := &injectingEventStore{Store: events}
+
+	projections, err := lifecycle.NewStore(events)
+	if err != nil {
+		t.Fatalf("creating lifecycle store: %v", err)
+	}
+
+	h := buildHarnessWithAuthority(t, events, hooked, projections,
+		lifecycle.WithRetirementWitness("gate_a", stubWitness{cutover: live}),
+		lifecycle.WithRetirementWitness("gate_b", stubWitness{cutover: live}),
+	)
+
+	return h, hooked
+}
+
+// TestRetire_AdvanceDuringReservationFailsClosed pins the post-reservation
+// binding check: a concurrent repair's completion lands between this call's
+// reservation and its refold, so the refold no longer holds the reservation
+// — the call must refuse loudly and destroy nothing, rather than re-run a
+// teardown it no longer owns and record a second completion over a vacated
+// slot.
+func TestRetire_AdvanceDuringReservationFailsClosed(t *testing.T) {
+	t.Parallel()
+
+	live := lifecycle.Cutover{Live: projection.ID{Name: "orders", Version: 2}, Revision: 2}
+
+	h, hooked := reservationWindowHarness(t, live)
+	r2, v1, _, done := promotedSecondVersion(t, h)
+
+	if err := h.orchestrator.SetRetirementPolicy(t.Context(), "orders", lifecycle.RetirementPolicyChange{
+		Witnesses: []string{"gate_a", "gate_b"}, Actor: "op", Reason: "gate retirements",
+	}); err != nil {
+		t.Fatalf("recording the policy: %v", err)
+	}
+
+	hooked.arm(func() {
+		appendRawLifecycleEvent(t, h.events, lifecycle.PreviousRetired{
+			Retired: v1,
+			Receipts: []lifecycle.WitnessReceipt{
+				{Witness: "gate_a", Cutover: live},
+				{Witness: "gate_b", Cutover: live},
+			},
+		})
+	})
+
+	err := r2.Retire(t.Context())
+	if err == nil || !strings.Contains(err.Error(), "advanced past this call's reservation") {
+		t.Fatalf("want the outrun retirement refused loudly, got %v", err)
+	}
+
+	if dropped := h.model.droppedTables(); len(dropped) != 0 {
+		t.Errorf("want nothing destroyed by the outrun call, got %v", dropped)
+	}
+
+	// v1's own first-version completion is already on the stream; the
+	// injected completion must be the only other one.
+	completions := recordedCompletions(t, h.events)
+	if len(completions) != 2 || completions[len(completions)-1].Retired != v1 {
+		t.Errorf("want exactly the injected completion beside v1's own, got %+v", completions)
+	}
+
+	replay, err := lifecycle.NewStore(h.events)
+	if err != nil {
+		t.Fatalf("creating the replay store: %v", err)
+	}
+
+	refolded, err := replay.Load(t.Context(), lifecycle.StreamUUID("orders"), nil)
+	if err != nil {
+		t.Fatalf("replaying the lifecycle stream: %v", err)
+	}
+
+	if reason := refolded.State().InvalidReason; reason != "" {
+		t.Errorf("want the stream clean after the refusal, got poisoned: %s", reason)
+	}
+
+	if err := waitDone(t, done); err != nil {
+		t.Errorf("want Run to return nil after the completion, got %v", err)
+	}
+}
+
+// TestRetire_RecheckReattestsTheCapturedMembership pins what the
+// post-reservation refold re-derives: a policy transition landing between
+// the reservation and its refold supersedes the policy, but the recheck and
+// the completion must follow the membership the reservation captured — the
+// completion's receipts attest the captured witnesses, and an event-only
+// replay accepts them.
+func TestRetire_RecheckReattestsTheCapturedMembership(t *testing.T) {
+	t.Parallel()
+
+	live := lifecycle.Cutover{Live: projection.ID{Name: "orders", Version: 2}, Revision: 2}
+
+	h, hooked := reservationWindowHarness(t, live)
+	r2, v1, _, done := promotedSecondVersion(t, h)
+
+	if err := h.orchestrator.SetRetirementPolicy(t.Context(), "orders", lifecycle.RetirementPolicyChange{
+		Witnesses: []string{"gate_a", "gate_b"}, Actor: "op", Reason: "gate retirements",
+	}); err != nil {
+		t.Fatalf("recording the policy: %v", err)
+	}
+
+	hooked.arm(func() {
+		appendRawLifecycleEvent(t, h.events, lifecycle.RetirementPolicySet{
+			Generation: 2,
+			Witnesses:  []string{"gate_a"},
+			Actor:      "op",
+			Reason:     "supersede mid-retirement",
+			At:         time.Now(),
+		})
+	})
+
+	if err := r2.Retire(t.Context()); err != nil {
+		t.Fatalf("retiring across the policy transition: %v", err)
+	}
+
+	want := []lifecycle.WitnessReceipt{{Witness: "gate_a", Cutover: live}, {Witness: "gate_b", Cutover: live}}
+
+	completions := recordedCompletions(t, h.events)
+	if last := completions[len(completions)-1]; !reflect.DeepEqual(last.Receipts, want) {
+		t.Errorf("want the completion re-attesting the captured membership, got %+v", last)
+	}
+
+	replay, err := lifecycle.NewStore(h.events)
+	if err != nil {
+		t.Fatalf("creating the replay store: %v", err)
+	}
+
+	refolded, err := replay.Load(t.Context(), lifecycle.StreamUUID("orders"), nil)
+	if err != nil {
+		t.Fatalf("replaying the lifecycle stream: %v", err)
+	}
+
+	if reason := refolded.State().InvalidReason; reason != "" {
+		t.Errorf("want the event-only replay to accept the completion, got poisoned: %s", reason)
+	}
+
+	if dropped := h.model.droppedTables(); len(dropped) != 1 || dropped[0] != v1 {
+		t.Errorf("want %s torn down exactly once, got %v", v1, dropped)
+	}
+
+	if err := waitDone(t, done); err != nil {
+		t.Errorf("want Run to return nil after the rebuild completes, got %v", err)
 	}
 }
 
@@ -6713,10 +7239,11 @@ func TestRetire_ReservationSaveFailureDestroysNothing(t *testing.T) {
 	checkpoints := cpmemory.NewCheckpointStore()
 
 	orchestrator, err := lifecycle.NewOrchestrator(lifecycle.Config{
-		Events:      events,
-		Checkpoints: checkpoints,
-		Handler:     model.handler,
-		Projections: projections,
+		Events:          events,
+		Checkpoints:     checkpoints,
+		Handler:         model.handler,
+		Projections:     projections,
+		LifecycleEvents: events,
 	},
 		lifecycle.WithProcessorOptions(processor.WithPollInterval(2*time.Millisecond)),
 		lifecycle.WithReconcileInterval(10*time.Millisecond),
@@ -6799,10 +7326,11 @@ func TestRetire_UnobservedReservationDestroysNothing(t *testing.T) {
 	checkpoints := cpmemory.NewCheckpointStore()
 
 	orchestrator, err := lifecycle.NewOrchestrator(lifecycle.Config{
-		Events:      events,
-		Checkpoints: checkpoints,
-		Handler:     model.handler,
-		Projections: projections,
+		Events:          events,
+		Checkpoints:     checkpoints,
+		Handler:         model.handler,
+		Projections:     projections,
+		LifecycleEvents: events,
 	},
 		lifecycle.WithProcessorOptions(processor.WithPollInterval(2*time.Millisecond)),
 		lifecycle.WithReconcileInterval(10*time.Millisecond),
@@ -6983,20 +7511,25 @@ func TestSetRetirementPolicy_RefusesExhaustedGeneration(t *testing.T) {
 		t.Fatalf("beginning: %v", err)
 	}
 
-	// A structurally valid state at the generation ceiling — MaxInt64-1, the
-	// last value countable transitions can reach beside the initiation event
-	// — installed through the snapshot layer: exactly what the command must
-	// refuse to transition past.
+	// A structurally valid state at the generation ceiling, installed through
+	// the snapshot layer in the one composition that reaches it: a first
+	// attempt still in PhaseCreated, whose initiation plus MaxInt64-1
+	// recorded transitions fill the stream to aggregate version MaxInt64.
 	writeLifecycleSnapshot(t, snapshots, lifecycle.State{
-		Name:            "orders",
-		Live:            projection.ID{Name: "orders", Version: 1},
-		CutoverRevision: 1,
-		Allocated:       1,
+		Name:      "orders",
+		Allocated: 1,
+		Attempt: lifecycle.AttemptState{
+			ID:          uuid.Must(uuid.NewV4()),
+			Target:      projection.ID{Name: "orders", Version: 1},
+			Phase:       lifecycle.PhaseCreated,
+			Reason:      "exhaustion fixture",
+			InitiatedAt: time.Now(),
+		},
 		RetirementPolicy: lifecycle.RetirementPolicy{
 			Generation: math.MaxInt64 - 1,
 			Witnesses:  []string{"router"},
 		},
-	}, 1)
+	}, math.MaxInt64)
 
 	err := orchestrator.SetRetirementPolicy(t.Context(), "orders", lifecycle.RetirementPolicyChange{
 		Witnesses: []string{"router"}, Actor: "op", Reason: "one transition too many",
@@ -7007,5 +7540,126 @@ func TestSetRetirementPolicy_RefusesExhaustedGeneration(t *testing.T) {
 
 	if got := countEventsOfType(t, events, lifecycle.RetirementPolicySet{}.EventType()); got != 0 {
 		t.Errorf("want no transition recorded at the ceiling, got %d", got)
+	}
+}
+
+// TestSetRetirementPolicy_RefusesExhaustedStreamVersion pins the version
+// dimension of exhaustion: the policy generation counts only its own
+// transitions, so a stream whose other events have carried the aggregate to
+// version MaxInt64 exhausts the append space while the generation sits below
+// its ceiling. The command must refuse at the version guard rather than let
+// the append arithmetic wrap.
+func TestSetRetirementPolicy_RefusesExhaustedStreamVersion(t *testing.T) {
+	t.Parallel()
+
+	events, snapshots, _, _, orchestrator := newSnapshottingOrchestrator(t,
+		snapshotstore.EventCountSnapshotPolicy{})
+
+	if _, err := orchestrator.Begin(t.Context(), "orders", "exhaustion fixture"); err != nil {
+		t.Fatalf("beginning: %v", err)
+	}
+
+	// A claimed first attempt still in PhaseCreated: the initiation, one
+	// runner claim, and MaxInt64-2 policy transitions fill the stream to
+	// aggregate version MaxInt64 with the generation one short of its
+	// ceiling, so only the version guard stands between the command and a
+	// wrapped append.
+	writeLifecycleSnapshot(t, snapshots, lifecycle.State{
+		Name:      "orders",
+		Allocated: 1,
+		Attempt: lifecycle.AttemptState{
+			ID:          uuid.Must(uuid.NewV4()),
+			Target:      projection.ID{Name: "orders", Version: 1},
+			Phase:       lifecycle.PhaseCreated,
+			Reason:      "exhaustion fixture",
+			InitiatedAt: time.Now(),
+			Runner:      uuid.Must(uuid.NewV4()),
+			ClaimedAt:   time.Now(),
+		},
+		RetirementPolicy: lifecycle.RetirementPolicy{
+			Generation: math.MaxInt64 - 2,
+			Witnesses:  []string{"router"},
+		},
+	}, math.MaxInt64)
+
+	err := orchestrator.SetRetirementPolicy(t.Context(), "orders", lifecycle.RetirementPolicyChange{
+		Witnesses: []string{"router"}, Actor: "op", Reason: "one event too many",
+	})
+	if err == nil || !strings.Contains(err.Error(), "aggregate versions end at") {
+		t.Fatalf("want the exhausted stream version refused, got %v", err)
+	}
+
+	if got := countEventsOfType(t, events, lifecycle.RetirementPolicySet{}.EventType()); got != 0 {
+		t.Errorf("want no transition recorded past the version space, got %d", got)
+	}
+}
+
+// TestSetRetirementPolicy_AcceptsTheFinalReachableTransition pins the
+// acceptance neighbor of both exhaustion guards: from generation MaxInt64-2
+// at aggregate version MaxInt64-1 — the initiation plus MaxInt64-2 recorded
+// transitions — the transition to the ceiling generation is admitted, and
+// its append lands in the stream's final slot.
+func TestSetRetirementPolicy_AcceptsTheFinalReachableTransition(t *testing.T) {
+	t.Parallel()
+
+	ceiling := &ceilingEventStore{}
+
+	inner, err := lifecycle.NewStore(ceiling)
+	if err != nil {
+		t.Fatalf("creating lifecycle store: %v", err)
+	}
+
+	snapshots := ssmemory.NewSnapshotStore()
+
+	projections, err := aggregatestore.NewSnapshottingStore(inner, snapshots, snapshotstore.EventCountSnapshotPolicy{})
+	if err != nil {
+		t.Fatalf("creating snapshotting lifecycle store: %v", err)
+	}
+
+	orchestrator, err := lifecycle.NewOrchestrator(lifecycle.Config{
+		Events:          newEventStore(t),
+		Checkpoints:     cpmemory.NewCheckpointStore(),
+		Handler:         newReadModel().handler,
+		Projections:     projections,
+		LifecycleEvents: ceiling,
+	})
+	if err != nil {
+		t.Fatalf("creating orchestrator: %v", err)
+	}
+
+	writeLifecycleSnapshot(t, snapshots, lifecycle.State{
+		Name:      "orders",
+		Allocated: 1,
+		Attempt: lifecycle.AttemptState{
+			ID:          uuid.Must(uuid.NewV4()),
+			Target:      projection.ID{Name: "orders", Version: 1},
+			Phase:       lifecycle.PhaseCreated,
+			Reason:      "ceiling fixture",
+			InitiatedAt: time.Now(),
+		},
+		RetirementPolicy: lifecycle.RetirementPolicy{
+			Generation: math.MaxInt64 - 2,
+			Witnesses:  []string{"router"},
+		},
+	}, math.MaxInt64-1)
+
+	if err := orchestrator.SetRetirementPolicy(t.Context(), "orders", lifecycle.RetirementPolicyChange{
+		Witnesses: []string{"router"}, Actor: "op", Reason: "the final transition",
+	}); err != nil {
+		t.Fatalf("want the final reachable transition admitted, got %v", err)
+	}
+
+	if len(ceiling.appended) != 1 || ceiling.expects[0] != math.MaxInt64-1 {
+		t.Fatalf("want one append into the final slot, got %d appends expecting %v",
+			len(ceiling.appended), ceiling.expects)
+	}
+
+	var recorded lifecycle.RetirementPolicySet
+	if err := json.Unmarshal(ceiling.appended[0].Data, &recorded); err != nil {
+		t.Fatalf("decoding the recorded transition: %v", err)
+	}
+
+	if recorded.Generation != math.MaxInt64-1 {
+		t.Errorf("want the ceiling generation recorded, got %d", recorded.Generation)
 	}
 }

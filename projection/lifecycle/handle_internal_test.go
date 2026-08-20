@@ -246,10 +246,11 @@ func caughtUpRebuildForTest(t *testing.T, store aggregatestore.Store[State]) (*R
 	}
 
 	orchestrator, err := NewOrchestrator(Config{
-		Events:      events,
-		Checkpoints: cpmemory.NewCheckpointStore(),
-		Handler:     func(projection.ID) (projection.EventHandler, error) { return nopHandler{}, nil },
-		Projections: store,
+		Events:          events,
+		Checkpoints:     cpmemory.NewCheckpointStore(),
+		Handler:         func(projection.ID) (projection.EventHandler, error) { return nopHandler{}, nil },
+		Projections:     store,
+		LifecycleEvents: events,
 	})
 	if err != nil {
 		t.Fatalf("creating orchestrator: %v", err)
@@ -576,10 +577,11 @@ func defeatedRebuildForTest(t *testing.T, toVersion int64) (*Rebuild, uuid.UUID,
 	}
 
 	orchestrator, err := NewOrchestrator(Config{
-		Events:      events,
-		Checkpoints: cpmemory.NewCheckpointStore(),
-		Handler:     func(projection.ID) (projection.EventHandler, error) { return nopHandler{}, nil },
-		Projections: store,
+		Events:          events,
+		Checkpoints:     cpmemory.NewCheckpointStore(),
+		Handler:         func(projection.ID) (projection.EventHandler, error) { return nopHandler{}, nil },
+		Projections:     store,
+		LifecycleEvents: events,
 	})
 	if err != nil {
 		t.Fatalf("creating orchestrator: %v", err)

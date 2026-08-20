@@ -798,17 +798,19 @@ func attributeExit(ctxErr error, returnedFirst bool, exitErr, local error) error
 // hydrateFresh reads the projection's lifecycle stream into a new aggregate,
 // to the given version or to the head when toVersion is 0. Verdicts about
 // what the stream records — reconciliation, claim recovery, defeat
-// classification — must come from the durable events: the configured store's
-// Load may serve a read-through cache entry (aggregatestore.CachedStore does,
-// for unversioned loads), while New and Hydrate reach the stream itself.
+// classification, retirement authority — must come from the durable events,
+// so the fold runs through the orchestrator's event-only authority store:
+// the configured Projections store may serve a read-through cache entry
+// (aggregatestore.CachedStore) or install snapshot state in place of replay
+// (aggregatestore.SnapshottingStore), and neither is trusted here.
 func (r *Rebuild) hydrateFresh(ctx context.Context, toVersion int64) (*aggregatestore.Aggregate[State], error) {
 	var opts *aggregatestore.HydrateOptions
 	if toVersion > 0 {
 		opts = &aggregatestore.HydrateOptions{ToVersion: toVersion}
 	}
 
-	loaded := r.orchestrator.config.Projections.New(StreamUUID(r.name))
-	if err := r.orchestrator.config.Projections.Hydrate(ctx, loaded, opts); err != nil {
+	loaded := r.orchestrator.authority.New(StreamUUID(r.name))
+	if err := r.orchestrator.authority.Hydrate(ctx, loaded, opts); err != nil {
 		return nil, err
 	}
 
@@ -1269,7 +1271,11 @@ func WithRetirementOverride(actor, reason string) RetireOption {
 // must attest to serving the exact live (version, revision) pair — first
 // while rollback remains available, and again after the reservation, so
 // the receipts recorded with the reservation and the completion bound the
-// destruction. A projection with no recorded policy refuses to retire
+// destruction. Both gates and the recheck's membership derive from
+// event-only refolds of the lifecycle stream — one before anything is
+// reserved and one after the reservation is durable — so neither snapshot
+// state nor any cache-shared view can weaken the policy or amend what the
+// reservation captured. A projection with no recorded policy refuses to retire
 // unless the call carries an audited WithRetirementOverride; an explicitly
 // unwitnessed policy retires without attestation. A retry from
 // PhaseRetiring re-attests the membership the reservation captured, never
@@ -1312,13 +1318,14 @@ func (r *Rebuild) Retire(ctx context.Context, opts ...RetireOption) error {
 	defer r.mu.Unlock()
 
 	// Re-establish authority from the durable fold before any destructive
-	// effect: the handle's aggregate may descend from a cache-served load,
+	// effect: the handle's aggregate may descend from a cache-served load —
 	// whose state can share memory with the cache and with every caller the
-	// wired store served — so the membership and teardown target that govern
-	// destruction are refolded from the stream itself, never trusted from a
-	// retained view. The fresh fold also refreshes the common stale-handle
-	// case into a fast phase error; the reservation append remains the
-	// arbiter.
+	// wired store served — or from snapshot state installed in place of
+	// replay, so the membership and teardown target that govern destruction
+	// are refolded from the events themselves, never trusted from a retained
+	// or decorated view. The fresh fold also refreshes the common
+	// stale-handle case into a fast phase error; the reservation append
+	// remains the arbiter.
 	loaded, err := r.hydrateFresh(ctx, 0)
 	if err != nil {
 		return fmt.Errorf("refreshing lifecycle state: %w", err)
@@ -1423,11 +1430,14 @@ func (r *Rebuild) Retire(ctx context.Context, opts ...RetireOption) error {
 			return err
 		}
 
-		// Recheck the captured set after the reservation: the attestation
-		// that counts is the one no concurrent rollback can undercut. A
-		// refusal here leaves the reservation standing; retry Retire.
-		if receipts, err = attest(ctx, witnesses, required, state.Name, cutover); err != nil {
-			return fmt.Errorf("retirement recheck for %s (the reservation stands; retry Retire): %w", previous, err)
+		// Recheck exactly what the reservation captured, as an event-only
+		// refold records it: the attestation that counts is the one no
+		// concurrent rollback can undercut, and the reservation's save
+		// republished the handle's state to whatever read decorations the
+		// wired store carries, so nothing captured before it is trusted
+		// afterward.
+		if receipts, err = r.reattestReservation(ctx, previous); err != nil {
+			return err
 		}
 	}
 
@@ -1446,6 +1456,51 @@ func (r *Rebuild) Retire(ctx context.Context, opts ...RetireOption) error {
 	}
 
 	return r.recordRetirement(ctx, previous, receipts)
+}
+
+// reattestReservation re-establishes the retirement protocol's authority
+// after its reservation was saved: the fold, the captured membership, and
+// the live cutover are re-derived from the events — which now record the
+// reservation — and every captured witness re-attests. The returned
+// receipts are the completion's. A refusal leaves the reservation standing,
+// and destroys nothing; Retire again to repair. The caller must hold r.mu.
+func (r *Rebuild) reattestReservation(ctx context.Context, previous projection.ID) ([]WitnessReceipt, error) {
+	loaded, err := r.hydrateFresh(ctx, 0)
+	if err != nil {
+		return nil, fmt.Errorf("refreshing lifecycle state after the reservation (the reservation stands; retry Retire): %w", err)
+	}
+
+	r.aggregate = loaded
+
+	if err := checkLifecycleAggregate(r.aggregate, r.name); err != nil {
+		return nil, err
+	}
+
+	state := r.aggregate.State()
+
+	// The refold must still hold this call's reservation: anything else
+	// means a concurrent repair resolved it first, and acting on the
+	// refolded state would re-run a teardown this call no longer owns and
+	// record a second completion over it.
+	if state.Attempt.Phase != PhaseRetiring || state.Attempt.Previous != previous {
+		return nil, fmt.Errorf("cannot retire %s: the lifecycle advanced past this call's reservation; nothing was destroyed here — resume the projection to observe the outcome", previous)
+	}
+
+	required := state.Attempt.RetiringWitnesses
+
+	witnesses, err := r.resolveWitnesses(required)
+	if err != nil {
+		return nil, fmt.Errorf("cannot retire %s (the reservation stands; retry Retire): %w", previous, err)
+	}
+
+	cutover := Cutover{Live: state.Live, Revision: state.CutoverRevision}
+
+	receipts, err := attest(ctx, witnesses, required, state.Name, cutover)
+	if err != nil {
+		return nil, fmt.Errorf("retirement recheck for %s (the reservation stands; retry Retire): %w", previous, err)
+	}
+
+	return receipts, nil
 }
 
 // resolveWitnesses maps required witness IDs to their registered

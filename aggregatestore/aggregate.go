@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"math"
 	"time"
 
 	"github.com/go-estoria/estoria"
@@ -114,10 +115,16 @@ func (a *Aggregate[S]) Version() int64 {
 // applyNext applies the next domain event in the apply queue to the state.
 // A successfully applied event increments the aggregate's version. If
 // there are no events in the apply queue, ErrNoUnappliedEvents is returned.
+// An aggregate at the maximum representable version applies nothing further:
+// its next-version computation would wrap negative, and a corrupt event
+// carrying the wrapped version would false-match it.
 func (a *Aggregate[S]) applyNext() error {
-	if len(a.unappliedEvents) == 0 {
+	switch {
+	case len(a.unappliedEvents) == 0:
 		return ErrNoUnappliedEvents
-	} else if a.unappliedEvents[0].Version != a.version+1 {
+	case a.version == math.MaxInt64:
+		return fmt.Errorf("aggregate is at the maximum version %d; no further events can be applied", int64(math.MaxInt64))
+	case a.unappliedEvents[0].Version != a.version+1:
 		return fmt.Errorf("event version mismatch: expected %d, got %d", a.version+1, a.unappliedEvents[0].Version)
 	}
 

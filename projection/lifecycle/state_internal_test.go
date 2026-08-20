@@ -839,11 +839,14 @@ func TestFold_PoisonBranches(t *testing.T) {
 // TestFold_PolicyCeilingBoundary pins the exhaustion arm's edge: the last
 // reachable transition — to generation MaxInt64-1, each generation consuming
 // a stream event beside the initiation — applies cleanly; only transitions
-// past it poison.
+// past it poison. The prior is the one composition that reaches the edge
+// within the stream's version space: a first attempt still in PhaseCreated,
+// whose initiation plus MaxInt64-2 recorded transitions sit at aggregate
+// version MaxInt64-1, leaving exactly one slot for this event.
 func TestFold_PolicyCeilingBoundary(t *testing.T) {
 	t.Parallel()
 
-	prior := withPolicy(State{Name: "orders", Live: ordersV6, CutoverRevision: 1, Allocated: 6}, math.MaxInt64-2, "router")
+	prior := withPolicy(firstVersionInPhase(PhaseCreated), math.MaxInt64-2, "router")
 
 	got := RetirementPolicySet{
 		Generation: math.MaxInt64 - 1,

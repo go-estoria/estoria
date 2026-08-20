@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"math"
 	"reflect"
 	"strings"
 
@@ -204,7 +205,9 @@ func (s *EventSourcedStore[S]) Hydrate(ctx context.Context, aggregate *Aggregate
 
 // Save saves an aggregate by appending its unsaved events to the event store.
 // An error that carries ErrEventsAppended means the events were appended but
-// not applied to the in-memory aggregate.
+// not applied to the in-memory aggregate. A save that would grow the stream
+// past the maximum representable aggregate version, or from a negative
+// version, is refused before anything is appended.
 func (s *EventSourcedStore[S]) Save(ctx context.Context, aggregate *Aggregate[S], opts *SaveOptions) error {
 	if aggregate == nil {
 		return SaveError{Err: ErrNilAggregate}
@@ -220,6 +223,25 @@ func (s *EventSourcedStore[S]) Save(ctx context.Context, aggregate *Aggregate[S]
 
 		s.log.Debug("no events to save")
 		return nil
+	}
+
+	// The version guard is central here: every command path appends through a
+	// save, an append past the maximum representable version would wrap the
+	// version arithmetic in every consumer, and a negative version is
+	// producible only by corrupt snapshot or cache state.
+	if v := aggregate.Version(); v < 0 {
+		return SaveError{
+			AggregateID: aggregate.ID(),
+			Operation:   "validating aggregate version",
+			Err:         fmt.Errorf("aggregate version %d is invalid", v),
+		}
+	} else if int64(len(unsavedEvents)) > math.MaxInt64-v {
+		return SaveError{
+			AggregateID: aggregate.ID(),
+			Operation:   "validating aggregate version",
+			Err: fmt.Errorf("cannot append %d events at version %d: aggregate versions end at %d",
+				len(unsavedEvents), v, int64(math.MaxInt64)),
+		}
 	}
 
 	s.log.Debug("saving aggregate to event store", "aggregate_id", aggregate.ID(), "events", len(unsavedEvents))
