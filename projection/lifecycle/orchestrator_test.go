@@ -5,9 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"math"
 	"reflect"
-	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -22,8 +20,6 @@ import (
 	cpmemory "github.com/go-estoria/estoria/projection/checkpointstore/memory"
 	"github.com/go-estoria/estoria/projection/lifecycle"
 	"github.com/go-estoria/estoria/projection/processor"
-	"github.com/go-estoria/estoria/snapshotstore"
-	ssmemory "github.com/go-estoria/estoria/snapshotstore/memory"
 	"github.com/go-estoria/estoria/typeid"
 	"github.com/gofrs/uuid/v5"
 )
@@ -39,7 +35,6 @@ type harness struct {
 	events       *esmemory.EventStore
 	checkpoints  *cpmemory.CheckpointStore
 	router       *lifecycle.MemoryRouter
-	projections  aggregatestore.Store[lifecycle.State]
 	model        *readModel
 	orchestrator *lifecycle.Orchestrator
 }
@@ -47,7 +42,7 @@ type harness struct {
 func newHarness(t *testing.T, opts ...lifecycle.OrchestratorOption) *harness {
 	t.Helper()
 
-	return buildHarness(t, newEventStore(t), nil, opts...)
+	return buildHarness(t, newEventStore(t), opts...)
 }
 
 func newEventStore(t *testing.T) *esmemory.EventStore {
@@ -61,46 +56,28 @@ func newEventStore(t *testing.T) *esmemory.EventStore {
 	return events
 }
 
-// buildHarness wires the standard harness over the given event store, with
-// decorate wrapping the projection store when non-nil, so tests can
-// interpose failure-injecting or read-decorating wrappers.
-func buildHarness(t *testing.T, events *esmemory.EventStore, decorate func(aggregatestore.Store[lifecycle.State]) (aggregatestore.Store[lifecycle.State], error), opts ...lifecycle.OrchestratorOption) *harness {
+// buildHarness wires the standard harness over the given event store.
+func buildHarness(t *testing.T, events *esmemory.EventStore, opts ...lifecycle.OrchestratorOption) *harness {
 	t.Helper()
 
-	return buildHarnessWithLifecycleEvents(t, events, events, decorate, opts...)
+	return buildHarnessWithLifecycleEvents(t, events, events, opts...)
 }
 
 // buildHarnessWithLifecycleEvents additionally separates the lifecycle event
 // store from the domain store, so tests can interpose on the event-only
 // folds every command entry and runtime verdict derives from.
-func buildHarnessWithLifecycleEvents(t *testing.T, events *esmemory.EventStore, lifecycleEvents eventstore.Store, decorate func(aggregatestore.Store[lifecycle.State]) (aggregatestore.Store[lifecycle.State], error), opts ...lifecycle.OrchestratorOption) *harness {
+func buildHarnessWithLifecycleEvents(t *testing.T, events *esmemory.EventStore, lifecycleEvents eventstore.Store, opts ...lifecycle.OrchestratorOption) *harness {
 	t.Helper()
 
 	checkpoints := cpmemory.NewCheckpointStore()
 	router := lifecycle.NewMemoryRouter()
 	model := newReadModel()
 
-	var projections aggregatestore.Store[lifecycle.State]
-
 	orchestrator, err := lifecycle.NewOrchestrator(lifecycle.Config{
 		Events:          events,
 		Checkpoints:     checkpoints,
 		Handler:         model.handler,
 		LifecycleEvents: lifecycleEvents,
-		DecorateProjections: func(base aggregatestore.Store[lifecycle.State]) (aggregatestore.Store[lifecycle.State], error) {
-			projections = base
-
-			if decorate == nil {
-				return base, nil
-			}
-
-			decorated, err := decorate(base)
-			if decorated != nil {
-				projections = decorated
-			}
-
-			return decorated, err
-		},
 	}, append([]lifecycle.OrchestratorOption{
 		lifecycle.WithProcessorOptions(processor.WithPollInterval(2 * time.Millisecond)),
 		lifecycle.WithReconcileInterval(10 * time.Millisecond),
@@ -115,7 +92,6 @@ func buildHarnessWithLifecycleEvents(t *testing.T, events *esmemory.EventStore, 
 		events:       events,
 		checkpoints:  checkpoints,
 		router:       router,
-		projections:  projections,
 		model:        model,
 		orchestrator: orchestrator,
 	}
@@ -963,6 +939,36 @@ func TestRetainedHandle_FailsClosedOnPoisonedStream(t *testing.T) {
 		}
 	})
 
+	t.Run("rollback refused", func(t *testing.T) {
+		t.Parallel()
+
+		events := newEventStore(t)
+		model := newReadModel()
+		orchestrator := bareOrchestrator(t, events, cpmemory.NewCheckpointStore(), model.handler)
+
+		r, err := orchestrator.Begin(t.Context(), "orders", "to be retained")
+		if err != nil {
+			t.Fatalf("beginning: %v", err)
+		}
+
+		if err := r.Abandon(t.Context(), "retaining the handle"); err != nil {
+			t.Fatalf("abandoning: %v", err)
+		}
+
+		customersTakeover(t, events)
+
+		// A rollback records a routing flip, so deciding from the retained
+		// view instead of the poisoned fold would aim RolledBack's cutover
+		// from a history this handle never validated.
+		if err := r.Rollback(t.Context()); !errors.Is(err, lifecycle.ErrInvalidState) {
+			t.Fatalf("want the retained handle's rollback refused with ErrInvalidState, got %v", err)
+		}
+
+		if got := countEventsOfType(t, events, lifecycle.RolledBack{}.EventType()); got != 0 {
+			t.Errorf("want no rollback recorded through the poisoned stream, got %d", got)
+		}
+	})
+
 	t.Run("run fails closed through reconciliation", func(t *testing.T) {
 		t.Parallel()
 
@@ -1025,17 +1031,13 @@ func TestRetire_CompletionFailureIsRepairableAfterTeardown(t *testing.T) {
 	factory := &countingFactory{model: model}
 	checkpoints := cpmemory.NewCheckpointStore()
 
-	var projections *refusingStore
+	writer := &refusingWriter{Store: events}
 
 	orchestrator, err := lifecycle.NewOrchestrator(lifecycle.Config{
 		Events:          events,
 		Checkpoints:     checkpoints,
 		Handler:         factory.handler,
-		LifecycleEvents: events,
-		DecorateProjections: func(base aggregatestore.Store[lifecycle.State]) (aggregatestore.Store[lifecycle.State], error) {
-			projections = &refusingStore{Store: base}
-			return projections, nil
-		},
+		LifecycleEvents: writer,
 	},
 		lifecycle.WithProcessorOptions(processor.WithPollInterval(2*time.Millisecond)),
 		lifecycle.WithReconcileInterval(10*time.Millisecond),
@@ -1060,8 +1062,8 @@ func TestRetire_CompletionFailureIsRepairableAfterTeardown(t *testing.T) {
 		t.Fatalf("promoting v2: %v", err)
 	}
 
-	// The reservation save passes; the completion save fails.
-	projections.armFailureAfterSaves(1)
+	// The reservation append passes; the completion append fails.
+	writer.armFailureAfterAppends(1)
 
 	if err := r2.Retire(t.Context(), lifecycle.WithRetirementOverride("test", "interrupted completion scenario")); err == nil {
 		t.Fatal("want the completion failure reported, got nil")
@@ -1522,20 +1524,16 @@ func TestPromote_RecordedDespiteSaveFailure(t *testing.T) {
 	t.Parallel()
 
 	events := newEventStore(t)
+	writer := &truncatingWriter{Store: events}
 
-	var projections *eventsAppendedStore
-
-	h := buildHarness(t, events, func(base aggregatestore.Store[lifecycle.State]) (aggregatestore.Store[lifecycle.State], error) {
-		projections = &eventsAppendedStore{Store: base}
-		return projections, nil
-	})
+	h := buildHarnessWithLifecycleEvents(t, events, writer)
 	h.appendDomain(3)
 
 	r := h.begin("events-appended failure")
 	cancel, done := runAsync(t, r)
 	waitPhase(t, r, lifecycle.PhaseCaughtUp)
 
-	projections.armFailure()
+	writer.armFailure()
 
 	if err := r.Promote(t.Context()); !errors.Is(err, aggregatestore.ErrEventsAppended) {
 		t.Fatalf("want an error carrying ErrEventsAppended, got %v", err)
@@ -1566,20 +1564,16 @@ func TestPromoteFailure_DoesNotLeakIntoAbandon(t *testing.T) {
 	t.Parallel()
 
 	events := newEventStore(t)
+	writer := &refusingWriter{Store: events}
 
-	var projections *refusingStore
-
-	h := buildHarness(t, events, func(base aggregatestore.Store[lifecycle.State]) (aggregatestore.Store[lifecycle.State], error) {
-		projections = &refusingStore{Store: base}
-		return projections, nil
-	})
+	h := buildHarnessWithLifecycleEvents(t, events, writer)
 	h.appendDomain(3)
 
 	r := h.begin("save will fail")
 	_, done := runAsync(t, r)
 	waitPhase(t, r, lifecycle.PhaseCaughtUp)
 
-	projections.armFailure()
+	writer.armFailure()
 
 	if err := r.Promote(t.Context()); err == nil {
 		t.Fatal("want the armed save failure, got nil")
@@ -1620,7 +1614,7 @@ func TestStaleHandle_DoesNotReplayDurableTransition(t *testing.T) {
 	events := newEventStore(t)
 	writer := &truncatingWriter{Store: events}
 
-	h := buildHarnessWithLifecycleEvents(t, events, writer, nil)
+	h := buildHarnessWithLifecycleEvents(t, events, writer)
 	h.appendDomain(3)
 
 	v1 := h.promoteFirstVersion()
@@ -1680,7 +1674,7 @@ func TestBegin_DurableAdmissionIsResumableByName(t *testing.T) {
 	events := newEventStore(t)
 	writer := &truncatingWriter{Store: events}
 
-	h := buildHarnessWithLifecycleEvents(t, events, writer, nil)
+	h := buildHarnessWithLifecycleEvents(t, events, writer)
 
 	writer.armFailure()
 
@@ -1949,18 +1943,14 @@ func TestRun_ClaimSaveFailureStartsNothing(t *testing.T) {
 	t.Parallel()
 
 	events := newEventStore(t)
+	writer := &refusingWriter{Store: events}
 
-	var projections *refusingStore
-
-	h := buildHarness(t, events, func(base aggregatestore.Store[lifecycle.State]) (aggregatestore.Store[lifecycle.State], error) {
-		projections = &refusingStore{Store: base}
-		return projections, nil
-	})
+	h := buildHarnessWithLifecycleEvents(t, events, writer)
 	h.appendDomain(3)
 
 	r := h.begin("claim save refused")
 
-	projections.armFailure()
+	writer.armFailure()
 
 	if err := r.Run(t.Context()); err == nil {
 		t.Fatal("want the refused claim save to fail the run, got nil")
@@ -1984,7 +1974,7 @@ func TestRun_UnobservedClaimStartsWhenWon(t *testing.T) {
 	events := newEventStore(t)
 	writer := &truncatingWriter{Store: events}
 
-	h := buildHarnessWithLifecycleEvents(t, events, writer, nil)
+	h := buildHarnessWithLifecycleEvents(t, events, writer)
 	h.appendDomain(3)
 
 	r := h.begin("unobserved claim, won")
@@ -2023,7 +2013,7 @@ func TestRun_UnobservedClaimRefusedWhenSuperseded(t *testing.T) {
 	writer := &truncatingWriter{Store: events}
 
 	authority := &interceptingEventStore{Store: writer}
-	h := buildHarnessWithLifecycleEvents(t, events, authority, nil, lifecycle.WithReconcileInterval(time.Hour))
+	h := buildHarnessWithLifecycleEvents(t, events, authority, lifecycle.WithReconcileInterval(time.Hour))
 	h.appendDomain(3)
 	h.model.armGate()
 
@@ -2098,7 +2088,7 @@ func TestRun_ClaimRecoveryFailurePreservesEventsAppended(t *testing.T) {
 	writer := &truncatingWriter{Store: events}
 
 	authority := &interceptingEventStore{Store: writer}
-	h := buildHarnessWithLifecycleEvents(t, events, authority, nil)
+	h := buildHarnessWithLifecycleEvents(t, events, authority)
 	h.appendDomain(3)
 
 	r := h.begin("recovery load will fail")
@@ -2134,7 +2124,7 @@ func TestRun_UnobservedClaimRecoversFromMisappliedSave(t *testing.T) {
 	events := newEventStore(t)
 	writer := &misreportingWriter{Store: events}
 
-	h := buildHarnessWithLifecycleEvents(t, events, writer, nil)
+	h := buildHarnessWithLifecycleEvents(t, events, writer)
 	h.appendDomain(3)
 
 	r := h.begin("misapplied claim save")
@@ -2171,7 +2161,7 @@ func TestRun_LostCatchUpToCompetingClaimIsDisplacement(t *testing.T) {
 	events := newEventStore(t)
 	writer := &racingWriter{Store: events}
 
-	h := buildHarnessWithLifecycleEvents(t, events, writer, nil, lifecycle.WithReconcileInterval(time.Hour))
+	h := buildHarnessWithLifecycleEvents(t, events, writer, lifecycle.WithReconcileInterval(time.Hour))
 	h.appendDomain(3)
 	h.model.armGate()
 
@@ -2203,7 +2193,7 @@ func TestRun_LostCatchUpToClaimThenAbandonIsDisplacement(t *testing.T) {
 	events := newEventStore(t)
 	writer := &racingWriter{Store: events}
 
-	h := buildHarnessWithLifecycleEvents(t, events, writer, nil, lifecycle.WithReconcileInterval(time.Hour))
+	h := buildHarnessWithLifecycleEvents(t, events, writer, lifecycle.WithReconcileInterval(time.Hour))
 	h.appendDomain(3)
 	h.model.armGate()
 
@@ -2242,7 +2232,7 @@ func TestRun_LostCatchUpDisplacementSurvivesReconciledEnd(t *testing.T) {
 	events := newEventStore(t)
 
 	authority := &interceptingEventStore{Store: events}
-	h := buildHarnessWithLifecycleEvents(t, events, authority, nil)
+	h := buildHarnessWithLifecycleEvents(t, events, authority)
 	h.appendDomain(3)
 	h.model.armGate()
 
@@ -2335,7 +2325,7 @@ func TestRun_InitialClaimLostToClaimThenAbandonIsDisplacement(t *testing.T) {
 	events := newEventStore(t)
 	writer := &racingWriter{Store: events}
 
-	h := buildHarnessWithLifecycleEvents(t, events, writer, nil, lifecycle.WithReconcileInterval(time.Hour))
+	h := buildHarnessWithLifecycleEvents(t, events, writer, lifecycle.WithReconcileInterval(time.Hour))
 	h.appendDomain(3)
 
 	r := h.begin("claim lost to a claim that then abandons")
@@ -2378,20 +2368,16 @@ func TestRun_ProcessorDeathDuringLostCatchUpSurfacesItsError(t *testing.T) {
 
 	events := newEventStore(t)
 	writer := &racingWriter{Store: events}
+	parking := &parkingWriter{Store: writer}
 
-	var projections *parkingSaveStore
-
-	h := buildHarnessWithLifecycleEvents(t, events, writer, func(base aggregatestore.Store[lifecycle.State]) (aggregatestore.Store[lifecycle.State], error) {
-		projections = &parkingSaveStore{Store: base}
-		return projections, nil
-	}, lifecycle.WithReconcileInterval(time.Hour))
+	h := buildHarnessWithLifecycleEvents(t, events, parking, lifecycle.WithReconcileInterval(time.Hour))
 	h.appendDomain(3)
 
 	r := h.begin("processor dies during the lost catch-up")
 
-	// The claim save passes; the CaughtUp save parks with the handle lock
-	// held.
-	entered, gate := projections.armSaveGateAfter(1)
+	// The claim append passes; the CaughtUp append parks with the handle
+	// lock held.
+	entered, gate := parking.armAppendGateAfter(1)
 
 	_, done := runAsync(t, r)
 
@@ -2454,20 +2440,16 @@ func TestRun_LateCancellationKeepsAnEarlierIndependentResult(t *testing.T) {
 
 	events := newEventStore(t)
 	writer := &racingWriter{Store: events}
+	parking := &parkingWriter{Store: writer}
 
-	var projections *parkingSaveStore
-
-	h := buildHarnessWithLifecycleEvents(t, events, writer, func(base aggregatestore.Store[lifecycle.State]) (aggregatestore.Store[lifecycle.State], error) {
-		projections = &parkingSaveStore{Store: base}
-		return projections, nil
-	}, lifecycle.WithReconcileInterval(time.Hour))
+	h := buildHarnessWithLifecycleEvents(t, events, parking, lifecycle.WithReconcileInterval(time.Hour))
 	h.appendDomain(3)
 
 	r := h.begin("canceled after an independent cancellation-shaped death")
 
-	// The claim save passes; the CaughtUp save parks with the handle lock
-	// held.
-	entered, gate := projections.armSaveGateAfter(1)
+	// The claim append passes; the CaughtUp append parks with the handle
+	// lock held.
+	entered, gate := parking.armAppendGateAfter(1)
 
 	cancel, done := runAsync(t, r)
 
@@ -2531,20 +2513,16 @@ func TestRun_OwnCancellationAtTheReturnSubsumesTheLostAppend(t *testing.T) {
 
 	events := newEventStore(t)
 	writer := &racingWriter{Store: events}
+	parking := &parkingWriter{Store: writer}
 
-	var projections *parkingSaveStore
-
-	h := buildHarnessWithLifecycleEvents(t, events, writer, func(base aggregatestore.Store[lifecycle.State]) (aggregatestore.Store[lifecycle.State], error) {
-		projections = &parkingSaveStore{Store: base}
-		return projections, nil
-	}, lifecycle.WithReconcileInterval(time.Hour))
+	h := buildHarnessWithLifecycleEvents(t, events, parking, lifecycle.WithReconcileInterval(time.Hour))
 	h.appendDomain(3)
 
 	r := h.begin("canceled before the processor returned")
 
-	// The claim save passes; the CaughtUp save parks with the handle lock
-	// held.
-	entered, gate := projections.armSaveGateAfter(1)
+	// The claim append passes; the CaughtUp append parks with the handle
+	// lock held.
+	entered, gate := parking.armAppendGateAfter(1)
 
 	cancel, done := runAsync(t, r)
 
@@ -2643,7 +2621,7 @@ func TestRun_UnobservedCatchUpSurfacesEventsAppended(t *testing.T) {
 	events := newEventStore(t)
 	writer := &truncatingWriter{Store: events}
 
-	h := buildHarnessWithLifecycleEvents(t, events, writer, nil, lifecycle.WithReconcileInterval(time.Hour))
+	h := buildHarnessWithLifecycleEvents(t, events, writer, lifecycle.WithReconcileInterval(time.Hour))
 	h.appendDomain(3)
 	h.model.armGate()
 
@@ -2688,7 +2666,7 @@ func TestRun_LostAutoPromotionToCompetingClaimIsDisplacement(t *testing.T) {
 	events := newEventStore(t)
 	writer := &racingWriter{Store: events}
 
-	h := buildHarnessWithLifecycleEvents(t, events, writer, nil, lifecycle.WithAutoPromote(true), lifecycle.WithReconcileInterval(time.Hour))
+	h := buildHarnessWithLifecycleEvents(t, events, writer, lifecycle.WithAutoPromote(true), lifecycle.WithReconcileInterval(time.Hour))
 	h.appendDomain(3)
 	h.model.armGate()
 
@@ -2724,7 +2702,7 @@ func TestRun_InitialClaimLostToCompetingClaimIsDisplacement(t *testing.T) {
 	events := newEventStore(t)
 	writer := &racingWriter{Store: events}
 
-	h := buildHarnessWithLifecycleEvents(t, events, writer, nil, lifecycle.WithReconcileInterval(time.Hour))
+	h := buildHarnessWithLifecycleEvents(t, events, writer, lifecycle.WithReconcileInterval(time.Hour))
 	h.appendDomain(3)
 
 	r := h.begin("will lose the claim to a competitor")
@@ -2757,7 +2735,7 @@ func TestRun_InitialClaimLostToEndedAttemptWindsDownNil(t *testing.T) {
 	events := newEventStore(t)
 	writer := &racingWriter{Store: events}
 
-	h := buildHarnessWithLifecycleEvents(t, events, writer, nil, lifecycle.WithReconcileInterval(time.Hour))
+	h := buildHarnessWithLifecycleEvents(t, events, writer, lifecycle.WithReconcileInterval(time.Hour))
 	h.appendDomain(3)
 
 	r := h.begin("will lose the claim to an abandonment")
@@ -2796,7 +2774,7 @@ func TestAbandon_CompletesWhileReconcileLoadBlocked(t *testing.T) {
 	events := newEventStore(t)
 
 	authority := &interceptingEventStore{Store: events}
-	h := buildHarnessWithLifecycleEvents(t, events, authority, nil)
+	h := buildHarnessWithLifecycleEvents(t, events, authority)
 	h.appendDomain(3)
 	h.model.armGate()
 
@@ -2832,84 +2810,6 @@ func TestAbandon_CompletesWhileReconcileLoadBlocked(t *testing.T) {
 	}
 }
 
-// TestReconcile_BypassesAggregateCache pins reconciliation's read path: a
-// lifecycle store wrapped in a read-through cache serves Load from entries
-// this process last wrote, so a transition recorded by another process never
-// appears in them — reconciliation must read the durable stream itself, or a
-// remotely abandoned build would tail forever behind its own cache.
-func TestReconcile_BypassesAggregateCache(t *testing.T) {
-	t.Parallel()
-
-	events := newEventStore(t)
-
-	cache := newMemoryAggregateCache()
-
-	h := buildHarness(t, events, func(base aggregatestore.Store[lifecycle.State]) (aggregatestore.Store[lifecycle.State], error) {
-		return aggregatestore.NewCachedStore(base, cache)
-	})
-	h.appendDomain(3)
-	h.model.armGate()
-
-	r := h.begin("abandoned behind the cache")
-	_, done := runAsync(t, r)
-	waitPhase(t, r, lifecycle.PhaseBuilding)
-
-	// The abandonment lands through the raw event store — another process's
-	// write, invisible to this process's cache.
-	appendRawLifecycleEvent(t, events, lifecycle.Abandoned{Cause: "remote abandon"})
-
-	if err := waitDone(t, done); err != nil {
-		t.Errorf("want the builder wound down clean via reconciliation, got %v", err)
-	}
-
-	// The fixture premise: the cache still holds the pre-abandonment fold, so
-	// a cache-served reconciliation could never have observed the end.
-	entry, err := cache.GetAggregate(t.Context(), ordersLifecycleStreamID())
-	if err != nil || entry == nil {
-		t.Fatalf("want a cache entry for the lifecycle stream, got %+v, %v", entry, err)
-	}
-
-	if entry.State.Attempt.Phase != lifecycle.PhaseBuilding {
-		t.Errorf("want the cache still holding the stale in-flight fold, got %s", entry.State.Attempt.Phase)
-	}
-}
-
-// TestRun_ClaimRecoveryBypassesAggregateCache pins the recovery reload's
-// read path: after a durable-but-unobserved claim, the cache necessarily
-// holds the pre-claim fold — the failed save never updated it — so deciding
-// ownership from a cache entry would misread the run's own durable claim as
-// a competitor's and refuse a run it won.
-func TestRun_ClaimRecoveryBypassesAggregateCache(t *testing.T) {
-	t.Parallel()
-
-	events := newEventStore(t)
-	writer := &truncatingWriter{Store: events}
-
-	cache := newMemoryAggregateCache()
-
-	h := buildHarnessWithLifecycleEvents(t, events, writer, func(base aggregatestore.Store[lifecycle.State]) (aggregatestore.Store[lifecycle.State], error) {
-		return aggregatestore.NewCachedStore(base, cache)
-	})
-	h.appendDomain(3)
-
-	r := h.begin("unobserved claim behind the cache")
-
-	writer.armFailure()
-
-	cancel, done := runAsync(t, r)
-	waitPhase(t, r, lifecycle.PhaseCaughtUp)
-
-	if got := countEventsOfType(t, events, lifecycle.RunnerClaimed{}.EventType()); got != 1 {
-		t.Errorf("want exactly the one durable claim, got %d", got)
-	}
-
-	cancel()
-
-	if err := waitDone(t, done); !errors.Is(err, context.Canceled) {
-		t.Errorf("want the tailing run to report cancellation, got %v", err)
-	}
-}
-
 // TestReconcile_StaleReadDoesNotOverwriteCertifiedState pins the reconcile
 // loop's currentness guard: a reconcile read begun before this run's
 // CaughtUp can return after the catch-up was certified, and installing that
@@ -2923,7 +2823,7 @@ func TestReconcile_StaleReadDoesNotOverwriteCertifiedState(t *testing.T) {
 	events := newEventStore(t)
 
 	authority := &interceptingEventStore{Store: events}
-	h := buildHarnessWithLifecycleEvents(t, events, authority, nil)
+	h := buildHarnessWithLifecycleEvents(t, events, authority)
 	h.appendDomain(3)
 	h.model.armGate()
 
@@ -2998,20 +2898,16 @@ func TestRun_ProcessorDeathAtCaughtUpSurfacesItsError(t *testing.T) {
 
 	events := newEventStore(t)
 	writer := &racingWriter{Store: events}
+	parking := &parkingWriter{Store: writer}
 
-	var projections *parkingSaveStore
-
-	h := buildHarnessWithLifecycleEvents(t, events, writer, func(base aggregatestore.Store[lifecycle.State]) (aggregatestore.Store[lifecycle.State], error) {
-		projections = &parkingSaveStore{Store: base}
-		return projections, nil
-	}, lifecycle.WithAutoPromote(true), lifecycle.WithReconcileInterval(time.Hour))
+	h := buildHarnessWithLifecycleEvents(t, events, parking, lifecycle.WithAutoPromote(true), lifecycle.WithReconcileInterval(time.Hour))
 	h.appendDomain(3)
 
 	r := h.begin("processor dies at auto-promotion")
 
-	// Saves after arming: the claim and the CaughtUp certification pass; the
-	// Promoted append parks with the handle lock held.
-	entered, gate := projections.armSaveGateAfter(2)
+	// Appends after arming: the claim and the CaughtUp certification pass;
+	// the Promoted append parks with the handle lock held.
+	entered, gate := parking.armAppendGateAfter(2)
 
 	_, done := runAsync(t, r)
 
@@ -3203,7 +3099,7 @@ func TestRacingBegins_LoserRefused(t *testing.T) {
 
 	writer := &racingWriter{Store: events, competitor: competitorData}
 
-	h := buildHarnessWithLifecycleEvents(t, events, writer, nil)
+	h := buildHarnessWithLifecycleEvents(t, events, writer)
 
 	writer.armRace()
 
@@ -3262,7 +3158,12 @@ func TestResumeAfterCrash(t *testing.T) {
 
 	// The stream records the full story: initiated, the first run's claim and
 	// start, the resumed run's claim, and the catch-up.
-	loaded, err := h.projections.Load(t.Context(), lifecycle.StreamUUID("orders"), nil)
+	replay, err := lifecycle.NewStore(h.events)
+	if err != nil {
+		t.Fatalf("creating the replay store: %v", err)
+	}
+
+	loaded, err := replay.Load(t.Context(), lifecycle.StreamUUID("orders"), nil)
 	if err != nil {
 		t.Fatalf("loading lifecycle aggregate: %v", err)
 	}
@@ -3434,50 +3335,6 @@ func TestBegin_InvalidName(t *testing.T) {
 	}
 }
 
-// foreignServingStore serves loads from a store managing a foreign stream
-// type, modeling a decorator that substitutes storage instead of wrapping
-// the base it was given.
-type foreignServingStore struct {
-	aggregatestore.Store[lifecycle.State]
-	foreign *aggregatestore.EventSourcedStore[lifecycle.State]
-}
-
-func (s *foreignServingStore) Load(_ context.Context, id uuid.UUID, _ *aggregatestore.LoadOptions) (*aggregatestore.Aggregate[lifecycle.State], error) {
-	return s.foreign.New(id), nil
-}
-
-// TestObservation_RejectsForeignTypedAggregates pins the observation
-// boundary's address validation: a decorator serving aggregates of a
-// foreign stream type cannot stand in for lifecycle state — reads through
-// it are refused with ErrInvalidState. Commands are structurally immune:
-// they fold the lifecycle events directly and never read the decorated
-// store, so the substitution surfaces at the read boundary instead of
-// steering anything.
-func TestObservation_RejectsForeignTypedAggregates(t *testing.T) {
-	t.Parallel()
-
-	events := newEventStore(t)
-
-	foreign, err := aggregatestore.New(events, "ordertest", lifecycle.NewState)
-	if err != nil {
-		t.Fatalf("creating foreign-typed store: %v", err)
-	}
-
-	h := buildHarness(t, events, func(base aggregatestore.Store[lifecycle.State]) (aggregatestore.Store[lifecycle.State], error) {
-		return &foreignServingStore{Store: base, foreign: foreign}, nil
-	})
-
-	_ = h.begin("foreign observation store")
-
-	if _, err := h.orchestrator.Get(t.Context(), "orders"); !errors.Is(err, lifecycle.ErrInvalidState) {
-		t.Errorf("want observation of a foreign-typed aggregate refused with ErrInvalidState, got %v", err)
-	}
-
-	if _, err := h.orchestrator.Resume(t.Context(), "orders"); !errors.Is(err, lifecycle.ErrInvalidState) {
-		t.Errorf("want Resume of a foreign-typed aggregate refused with ErrInvalidState, got %v", err)
-	}
-}
-
 // TestGet pins read-only inspection: absent lifecycles report not-found, and
 // present ones return the folded state.
 func TestGet(t *testing.T) {
@@ -3553,18 +3410,6 @@ func TestNewOrchestrator_Validation(t *testing.T) {
 		{"rejects a nil checkpoint store", func(c *lifecycle.Config) { c.Checkpoints = nil }},
 		{"rejects a nil handler factory", func(c *lifecycle.Config) { c.Handler = nil }},
 		{"rejects a nil lifecycle event store", func(c *lifecycle.Config) { c.LifecycleEvents = nil }},
-		{"rejects a decorator error", func(c *lifecycle.Config) {
-			// The error wins even alongside a usable store: a decoration
-			// that failed cannot be silently served.
-			c.DecorateProjections = func(base aggregatestore.Store[lifecycle.State]) (aggregatestore.Store[lifecycle.State], error) {
-				return base, errors.New("decoration failed")
-			}
-		}},
-		{"rejects a nil decorated store", func(c *lifecycle.Config) {
-			c.DecorateProjections = func(aggregatestore.Store[lifecycle.State]) (aggregatestore.Store[lifecycle.State], error) {
-				return nil, nil
-			}
-		}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
@@ -3594,108 +3439,6 @@ func TestNewOrchestrator_Validation(t *testing.T) {
 // tampering outside the aggregate.
 func ordersLifecycleStreamID() typeid.ID {
 	return typeid.ID{Type: lifecycle.StreamType, UUID: lifecycle.StreamUUID("orders")}
-}
-
-// newSnapshottingOrchestrator wires an orchestrator whose projection store
-// snapshots through the given policy, returning the stores tests poison or
-// inspect. The snapshotting layer uses the default JSON state codec — the
-// exact configuration whose round trip must preserve the poison mark.
-func newSnapshottingOrchestrator(t *testing.T, policy aggregatestore.SnapshotPolicy) (*esmemory.EventStore, *ssmemory.SnapshotStore, aggregatestore.Store[lifecycle.State], *readModel, *lifecycle.Orchestrator) {
-	t.Helper()
-
-	events := newEventStore(t)
-	snapshots := ssmemory.NewSnapshotStore()
-	model := newReadModel()
-
-	var projections aggregatestore.Store[lifecycle.State]
-
-	orchestrator, err := lifecycle.NewOrchestrator(lifecycle.Config{
-		Events:          events,
-		Checkpoints:     cpmemory.NewCheckpointStore(),
-		Handler:         model.handler,
-		LifecycleEvents: events,
-		DecorateProjections: func(base aggregatestore.Store[lifecycle.State]) (aggregatestore.Store[lifecycle.State], error) {
-			decorated, err := aggregatestore.NewSnapshottingStore(base, snapshots, policy)
-			if err != nil {
-				return nil, err
-			}
-
-			projections = decorated
-
-			return decorated, nil
-		},
-	},
-		lifecycle.WithProcessorOptions(processor.WithPollInterval(2*time.Millisecond)),
-		lifecycle.WithReconcileInterval(10*time.Millisecond),
-	)
-	if err != nil {
-		t.Fatalf("creating orchestrator: %v", err)
-	}
-
-	return events, snapshots, projections, model, orchestrator
-}
-
-// TestSnapshotRoundTrip_PreservesPoison pins the poison mark's persistence:
-// a poisoned fold whose final shape validates without the mark must survive
-// an actual SnapshottingStore round trip. Snapshots feed State back into the
-// aggregate through the state codec, and the default JSON codec persists
-// only exported fields — so if the mark does not persist, a snapshot at the
-// poisoned head hydrates clean, the empty tail re-poisons nothing, and the
-// laundered history passes every command's validation.
-func TestSnapshotRoundTrip_PreservesPoison(t *testing.T) {
-	t.Parallel()
-
-	_, snapshots, projections, _, orchestrator := newSnapshottingOrchestrator(t,
-		snapshotstore.EventCountSnapshotPolicy{N: 1})
-
-	v1 := projection.ID{Name: "orders", Version: 1}
-	at := time.Date(2026, 8, 17, 10, 0, 0, 0, time.UTC)
-
-	// A cover-up whose final shape validates clean: v1 burned, then a second
-	// admission reusing v1 (the poisoning event), then abandoned. Saved
-	// directly through the snapshotting store — the generic infrastructure
-	// path that no command-side refusal gates.
-	aggregate := projections.New(lifecycle.StreamUUID("orders"))
-	aggregate.Append(
-		lifecycle.RebuildInitiated{Attempt: uuid.Must(uuid.NewV4()), Target: v1, Reason: "first build", At: at},
-		lifecycle.Abandoned{Cause: "burning v1"},
-		lifecycle.RebuildInitiated{Attempt: uuid.Must(uuid.NewV4()), Target: v1, Reason: "reusing the burned version", At: at},
-		lifecycle.Abandoned{Cause: "covering the tracks"},
-	)
-
-	if err := projections.Save(t.Context(), aggregate, nil); err != nil {
-		t.Fatalf("saving the poisoned aggregate: %v", err)
-	}
-
-	// The marshal side: the snapshot payload itself carries the mark.
-	snap, err := snapshots.ReadSnapshot(t.Context(), ordersLifecycleStreamID(), snapshotstore.ReadSnapshotOptions{})
-	if err != nil {
-		t.Fatalf("reading the snapshot: %v", err)
-	}
-
-	var persisted lifecycle.State
-	if err := json.Unmarshal(snap.Data, &persisted); err != nil {
-		t.Fatalf("unmarshaling the snapshot payload: %v", err)
-	}
-
-	if persisted.InvalidReason == "" {
-		t.Fatal("want the snapshot payload to carry the poison mark, got none")
-	}
-
-	// The unmarshal side: a fresh load hydrates from the snapshot — the tail
-	// past it is empty, so the snapshot is the only source of the mark.
-	loaded, err := projections.Load(t.Context(), lifecycle.StreamUUID("orders"), nil)
-	if err != nil {
-		t.Fatalf("loading through the snapshot: %v", err)
-	}
-
-	if loaded.State().InvalidReason == "" {
-		t.Fatal("want the poison mark hydrated from the snapshot, got a laundered state")
-	}
-
-	if _, err := orchestrator.Resume(t.Context(), "orders"); !errors.Is(err, lifecycle.ErrInvalidState) {
-		t.Errorf("want Resume refused with ErrInvalidState through the snapshot round trip, got %v", err)
-	}
 }
 
 // readCutoverRevisions decodes every cutover event in the store in global
@@ -3821,302 +3564,6 @@ func TestCutoverRevisions_StampAndFoldAcrossAttempts(t *testing.T) {
 	}
 }
 
-// TestSnapshotRoundTrip_PreservesCutoverRevision pins the revision's
-// persistence through the snapshot layer, on both sides of the vacuity trap:
-// fallback replay reconstructs the revision, so a behavioral round trip
-// alone cannot catch a codec that drops the field. The payload is asserted
-// directly, and hydration is proven to use it with a divergent-but-valid
-// crafted snapshot whose revision disagrees with what replay would rebuild —
-// the stamp on the next promotion reveals which source fed the command.
-func TestSnapshotRoundTrip_PreservesCutoverRevision(t *testing.T) {
-	t.Parallel()
-
-	t.Run("the payload carries the revision", func(t *testing.T) {
-		t.Parallel()
-
-		events, snapshots, _, _, orchestrator := newSnapshottingOrchestrator(t,
-			snapshotstore.EventCountSnapshotPolicy{N: 1})
-
-		appendDomainTo(t, events, 2)
-
-		promoteAndComplete(t, orchestrator)
-
-		snap, err := snapshots.ReadSnapshot(t.Context(), ordersLifecycleStreamID(), snapshotstore.ReadSnapshotOptions{})
-		if err != nil {
-			t.Fatalf("reading the snapshot: %v", err)
-		}
-
-		var persisted lifecycle.State
-		if err := json.Unmarshal(snap.Data, &persisted); err != nil {
-			t.Fatalf("unmarshaling the snapshot payload: %v", err)
-		}
-
-		if persisted.CutoverRevision != 1 {
-			t.Fatalf("want the snapshot payload to carry cutover revision 1, got %d", persisted.CutoverRevision)
-		}
-	})
-
-	t.Run("hydration installs the payload's revision", func(t *testing.T) {
-		t.Parallel()
-
-		// No organic snapshots: the crafted one below is the only candidate,
-		// divergent but realizable — three allocations can record five
-		// cutovers — so nothing needs to be appended over it to observe
-		// which source hydration used. Replay of the six recorded events
-		// would rebuild revision 1; revision 5 proves the payload installed.
-		events, snapshots, projections, _, orchestrator := newSnapshottingOrchestrator(t,
-			snapshotstore.EventCountSnapshotPolicy{})
-
-		appendDomainTo(t, events, 2)
-
-		promoteAndComplete(t, orchestrator)
-
-		loaded, err := projections.Load(t.Context(), lifecycle.StreamUUID("orders"), nil)
-		if err != nil {
-			t.Fatalf("loading the completed lifecycle: %v", err)
-		}
-
-		writeLifecycleSnapshot(t, snapshots, lifecycle.State{
-			Name:            "orders",
-			Live:            projection.ID{Name: "orders", Version: 1},
-			CutoverRevision: 5,
-			Allocated:       3,
-		}, loaded.Version())
-
-		hydrated, err := projections.Load(t.Context(), lifecycle.StreamUUID("orders"), nil)
-		if err != nil {
-			t.Fatalf("loading through the crafted snapshot: %v", err)
-		}
-
-		state := hydrated.State()
-		if state.CutoverRevision != 5 || state.Live != (projection.ID{Name: "orders", Version: 1}) {
-			t.Fatalf("want hydration installing the payload's (live orders_v1, revision 5), got (%s, %d)",
-				state.Live, state.CutoverRevision)
-		}
-	})
-}
-
-// TestPromote_CertificationPrecedesTheExhaustionGuard pins the license
-// protocol's precedence: an uncertified promotion is refused with
-// ErrNotCertified before the revision-exhaustion guard is consulted — the
-// guard sits with the append, not above the license protocol. The guard's
-// own trigger is unreachable through an event-anchored fold, which every
-// command now installs: revisions rise by exactly one per recorded cutover,
-// so an exhausted revision cannot precede version exhaustion. The fold's
-// ceiling arms pin the wrap protection where a corrupt history could still
-// present it; the resumed view here carries the exhausted revision through
-// the snapshot layer, which observation serves and no command trusts.
-func TestPromote_CertificationPrecedesTheExhaustionGuard(t *testing.T) {
-	t.Parallel()
-
-	if strconv.IntSize < 64 {
-		t.Skip("the revision ceiling is representable only with 64-bit allocation counts")
-	}
-
-	// Assembled from int64 variables at runtime: as untyped constants these
-	// would not compile into the int fields on 32-bit platforms, skip aside.
-	completedAllocations := int64(1) << 62
-	exhaustedAllocations := int(completedAllocations) + 1
-
-	ordersV1 := projection.ID{Name: "orders", Version: 1}
-	ordersTop := projection.ID{Name: "orders", Version: exhaustedAllocations}
-	at := time.Date(2026, 8, 18, 16, 0, 0, 0, time.UTC)
-
-	events, snapshots, _, _, orchestrator := newSnapshottingOrchestrator(t,
-		snapshotstore.EventCountSnapshotPolicy{})
-
-	if _, err := orchestrator.Begin(t.Context(), "orders", "exhausted but uncertified"); err != nil {
-		t.Fatalf("beginning: %v", err)
-	}
-
-	writeLifecycleSnapshot(t, snapshots, lifecycle.State{
-		Name:            "orders",
-		Live:            ordersV1,
-		CutoverRevision: math.MaxInt64,
-		Allocated:       exhaustedAllocations,
-		Attempt: lifecycle.AttemptState{
-			ID:          uuid.Must(uuid.NewV4()),
-			Target:      ordersTop,
-			Previous:    ordersV1,
-			Phase:       lifecycle.PhaseCaughtUp,
-			Runner:      uuid.Must(uuid.NewV4()),
-			InitiatedAt: at,
-			CaughtUpAt:  at,
-		},
-	}, 1)
-
-	handle, err := orchestrator.Resume(t.Context(), "orders")
-	if err != nil {
-		t.Fatalf("resuming over the exhausted state: %v", err)
-	}
-
-	err = handle.Promote(t.Context())
-	if !errors.Is(err, lifecycle.ErrNotCertified) {
-		t.Fatalf("want the uncertified promotion refused with ErrNotCertified, got %v", err)
-	}
-
-	if strings.Contains(err.Error(), "exhausted") {
-		t.Errorf("want certification precedence over the exhaustion guard, got %v", err)
-	}
-
-	if got := countEventsOfType(t, events, lifecycle.Promoted{}.EventType()); got != 0 {
-		t.Errorf("want no promotion recorded, got %d", got)
-	}
-}
-
-// foreignLifecycleState returns a structurally valid "customers" lifecycle
-// state: a promoted v2-over-v1 attempt that satisfies every invariant on its
-// own terms. Hydrated at a stream addressed by "orders", only the check
-// against the addressing name can refuse it — State validation alone passes.
-func foreignLifecycleState() lifecycle.State {
-	customersV1 := projection.ID{Name: "customers", Version: 1}
-	customersV2 := projection.ID{Name: "customers", Version: 2}
-	at := time.Date(2026, 8, 17, 10, 0, 0, 0, time.UTC)
-
-	return lifecycle.State{
-		Name:            "customers",
-		Live:            customersV2,
-		CutoverRevision: 2,
-		Allocated:       2,
-		Attempt: lifecycle.AttemptState{
-			ID:          uuid.Must(uuid.NewV4()),
-			Target:      customersV2,
-			Previous:    customersV1,
-			Phase:       lifecycle.PhasePromoted,
-			Reason:      "foreign history",
-			Runner:      uuid.Must(uuid.NewV4()),
-			InitiatedAt: at,
-			PromotedAt:  at,
-		},
-	}
-}
-
-// writeLifecycleSnapshot installs the state as a snapshot of the "orders"
-// lifecycle aggregate at the given version — the tampering shape the fold
-// cannot observe: hydration installs a snapshot wholesale without folding,
-// so no poison arm ever runs against its contents.
-func writeLifecycleSnapshot(t *testing.T, snapshots *ssmemory.SnapshotStore, state lifecycle.State, version int64) {
-	t.Helper()
-
-	data, err := json.Marshal(state)
-	if err != nil {
-		t.Fatalf("marshaling the foreign state: %v", err)
-	}
-
-	if err := snapshots.WriteSnapshot(t.Context(), &snapshotstore.AggregateSnapshot{
-		AggregateID:      ordersLifecycleStreamID(),
-		AggregateVersion: version,
-		Data:             data,
-		DataContentType:  estoria.ContentTypeJSON,
-	}); err != nil {
-		t.Fatalf("writing the foreign snapshot: %v", err)
-	}
-}
-
-// TestForeignStateViaSnapshot pins how each surface treats structurally
-// valid foreign state arriving through the snapshot layer. Reads consult the
-// snapshot and must refuse state that fails the handle's immutable address —
-// the fold never saw it, so nothing poisons, and a check reduced to State
-// validation would accept it. Execution verdicts — Retire's authority, the
-// reconcile loop, promotion — fold the lifecycle events directly, so the
-// foreign snapshot never governs them at all: commands act on the true
-// state, and nothing is ever aimed at another projection's storage.
-func TestForeignStateViaSnapshot(t *testing.T) {
-	t.Parallel()
-
-	t.Run("resume refuses at the read boundary", func(t *testing.T) {
-		t.Parallel()
-
-		_, snapshots, _, _, orchestrator := newSnapshottingOrchestrator(t,
-			snapshotstore.EventCountSnapshotPolicy{})
-
-		if _, err := orchestrator.Begin(t.Context(), "orders", "to be hijacked"); err != nil {
-			t.Fatalf("beginning: %v", err)
-		}
-
-		// The admission is the stream's only event, so a snapshot at version
-		// 1 leaves no tail to fold.
-		writeLifecycleSnapshot(t, snapshots, foreignLifecycleState(), 1)
-
-		if _, err := orchestrator.Resume(t.Context(), "orders"); !errors.Is(err, lifecycle.ErrInvalidState) {
-			t.Fatalf("want Resume refused with ErrInvalidState on foreign state, got %v", err)
-		}
-	})
-
-	t.Run("retire consults only the events", func(t *testing.T) {
-		t.Parallel()
-
-		events, snapshots, _, model, orchestrator := newSnapshottingOrchestrator(t,
-			snapshotstore.EventCountSnapshotPolicy{})
-
-		r, err := orchestrator.Begin(t.Context(), "orders", "to be hijacked")
-		if err != nil {
-			t.Fatalf("beginning: %v", err)
-		}
-
-		// Structurally valid, promoted, with a nonzero previous: exactly the
-		// shape whose retirement would tear down another projection's
-		// storage, were it consulted. The refusal must instead name the true
-		// state's phase — the event fold holds a first attempt still in
-		// PhaseCreated.
-		writeLifecycleSnapshot(t, snapshots, foreignLifecycleState(), 1)
-
-		err = r.Retire(t.Context())
-		if err == nil || !strings.Contains(err.Error(), "rebuild that is created") {
-			t.Fatalf("want Retire acting on the true created phase, got %v", err)
-		}
-
-		if dropped := model.droppedTables(); len(dropped) != 0 {
-			t.Errorf("want no teardown aimed through foreign state, got %v", dropped)
-		}
-
-		if got := countEventsOfType(t, events, lifecycle.RetireStarted{}.EventType()); got != 0 {
-			t.Errorf("want no reservation recorded through foreign state, got %d", got)
-		}
-	})
-
-	t.Run("a running rebuild never consults it", func(t *testing.T) {
-		t.Parallel()
-
-		events, snapshots, _, _, orchestrator := newSnapshottingOrchestrator(t,
-			snapshotstore.EventCountSnapshotPolicy{})
-
-		appendDomainTo(t, events, 3)
-
-		r, err := orchestrator.Begin(t.Context(), "orders", "running during the hijack")
-		if err != nil {
-			t.Fatalf("beginning: %v", err)
-		}
-
-		_, done := runAsync(t, r)
-		waitPhase(t, r, lifecycle.PhaseCaughtUp)
-
-		// The stream holds admission, claim, start, and catch-up; a snapshot
-		// at version 4 covers all of it, so a hydration that consulted the
-		// snapshot layer would install the foreign state with no tail to
-		// fold. Reconciliation and the completion protocol fold the events
-		// directly, so the rebuild promotes and completes as if the foreign
-		// snapshot did not exist.
-		writeLifecycleSnapshot(t, snapshots, foreignLifecycleState(), 4)
-
-		if err := r.Promote(t.Context()); err != nil {
-			t.Fatalf("promoting past the foreign snapshot: %v", err)
-		}
-
-		if err := r.Retire(t.Context()); err != nil {
-			t.Fatalf("completing past the foreign snapshot: %v", err)
-		}
-
-		if err := waitDone(t, done); err != nil {
-			t.Errorf("want Run to return nil after the completion, got %v", err)
-		}
-
-		if got := r.State().Live; got != (projection.ID{Name: "orders", Version: 1}) {
-			t.Errorf("want the true rebuild live, got %s", got)
-		}
-	})
-}
-
 // completeFirstBuild drives the orchestrator's "orders" projection through a
 // complete first build: begun, run to catch-up, promoted, and completed, so
 // v1 is live with the attempt slot vacant.
@@ -4141,167 +3588,6 @@ func completeFirstBuild(t *testing.T, orchestrator *lifecycle.Orchestrator) {
 
 	if err := waitDone(t, done); err != nil {
 		t.Fatalf("first build run: %v", err)
-	}
-}
-
-// replayCleanState refolds the "orders" lifecycle stream event-only and
-// fails the test if the fold is poisoned, returning the refolded state.
-func replayCleanState(t *testing.T, events *esmemory.EventStore) lifecycle.State {
-	t.Helper()
-
-	replay, err := lifecycle.NewStore(events)
-	if err != nil {
-		t.Fatalf("creating the replay store: %v", err)
-	}
-
-	refolded, err := replay.Load(t.Context(), lifecycle.StreamUUID("orders"), nil)
-	if err != nil {
-		t.Fatalf("replaying the lifecycle stream: %v", err)
-	}
-
-	state := refolded.State()
-	if state.InvalidReason != "" {
-		t.Errorf("want the event-only replay clean, got poisoned: %s", state.InvalidReason)
-	}
-
-	return state
-}
-
-// TestRun_SnapshotCannotRedirectTheClaim pins Run's entry against decorated
-// state: a structurally valid same-name snapshot at the real stream's version
-// carries a created attempt targeting a version the history never allocated.
-// A run that trusted it would claim the forged attempt — poisoning the real
-// fold with a claim no fold of the events can attribute — and aim the build,
-// its storage, and its checkpoint at the forged target. The entry fold is
-// event-only, so the run binds to the real attempt and the snapshot never
-// governs.
-func TestRun_SnapshotCannotRedirectTheClaim(t *testing.T) {
-	t.Parallel()
-
-	events, snapshots, _, model, orchestrator := newSnapshottingOrchestrator(t,
-		snapshotstore.EventCountSnapshotPolicy{})
-
-	appendDomainTo(t, events, 2)
-
-	r, err := orchestrator.Begin(t.Context(), "orders", "the real first build")
-	if err != nil {
-		t.Fatalf("beginning: %v", err)
-	}
-
-	v1 := projection.ID{Name: "orders", Version: 1}
-	v2 := projection.ID{Name: "orders", Version: 2}
-
-	forged := lifecycle.State{
-		Name:            "orders",
-		Live:            v1,
-		CutoverRevision: 1,
-		Allocated:       2,
-		Attempt: lifecycle.AttemptState{
-			ID:          uuid.Must(uuid.NewV4()),
-			Target:      v2,
-			Previous:    v1,
-			Phase:       lifecycle.PhaseCreated,
-			Reason:      "forged second attempt",
-			InitiatedAt: time.Date(2026, 8, 20, 10, 0, 0, 0, time.UTC),
-		},
-	}
-	writeLifecycleSnapshot(t, snapshots, forged, 1)
-
-	_, done := runAsync(t, r)
-	waitPhase(t, r, lifecycle.PhaseCaughtUp)
-
-	if got := r.State().Attempt.Target; got != v1 {
-		t.Errorf("want the run bound to the real attempt's target %s, got %s", v1, got)
-	}
-
-	if model.hasTable(v2) {
-		t.Error("want no handler invoked for the forged target")
-	}
-
-	if got := model.table(v1); len(got) == 0 {
-		t.Error("want the real target's build handling events")
-	}
-
-	replayCleanState(t, events)
-
-	// Terminal for the attempt, so the run returns cleanly.
-	if err := r.Abandon(t.Context(), "test complete"); err != nil {
-		t.Fatalf("abandoning: %v", err)
-	}
-
-	if err := waitDone(t, done); err != nil {
-		t.Errorf("want Run to return nil after the abandonment, got %v", err)
-	}
-}
-
-// TestBegin_SnapshotCannotConcealTheInFlightAttempt pins admission against
-// decorated state: a same-name snapshot showing a vacant attempt slot at the
-// real stream's version would let a second admission through — recording an
-// initiation over the occupied slot and poisoning the fold. Begin decides
-// from the events, so it refuses.
-func TestBegin_SnapshotCannotConcealTheInFlightAttempt(t *testing.T) {
-	t.Parallel()
-
-	events, snapshots, _, _, orchestrator := newSnapshottingOrchestrator(t,
-		snapshotstore.EventCountSnapshotPolicy{})
-
-	if _, err := orchestrator.Begin(t.Context(), "orders", "the real attempt"); err != nil {
-		t.Fatalf("beginning: %v", err)
-	}
-
-	// Vacant and idle: the shape under which admission is legal.
-	writeLifecycleSnapshot(t, snapshots, lifecycle.State{Name: "orders", Allocated: 1}, 1)
-
-	_, err := orchestrator.Begin(t.Context(), "orders", "concealed by the snapshot")
-	if err == nil || !strings.Contains(err.Error(), "already has a rebuild in flight") {
-		t.Fatalf("want the second admission refused from the events, got %v", err)
-	}
-
-	if got := countEventsOfType(t, events, lifecycle.RebuildInitiated{}.EventType()); got != 1 {
-		t.Errorf("want exactly the real admission recorded, got %d", got)
-	}
-
-	replayCleanState(t, events)
-}
-
-// TestSetRetirementPolicy_SnapshotCannotAdvanceTheGeneration pins the policy
-// transition against decorated state: a snapshot claiming a later generation
-// would make the successor generation discontinuous with the recorded one,
-// poisoning the fold while reporting success. The transition derives from
-// the events, so the recorded generation's successor is appended.
-func TestSetRetirementPolicy_SnapshotCannotAdvanceTheGeneration(t *testing.T) {
-	t.Parallel()
-
-	events, snapshots, _, _, orchestrator := newSnapshottingOrchestrator(t,
-		snapshotstore.EventCountSnapshotPolicy{})
-
-	if _, err := orchestrator.Begin(t.Context(), "orders", "the real attempt"); err != nil {
-		t.Fatalf("beginning: %v", err)
-	}
-
-	if err := orchestrator.SetRetirementPolicy(t.Context(), "orders", lifecycle.RetirementPolicyChange{
-		Witnesses: []string{"router"}, Actor: "op", Reason: "initial policy",
-	}); err != nil {
-		t.Fatalf("recording the initial policy: %v", err)
-	}
-
-	forged, err := orchestrator.Get(t.Context(), "orders")
-	if err != nil {
-		t.Fatalf("reading state to forge: %v", err)
-	}
-
-	forged.RetirementPolicy.Generation = 5
-	writeLifecycleSnapshot(t, snapshots, forged, 2)
-
-	if err := orchestrator.SetRetirementPolicy(t.Context(), "orders", lifecycle.RetirementPolicyChange{
-		Witnesses: []string{"auditor", "router"}, Actor: "op", Reason: "tightened",
-	}); err != nil {
-		t.Fatalf("recording the second policy: %v", err)
-	}
-
-	state := replayCleanState(t, events)
-	if got := state.RetirementPolicy.Generation; got != 2 {
-		t.Errorf("want the recorded generation's successor 2, got %d", got)
 	}
 }
 
@@ -4333,135 +3619,6 @@ func TestSetRetirementPolicy_RefusesAPoisonedStream(t *testing.T) {
 	if got := countEventsOfType(t, h.events, lifecycle.RetirementPolicySet{}.EventType()); got != 0 {
 		t.Errorf("want no transition recorded over the poisoned fold, got %d", got)
 	}
-}
-
-// TestRollback_SnapshotCannotForgeAPromotion pins Rollback against decorated
-// state: a same-name snapshot dressing a created rebuild as promoted would
-// let a resumed handle record a rollback the history cannot arbitrate —
-// poisoning the fold and flipping routing to a revision no promotion
-// recorded. Rollback decides from the events, so it refuses on the true
-// phase, and the refusal itself re-establishes the handle's view from the
-// fold.
-func TestRollback_SnapshotCannotForgeAPromotion(t *testing.T) {
-	t.Parallel()
-
-	events, snapshots, projections, _, orchestrator := newSnapshottingOrchestrator(t,
-		snapshotstore.EventCountSnapshotPolicy{})
-
-	appendDomainTo(t, events, 2)
-	completeFirstBuild(t, orchestrator)
-
-	if _, err := orchestrator.Begin(t.Context(), "orders", "second build"); err != nil {
-		t.Fatalf("beginning the second build: %v", err)
-	}
-
-	v1 := projection.ID{Name: "orders", Version: 1}
-	v2 := projection.ID{Name: "orders", Version: 2}
-
-	forged, err := orchestrator.Get(t.Context(), "orders")
-	if err != nil {
-		t.Fatalf("reading state to forge: %v", err)
-	}
-
-	forged.Attempt.Phase = lifecycle.PhasePromoted
-	forged.Attempt.Runner = uuid.Must(uuid.NewV4())
-	forged.Live = v2
-	forged.CutoverRevision = 2
-
-	loaded, err := projections.Load(t.Context(), lifecycle.StreamUUID("orders"), nil)
-	if err != nil {
-		t.Fatalf("loading the stream version: %v", err)
-	}
-
-	writeLifecycleSnapshot(t, snapshots, forged, loaded.Version())
-
-	resumed, err := orchestrator.Resume(t.Context(), "orders")
-	if err != nil {
-		t.Fatalf("resuming: %v", err)
-	}
-
-	err = resumed.Rollback(t.Context())
-	if err == nil || !strings.Contains(err.Error(), "cannot roll back a rebuild that is created") {
-		t.Fatalf("want the rollback refused from the events, got %v", err)
-	}
-
-	// The refusal alone does not prove the handle was refreshed: the refusal
-	// must derive from installed state, not a discarded local.
-	if got := resumed.State().Attempt.Phase; got != lifecycle.PhaseCreated {
-		t.Errorf("want the handle re-established on the recorded phase, got %s", got)
-	}
-
-	if got := countEventsOfType(t, events, lifecycle.RolledBack{}.EventType()); got != 0 {
-		t.Errorf("want no rollback recorded through forged state, got %d", got)
-	}
-
-	replayCleanState(t, events)
-	_ = v1
-}
-
-// TestAbandon_SnapshotCannotRewindAPromotion pins Abandon against decorated
-// state: a same-name snapshot rewinding a promoted rebuild to caught-up
-// would let a resumed handle abandon it — vacating a promoted attempt and
-// poisoning the fold. Abandon decides from the events, so it refuses on the
-// true phase.
-func TestAbandon_SnapshotCannotRewindAPromotion(t *testing.T) {
-	t.Parallel()
-
-	events, snapshots, projections, _, orchestrator := newSnapshottingOrchestrator(t,
-		snapshotstore.EventCountSnapshotPolicy{})
-
-	appendDomainTo(t, events, 2)
-
-	r, err := orchestrator.Begin(t.Context(), "orders", "the real attempt")
-	if err != nil {
-		t.Fatalf("beginning: %v", err)
-	}
-
-	cancel, done := runAsync(t, r)
-	waitPhase(t, r, lifecycle.PhaseCaughtUp)
-
-	if err := r.Promote(t.Context()); err != nil {
-		t.Fatalf("promoting: %v", err)
-	}
-
-	cancel()
-	<-done
-
-	forged, err := orchestrator.Get(t.Context(), "orders")
-	if err != nil {
-		t.Fatalf("reading state to forge: %v", err)
-	}
-
-	forged.Attempt.Phase = lifecycle.PhaseCaughtUp
-	forged.Live = projection.ID{}
-	forged.CutoverRevision = 0
-
-	loaded, err := projections.Load(t.Context(), lifecycle.StreamUUID("orders"), nil)
-	if err != nil {
-		t.Fatalf("loading the stream version: %v", err)
-	}
-
-	writeLifecycleSnapshot(t, snapshots, forged, loaded.Version())
-
-	resumed, err := orchestrator.Resume(t.Context(), "orders")
-	if err != nil {
-		t.Fatalf("resuming: %v", err)
-	}
-
-	err = resumed.Abandon(t.Context(), "rewound by the snapshot")
-	if err == nil || !strings.Contains(err.Error(), "cannot abandon a rebuild that is promoted") {
-		t.Fatalf("want the abandonment refused from the events, got %v", err)
-	}
-
-	if got := resumed.State().Attempt.Phase; got != lifecycle.PhasePromoted {
-		t.Errorf("want the handle re-established on the recorded phase, got %s", got)
-	}
-
-	if got := countEventsOfType(t, events, lifecycle.Abandoned{}.EventType()); got != 0 {
-		t.Errorf("want no abandonment recorded through forged state, got %d", got)
-	}
-
-	replayCleanState(t, events)
 }
 
 // TestResume_RefusesCoveredUpSequences pins the fold's cover-up poisons
@@ -4629,106 +3786,6 @@ func TestRun_ReconcileHydrationFailureIsTerminal(t *testing.T) {
 	}
 }
 
-// TestSnapshotCannotResetAllocation pins never-reuse against snapshot-borne
-// state: a snapshot asserting a named lifecycle with no allocations — or
-// uninitialized state over a stream that has applied events — is a fold no
-// clean history can produce. The state's snapshot validation rejects the
-// payload at the decode boundary, so hydration falls back to full replay
-// and the truth prevails: with no tampered tail the true state recovers and
-// the next admission targets the next version, and a tail crafted to fold
-// cleanly over the reset state re-poisons on replay instead. Either way, no
-// already-used version number is handed out again. Installing the reset
-// payload would defeat both post-hydration checks — the tail's events would
-// fold over it as a fresh, valid history.
-func TestSnapshotCannotResetAllocation(t *testing.T) {
-	t.Parallel()
-
-	resetShapes := []struct {
-		name  string
-		state lifecycle.State
-	}{
-		{"zeroed allocation", lifecycle.State{Name: "orders"}},
-		{"uninitialized state", lifecycle.State{}},
-	}
-
-	// burnedV1 admits and abandons orders v1 through a snapshotting store
-	// that never writes snapshots of its own, leaving Allocated at 1 with
-	// the slot vacant and the stream at version 2.
-	burnedV1 := func(t *testing.T) (*ssmemory.SnapshotStore, *esmemory.EventStore, *lifecycle.Orchestrator) {
-		t.Helper()
-
-		events, snapshots, _, _, orchestrator := newSnapshottingOrchestrator(t,
-			snapshotstore.EventCountSnapshotPolicy{})
-
-		r, err := orchestrator.Begin(t.Context(), "orders", "will be burned")
-		if err != nil {
-			t.Fatalf("beginning v1: %v", err)
-		}
-
-		if err := r.Abandon(t.Context(), "burning v1"); err != nil {
-			t.Fatalf("abandoning v1: %v", err)
-		}
-
-		return snapshots, events, orchestrator
-	}
-
-	for _, shape := range resetShapes {
-		t.Run(shape.name+" head snapshot recovers the truth", func(t *testing.T) {
-			t.Parallel()
-
-			snapshots, events, orchestrator := burnedV1(t)
-
-			writeLifecycleSnapshot(t, snapshots, shape.state, 2)
-
-			r, err := orchestrator.Resume(t.Context(), "orders")
-			if err != nil {
-				t.Fatalf("want the rejected snapshot to fall back to full hydration, got %v", err)
-			}
-
-			if state := r.State(); state.Allocated != 1 || !state.Attempt.Vacant() {
-				t.Fatalf("want the true state recovered from the events, got %+v", state)
-			}
-
-			next, err := orchestrator.Begin(t.Context(), "orders", "next build")
-			if err != nil {
-				t.Fatalf("beginning over the recovered state: %v", err)
-			}
-
-			if got, want := next.State().Attempt.Target, (projection.ID{Name: "orders", Version: 2}); got != want {
-				t.Errorf("want the next admission to target %s, never the burned v1, got %s", want, got)
-			}
-
-			if got := countEventsOfType(t, events, lifecycle.RebuildInitiated{}.EventType()); got != 2 {
-				t.Errorf("want exactly the original and the fresh admission, got %d", got)
-			}
-		})
-
-		t.Run(shape.name+" tampered tail re-poisons on replay", func(t *testing.T) {
-			t.Parallel()
-
-			snapshots, events, orchestrator := burnedV1(t)
-
-			writeLifecycleSnapshot(t, snapshots, shape.state, 2)
-
-			// Folded over the installed reset state, this admission would be
-			// a valid first admission and the final shape would pass every
-			// post-hydration check with an active reused v1. Replayed over
-			// the true history instead, it reuses the burned allocation and
-			// poisons the fold.
-			appendRawLifecycleEvent(t, events, lifecycle.RebuildInitiated{
-				Attempt: uuid.Must(uuid.NewV4()),
-				Target:  projection.ID{Name: "orders", Version: 1},
-				Reason:  "reuse over the reset state",
-				At:      time.Date(2026, 8, 17, 12, 0, 0, 0, time.UTC),
-			})
-
-			if _, err := orchestrator.Resume(t.Context(), "orders"); !errors.Is(err, lifecycle.ErrInvalidState) {
-				t.Errorf("want the replayed reuse refused with ErrInvalidState, got %v", err)
-			}
-		})
-	}
-}
-
 // TestRun_ProcessorFailureSurfacesDespiteHeldReconcile pins the exit path's
 // join discipline: the reconcile loop exits only on the processor context,
 // so Run must cancel it before joining and taking the final status
@@ -4741,7 +3798,7 @@ func TestRun_ProcessorFailureSurfacesDespiteHeldReconcile(t *testing.T) {
 	events := newEventStore(t)
 
 	authority := &interceptingEventStore{Store: events}
-	h := buildHarnessWithLifecycleEvents(t, events, authority, nil)
+	h := buildHarnessWithLifecycleEvents(t, events, authority)
 	h.appendDomain(3)
 
 	r := h.begin("processor failure under a held reconciliation")
@@ -4791,7 +3848,7 @@ func TestRun_HydrationFailureNotLaunderedByCancellation(t *testing.T) {
 	events := newEventStore(t)
 
 	authority := &interceptingEventStore{Store: events}
-	h := buildHarnessWithLifecycleEvents(t, events, authority, nil)
+	h := buildHarnessWithLifecycleEvents(t, events, authority)
 	h.appendDomain(3)
 
 	r := h.begin("failure racing cancellation")
@@ -4832,7 +3889,7 @@ func TestRun_CancellationDuringCatchUpSurfacesRecordedFailure(t *testing.T) {
 	events := newEventStore(t)
 
 	authority := &interceptingEventStore{Store: events}
-	h := buildHarnessWithLifecycleEvents(t, events, authority, nil)
+	h := buildHarnessWithLifecycleEvents(t, events, authority)
 
 	// The gate holds the build mid-replay, so the run is still catching up
 	// when the failure and the cancellation race.
@@ -4874,7 +3931,7 @@ func TestRun_JoinedCancellationDoesNotLaunderFailure(t *testing.T) {
 	events := newEventStore(t)
 
 	authority := &interceptingEventStore{Store: events}
-	h := buildHarnessWithLifecycleEvents(t, events, authority, nil)
+	h := buildHarnessWithLifecycleEvents(t, events, authority)
 	h.appendDomain(3)
 
 	r := h.begin("joined failure racing cancellation")
@@ -4913,7 +3970,7 @@ func TestRun_ProcessorFailureDuringCatchUpSurfacesDespiteHeldReconcile(t *testin
 	events := newEventStore(t)
 
 	authority := &interceptingEventStore{Store: events}
-	h := buildHarnessWithLifecycleEvents(t, events, authority, nil)
+	h := buildHarnessWithLifecycleEvents(t, events, authority)
 
 	// The gate holds the build mid-replay: the run never reaches catch-up.
 	h.model.armGate()
@@ -5117,85 +4174,6 @@ func (h *readModelHandler) Teardown(_ context.Context, id projection.ID) error {
 
 var _ projection.Teardowner = (*readModelHandler)(nil)
 
-// eventsAppendedStore delegates saves and, when armed, reports the next save
-// as failed-after-append: the events are durable in the store, but the error
-// carries aggregatestore.ErrEventsAppended.
-type eventsAppendedStore struct {
-	aggregatestore.Store[lifecycle.State]
-	mu    sync.Mutex
-	armed bool
-}
-
-func (s *eventsAppendedStore) armFailure() {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	s.armed = true
-}
-
-func (s *eventsAppendedStore) Save(ctx context.Context, aggregate *aggregatestore.Aggregate[lifecycle.State], opts *aggregatestore.SaveOptions) error {
-	s.mu.Lock()
-	armed := s.armed
-	s.armed = false
-	s.mu.Unlock()
-
-	if err := s.Store.Save(ctx, aggregate, opts); err != nil {
-		return err
-	}
-
-	if armed {
-		return fmt.Errorf("%w: simulated read-back failure", aggregatestore.ErrEventsAppended)
-	}
-
-	return nil
-}
-
-// refusingStore delegates saves and, when armed, refuses one save outright —
-// after letting a configured number pass — before anything reaches the event
-// store: the pre-append failure shape, which leaves the command's event
-// queued on the aggregate.
-type refusingStore struct {
-	aggregatestore.Store[lifecycle.State]
-	mu    sync.Mutex
-	armed bool
-	skip  int
-}
-
-func (s *refusingStore) armFailure() {
-	s.armFailureAfterSaves(0)
-}
-
-// armFailureAfterSaves arms the store to refuse one save after allowing n.
-func (s *refusingStore) armFailureAfterSaves(n int) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	s.armed = true
-	s.skip = n
-}
-
-func (s *refusingStore) Save(ctx context.Context, aggregate *aggregatestore.Aggregate[lifecycle.State], opts *aggregatestore.SaveOptions) error {
-	s.mu.Lock()
-
-	fail := false
-
-	if s.armed {
-		if s.skip > 0 {
-			s.skip--
-		} else {
-			s.armed = false
-			fail = true
-		}
-	}
-	s.mu.Unlock()
-
-	if fail {
-		return errors.New("simulated save refusal")
-	}
-
-	return s.Store.Save(ctx, aggregate, opts)
-}
-
 // interceptingEventStore delegates and lets tests hook the authority-level
 // stream read every command entry and runtime verdict flows through —
 // command entry refolds, the reconcile loop's fresh view, claim recovery,
@@ -5354,8 +4332,7 @@ func (s *interceptingEventStore) ReadStream(ctx context.Context, streamID typeid
 // truncatingWriter delegates appends and, when armed, truncates the next
 // append's result: the events are durable in the store, but the caller cannot
 // observe them. Driving the real aggregate store over this writer produces
-// the faithful ErrEventsAppended shape — queue intact, state not advanced —
-// unlike eventsAppendedStore, whose inner save fully applies first.
+// the faithful ErrEventsAppended shape — queue intact, state not advanced.
 type truncatingWriter struct {
 	eventstore.Store
 	mu    sync.Mutex
@@ -5508,86 +4485,6 @@ func (w *misreportingWriter) AppendStream(ctx context.Context, streamID typeid.I
 	}
 
 	return misreported, nil
-}
-
-// parkingSaveStore delegates and, when armed, parks a Save on a gate after a
-// configured number of untouched saves: entered closes when the parked save
-// begins, and the save completes when the gate closes. Parking the catch-up
-// append holds the handle lock open, so exit publication must queue behind
-// it — the window auto-promotion's exit awareness is pinned against.
-type parkingSaveStore struct {
-	aggregatestore.Store[lifecycle.State]
-
-	mu      sync.Mutex
-	entered chan struct{}
-	gate    chan struct{}
-	skip    int
-}
-
-func (s *parkingSaveStore) armSaveGateAfter(skip int) (entered, gate chan struct{}) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	s.entered = make(chan struct{})
-	s.gate = make(chan struct{})
-	s.skip = skip
-
-	return s.entered, s.gate
-}
-
-func (s *parkingSaveStore) Save(ctx context.Context, aggregate *aggregatestore.Aggregate[lifecycle.State], opts *aggregatestore.SaveOptions) error {
-	s.mu.Lock()
-
-	var entered, gate chan struct{}
-
-	if s.entered != nil {
-		if s.skip > 0 {
-			s.skip--
-		} else {
-			entered, gate = s.entered, s.gate
-			s.entered, s.gate = nil, nil
-		}
-	}
-	s.mu.Unlock()
-
-	if entered != nil {
-		close(entered)
-		<-gate
-	}
-
-	return s.Store.Save(ctx, aggregate, opts)
-}
-
-// memoryAggregateCache is a map-backed aggregatestore.AggregateCache, for
-// pinning which reads a cached lifecycle store must bypass.
-type memoryAggregateCache struct {
-	mu      sync.Mutex
-	entries map[string]aggregatestore.CachedAggregate[lifecycle.State]
-}
-
-func newMemoryAggregateCache() *memoryAggregateCache {
-	return &memoryAggregateCache{entries: map[string]aggregatestore.CachedAggregate[lifecycle.State]{}}
-}
-
-func (c *memoryAggregateCache) GetAggregate(_ context.Context, id typeid.ID) (*aggregatestore.CachedAggregate[lifecycle.State], error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	entry, ok := c.entries[id.String()]
-	if !ok {
-		return nil, nil
-	}
-
-	return &entry, nil
-}
-
-func (c *memoryAggregateCache) PutAggregate(_ context.Context, id typeid.ID, entry aggregatestore.CachedAggregate[lifecycle.State]) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	c.entries[id.String()] = entry
-
-	return nil
 }
 
 // appendRawLifecycleEvent writes a lifecycle event to the "orders"
@@ -5822,32 +4719,6 @@ func (w *sequenceWitness) AppliedCutover(context.Context, string) (lifecycle.Cut
 	}
 
 	return cutover, nil
-}
-
-// gateWitness reports a fixed cutover attestation, blocking its Nth call
-// until released so a test can act while the retirement protocol is paused
-// mid-attestation.
-type gateWitness struct {
-	mu      sync.Mutex
-	calls   int
-	blockOn int
-	entered chan struct{}
-	release chan struct{}
-	cutover lifecycle.Cutover
-}
-
-func (w *gateWitness) AppliedCutover(context.Context, string) (lifecycle.Cutover, error) {
-	w.mu.Lock()
-	w.calls++
-	blocked := w.calls == w.blockOn
-	w.mu.Unlock()
-
-	if blocked {
-		close(w.entered)
-		<-w.release
-	}
-
-	return w.cutover, nil
 }
 
 // injectingEventStore delegates to an inner store and, once armed, runs
@@ -6682,276 +5553,6 @@ func TestState_MutationCannotAmendTheCapturedMembership(t *testing.T) {
 	}
 }
 
-// TestRetire_RetainedStoreMutationCannotWeakenThePolicy pins retirement
-// authority against the store the caller wired and retains: a cached load
-// shares memory with the cache entry later loads are served from, so a
-// mutation through the retained store's aggregate must not change which
-// witnesses a resumed handle's retirement resolves — destruction derives its
-// authority from the durable fold, not from any served view.
-func TestRetire_RetainedStoreMutationCannotWeakenThePolicy(t *testing.T) {
-	t.Parallel()
-
-	events := newEventStore(t)
-
-	h := buildHarness(t, events, func(base aggregatestore.Store[lifecycle.State]) (aggregatestore.Store[lifecycle.State], error) {
-		return aggregatestore.NewCachedStore(base, newMemoryAggregateCache())
-	})
-	_, _, v2, done := promotedSecondVersion(t, h)
-
-	if err := h.orchestrator.SetRetirementPolicy(t.Context(), "orders", lifecycle.RetirementPolicyChange{
-		Witnesses: []string{"auditor"}, Actor: "op", Reason: "gate retirements",
-	}); err != nil {
-		t.Fatalf("recording the policy: %v", err)
-	}
-
-	// The registered router serves the live cutover, so a membership swapped
-	// to name it would attest cleanly and destroy storage.
-	h.waitLive(v2)
-
-	tampered, err := h.projections.Load(t.Context(), lifecycle.StreamUUID("orders"), nil)
-	if err != nil {
-		t.Fatalf("loading through the retained store: %v", err)
-	}
-
-	state := tampered.State()
-	if len(state.RetirementPolicy.Witnesses) != 1 {
-		t.Fatalf("fixture: want the policy visible through the retained store, got %+v", state.RetirementPolicy)
-	}
-
-	state.RetirementPolicy.Witnesses[0] = "router"
-
-	resumed, err := h.orchestrator.Resume(t.Context(), "orders")
-	if err != nil {
-		t.Fatalf("resuming: %v", err)
-	}
-
-	err = resumed.Retire(t.Context())
-	if err == nil || !strings.Contains(err.Error(), `"auditor"`) || !strings.Contains(err.Error(), "not registered") {
-		t.Fatalf("want retirement authority derived from the durable fold, got %v", err)
-	}
-
-	// The refusal alone does not prove the handle was refreshed: a Retire
-	// that derived its verdict from the fresh fold without installing it
-	// would refuse identically while the handle kept exposing the tampered
-	// membership.
-	if got := resumed.State().RetirementPolicy.Witnesses; !reflect.DeepEqual(got, []string{"auditor"}) {
-		t.Fatalf("want the refused Retire to install the event-recorded policy on the handle, got %v", got)
-	}
-
-	if got := countEventsOfType(t, h.events, lifecycle.RetireStarted{}.EventType()); got != 0 {
-		t.Errorf("want no reservation through the tampered cache, got %d", got)
-	}
-
-	if dropped := h.model.droppedTables(); len(dropped) != 0 {
-		t.Fatalf("want nothing destroyed through the tampered cache, got %v", dropped)
-	}
-
-	// The refused Retire installed the fresh fold, so this handle is current
-	// enough to contend; the runner's own handle never observed the policy
-	// event and Rollback deliberately does not refresh.
-	if err := resumed.Rollback(t.Context()); err != nil {
-		t.Errorf("want rollback still possible, got %v", err)
-	}
-
-	if err := waitDone(t, done); err != nil {
-		t.Errorf("want Run to return nil after the rollback, got %v", err)
-	}
-}
-
-// TestRetire_SnapshotCannotWeakenThePolicy pins retirement authority against
-// the snapshot layer: a structurally valid snapshot at the current version is
-// exactly what a snapshotting store installs in place of replaying events, so
-// a forged snapshot that renames the policy's membership to a converged,
-// registered witness must not change which witnesses a retirement resolves —
-// destruction derives its authority from an event-only fold, never from
-// snapshot state.
-func TestRetire_SnapshotCannotWeakenThePolicy(t *testing.T) {
-	t.Parallel()
-
-	events := newEventStore(t)
-
-	snapshots := ssmemory.NewSnapshotStore()
-
-	h := buildHarness(t, events, func(base aggregatestore.Store[lifecycle.State]) (aggregatestore.Store[lifecycle.State], error) {
-		return aggregatestore.NewSnapshottingStore(base, snapshots, snapshotstore.EventCountSnapshotPolicy{})
-	})
-	_, _, v2, done := promotedSecondVersion(t, h)
-
-	if err := h.orchestrator.SetRetirementPolicy(t.Context(), "orders", lifecycle.RetirementPolicyChange{
-		Witnesses: []string{"auditor"}, Actor: "op", Reason: "gate retirements",
-	}); err != nil {
-		t.Fatalf("recording the policy: %v", err)
-	}
-
-	// The registered router serves the live cutover, so a membership swapped
-	// to name it would attest cleanly and destroy storage.
-	h.waitLive(v2)
-
-	truth, err := h.orchestrator.Get(t.Context(), "orders")
-	if err != nil {
-		t.Fatalf("reading the recorded state: %v", err)
-	}
-
-	if !reflect.DeepEqual(truth.RetirementPolicy.Witnesses, []string{"auditor"}) {
-		t.Fatalf("fixture: want the recorded policy to require the auditor, got %+v", truth.RetirementPolicy)
-	}
-
-	current, err := h.projections.Load(t.Context(), lifecycle.StreamUUID("orders"), nil)
-	if err != nil {
-		t.Fatalf("loading the current version: %v", err)
-	}
-
-	forged := truth
-	forged.RetirementPolicy.Witnesses = []string{"router"}
-	writeLifecycleSnapshot(t, snapshots, forged, current.Version())
-
-	resumed, err := h.orchestrator.Resume(t.Context(), "orders")
-	if err != nil {
-		t.Fatalf("resuming: %v", err)
-	}
-
-	err = resumed.Retire(t.Context())
-	if err == nil || !strings.Contains(err.Error(), `"auditor"`) || !strings.Contains(err.Error(), "not registered") {
-		t.Fatalf("want retirement authority derived from the event-only fold, got %v", err)
-	}
-
-	if got := resumed.State().RetirementPolicy.Witnesses; !reflect.DeepEqual(got, []string{"auditor"}) {
-		t.Fatalf("want the refused Retire to install the event-recorded policy on the handle, got %v", got)
-	}
-
-	if got := countEventsOfType(t, h.events, lifecycle.RetireStarted{}.EventType()); got != 0 {
-		t.Errorf("want no reservation through the forged snapshot, got %d", got)
-	}
-
-	if dropped := h.model.droppedTables(); len(dropped) != 0 {
-		t.Fatalf("want nothing destroyed through the forged snapshot, got %v", dropped)
-	}
-
-	// The refused Retire installed the fresh fold, so this handle is current
-	// enough to contend.
-	if err := resumed.Rollback(t.Context()); err != nil {
-		t.Errorf("want rollback still possible, got %v", err)
-	}
-
-	if err := waitDone(t, done); err != nil {
-		t.Errorf("want Run to return nil after the rollback, got %v", err)
-	}
-}
-
-// TestRetire_CacheMutationDuringRecheckCannotAmendTheReservation pins the
-// protocol's post-reservation authority: saving the reservation publishes the
-// handle's state to the wired cache, so a mutation through the cache while
-// the recheck is mid-attestation must not change which witnesses are
-// re-attested or how their receipts are attributed — the completion must
-// record the reservation's captured membership, and an event-only replay of
-// the stream must accept it.
-func TestRetire_CacheMutationDuringRecheckCannotAmendTheReservation(t *testing.T) {
-	t.Parallel()
-
-	live := lifecycle.Cutover{Live: projection.ID{Name: "orders", Version: 2}, Revision: 2}
-
-	// gate_b's second attestation is the recheck's: the preflight attests
-	// each gate once before the reservation is appended.
-	gateB := &gateWitness{cutover: live, blockOn: 2, entered: make(chan struct{}), release: make(chan struct{})}
-
-	events := newEventStore(t)
-
-	h := buildHarness(t, events, func(base aggregatestore.Store[lifecycle.State]) (aggregatestore.Store[lifecycle.State], error) {
-		return aggregatestore.NewCachedStore(base, newMemoryAggregateCache())
-	},
-		lifecycle.WithRetirementWitness("gate_a", stubWitness{cutover: live}),
-		lifecycle.WithRetirementWitness("gate_b", gateB),
-	)
-	r2, v1, _, done := promotedSecondVersion(t, h)
-
-	if err := h.orchestrator.SetRetirementPolicy(t.Context(), "orders", lifecycle.RetirementPolicyChange{
-		Witnesses: []string{"gate_a", "gate_b"}, Actor: "op", Reason: "gate retirements",
-	}); err != nil {
-		t.Fatalf("recording the policy: %v", err)
-	}
-
-	retired := make(chan error, 1)
-	go func() {
-		retired <- r2.Retire(t.Context())
-	}()
-
-	select {
-	case <-gateB.entered:
-	case <-time.After(waitTimeout):
-		t.Fatal("timed out waiting for the recheck to reach gate_b")
-	}
-
-	// The reservation is durable and its save republished the handle's state
-	// to the cache. Rewrite the required and captured membership through the
-	// cache entry while the recheck is paused between attestations.
-	tampered, err := h.projections.Load(t.Context(), lifecycle.StreamUUID("orders"), nil)
-	if err != nil {
-		t.Fatalf("loading through the retained store: %v", err)
-	}
-
-	state := tampered.State()
-	if state.Attempt.Phase != lifecycle.PhaseRetiring ||
-		len(state.RetirementPolicy.Witnesses) != 2 || len(state.Attempt.RetiringWitnesses) != 2 {
-		t.Fatalf("fixture: want the reserved retirement visible through the cache, got %+v", state.Attempt)
-	}
-
-	state.RetirementPolicy.Witnesses[1] = "gate_a"
-	state.Attempt.RetiringWitnesses[1] = "gate_a"
-
-	close(gateB.release)
-
-	var retireErr error
-	select {
-	case retireErr = <-retired:
-	case <-time.After(waitTimeout):
-		t.Fatal("timed out waiting for the retirement to finish")
-	}
-
-	if retireErr != nil {
-		t.Fatalf("retiring: %v", retireErr)
-	}
-
-	want := []lifecycle.WitnessReceipt{{Witness: "gate_a", Cutover: live}, {Witness: "gate_b", Cutover: live}}
-
-	reservations := recordedReservations(t, h.events)
-	if len(reservations) != 1 {
-		t.Fatalf("want exactly one reservation, got %d", len(reservations))
-	}
-
-	if r := reservations[0]; !reflect.DeepEqual(r.Witnesses, []string{"gate_a", "gate_b"}) || !reflect.DeepEqual(r.Receipts, want) {
-		t.Errorf("want the reservation to capture the recorded membership, got %+v", r)
-	}
-
-	completions := recordedCompletions(t, h.events)
-	if last := completions[len(completions)-1]; !reflect.DeepEqual(last.Receipts, want) {
-		t.Errorf("want the completion to re-attest the reservation's captured membership, got %+v", last)
-	}
-
-	// The stream must hold the whole story: an event-only replay accepts the
-	// completion against the reservation it folded.
-	replay, err := lifecycle.NewStore(events)
-	if err != nil {
-		t.Fatalf("creating the replay store: %v", err)
-	}
-
-	refolded, err := replay.Load(t.Context(), lifecycle.StreamUUID("orders"), nil)
-	if err != nil {
-		t.Fatalf("replaying the lifecycle stream: %v", err)
-	}
-
-	if reason := refolded.State().InvalidReason; reason != "" {
-		t.Errorf("want the event-only replay to accept the completion, got poisoned: %s", reason)
-	}
-
-	if dropped := h.model.droppedTables(); len(dropped) != 1 || dropped[0] != v1 {
-		t.Errorf("want %s torn down exactly once, got %v", v1, dropped)
-	}
-
-	if err := waitDone(t, done); err != nil {
-		t.Errorf("want Run to return nil after the rebuild completes, got %v", err)
-	}
-}
-
 // reservationWindowHarness wires the standard harness with the lifecycle
 // authority reads intercepted, so a test can inject a stream event into the
 // window between a retirement reservation's save and the protocol's
@@ -6962,7 +5563,7 @@ func reservationWindowHarness(t *testing.T, live lifecycle.Cutover) (*harness, *
 	events := newEventStore(t)
 	hooked := &injectingEventStore{Store: events}
 
-	h := buildHarnessWithLifecycleEvents(t, events, hooked, nil,
+	h := buildHarnessWithLifecycleEvents(t, events, hooked,
 		lifecycle.WithRetirementWitness("gate_a", stubWitness{cutover: live}),
 		lifecycle.WithRetirementWitness("gate_b", stubWitness{cutover: live}),
 	)
@@ -7184,17 +5785,13 @@ func TestRetire_RecordsEveryWitnessReceipt(t *testing.T) {
 	}
 }
 
-// TestGet_ReturnsDetachedState pins the orchestrator-level boundary: behind
-// a caching aggregate store, the state Get returns must not share memory
-// with the cache entry later loads are served from.
+// TestGet_ReturnsDetachedState pins the observation boundary: the state Get
+// returns must not share memory with anything a later read is served from —
+// writing through one caller's view can never alter another's.
 func TestGet_ReturnsDetachedState(t *testing.T) {
 	t.Parallel()
 
-	events := newEventStore(t)
-
-	h := buildHarness(t, events, func(base aggregatestore.Store[lifecycle.State]) (aggregatestore.Store[lifecycle.State], error) {
-		return aggregatestore.NewCachedStore(base, newMemoryAggregateCache())
-	})
+	h := newHarness(t)
 	h.promoteFirstVersion()
 
 	if err := h.orchestrator.SetRetirementPolicy(t.Context(), "orders", lifecycle.RetirementPolicyChange{
@@ -7290,17 +5887,13 @@ func TestRetire_ReservationSaveFailureDestroysNothing(t *testing.T) {
 	model := newReadModel()
 	checkpoints := cpmemory.NewCheckpointStore()
 
-	var projections *refusingStore
+	writer := &refusingWriter{Store: events}
 
 	orchestrator, err := lifecycle.NewOrchestrator(lifecycle.Config{
 		Events:          events,
 		Checkpoints:     checkpoints,
 		Handler:         model.handler,
-		LifecycleEvents: events,
-		DecorateProjections: func(base aggregatestore.Store[lifecycle.State]) (aggregatestore.Store[lifecycle.State], error) {
-			projections = &refusingStore{Store: base}
-			return projections, nil
-		},
+		LifecycleEvents: writer,
 	},
 		lifecycle.WithProcessorOptions(processor.WithPollInterval(2*time.Millisecond)),
 		lifecycle.WithReconcileInterval(10*time.Millisecond),
@@ -7325,7 +5918,7 @@ func TestRetire_ReservationSaveFailureDestroysNothing(t *testing.T) {
 		t.Fatalf("promoting v2: %v", err)
 	}
 
-	projections.armFailure()
+	writer.armFailure()
 
 	if err := r2.Retire(t.Context(), lifecycle.WithRetirementOverride("test", "refused reservation scenario")); err == nil {
 		t.Fatal("want the refused reservation save reported, got nil")
@@ -7546,5 +6139,264 @@ func TestRetire_RetryCannotBeOverridden(t *testing.T) {
 
 	if err := waitDone(t, done); err != nil {
 		t.Errorf("want Run to return nil after the rebuild completes, got %v", err)
+	}
+}
+
+// refusingWriter delegates appends and, when armed, refuses one append
+// outright — after letting a configured number pass — before anything
+// reaches the store: the pre-append failure shape, which leaves the
+// command's event queued on the aggregate and nothing durable.
+type refusingWriter struct {
+	eventstore.Store
+	mu    sync.Mutex
+	armed bool
+	skip  int
+}
+
+func (w *refusingWriter) armFailure() {
+	w.armFailureAfterAppends(0)
+}
+
+// armFailureAfterAppends arms the writer to refuse one append after allowing n.
+func (w *refusingWriter) armFailureAfterAppends(n int) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	w.armed = true
+	w.skip = n
+}
+
+func (w *refusingWriter) AppendStream(ctx context.Context, streamID typeid.ID, events []*eventstore.WritableEvent, opts eventstore.AppendStreamOptions) ([]*eventstore.Event, error) {
+	w.mu.Lock()
+
+	fail := false
+
+	if w.armed {
+		if w.skip > 0 {
+			w.skip--
+		} else {
+			w.armed = false
+			fail = true
+		}
+	}
+	w.mu.Unlock()
+
+	if fail {
+		return nil, errors.New("simulated append refusal")
+	}
+
+	return w.Store.AppendStream(ctx, streamID, events, opts)
+}
+
+// parkingWriter delegates appends and, when armed, parks an append on a gate
+// after a configured number of untouched appends: entered closes when the
+// parked append begins, and the append proceeds when the gate closes.
+// Parking a command's append holds the handle lock open, so exit publication
+// must queue behind it — the window auto-promotion's exit awareness is
+// pinned against.
+type parkingWriter struct {
+	eventstore.Store
+
+	mu      sync.Mutex
+	entered chan struct{}
+	gate    chan struct{}
+	skip    int
+}
+
+func (w *parkingWriter) armAppendGateAfter(skip int) (entered, gate chan struct{}) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	w.entered = make(chan struct{})
+	w.gate = make(chan struct{})
+	w.skip = skip
+
+	return w.entered, w.gate
+}
+
+func (w *parkingWriter) AppendStream(ctx context.Context, streamID typeid.ID, events []*eventstore.WritableEvent, opts eventstore.AppendStreamOptions) ([]*eventstore.Event, error) {
+	w.mu.Lock()
+
+	var entered, gate chan struct{}
+
+	if w.entered != nil {
+		if w.skip > 0 {
+			w.skip--
+		} else {
+			entered, gate = w.entered, w.gate
+			w.entered, w.gate = nil, nil
+		}
+	}
+	w.mu.Unlock()
+
+	if entered != nil {
+		close(entered)
+		<-gate
+	}
+
+	return w.Store.AppendStream(ctx, streamID, events, opts)
+}
+
+// TestPromote_PerformsNoAuthorityRead pins Promote's deliberate exception to
+// the entry-refold rule: promotion decides from the retained,
+// certificate-anchored state and performs no authority read at all. The
+// retained version is load-bearing — the flip's append carries it as the
+// expected version, so the append itself arbitrates against every
+// transition recorded since certification. A refold inserted after the
+// certificate checks would absorb a competing claim those checks never saw
+// and let the flip commit over it; any authority read here fails the armed
+// intercept, so that mutation cannot survive this test.
+func TestPromote_PerformsNoAuthorityRead(t *testing.T) {
+	t.Parallel()
+
+	events := newEventStore(t)
+	authority := &interceptingEventStore{Store: events}
+
+	h := buildHarnessWithLifecycleEvents(t, events, authority, lifecycle.WithReconcileInterval(time.Hour))
+	h.appendDomain(3)
+
+	r := h.begin("promotion reads nothing")
+	cancel, done := runAsync(t, r)
+	waitPhase(t, r, lifecycle.PhaseCaughtUp)
+
+	reads := authority.armHydrateIntercept(0, func(context.Context) error {
+		return errors.New("promotion must not read the lifecycle stream")
+	})
+
+	if err := r.Promote(t.Context()); err != nil {
+		t.Fatalf("want the certified promotion to decide without reading, got %v", err)
+	}
+
+	select {
+	case <-reads:
+		t.Fatal("want no authority read during Promote")
+	default:
+	}
+
+	if got := r.State().Attempt.Phase; got != lifecycle.PhasePromoted {
+		t.Errorf("want the flip recorded on the handle, got %s", got)
+	}
+
+	if got := countEventsOfType(t, events, lifecycle.Promoted{}.EventType()); got != 1 {
+		t.Errorf("want exactly one Promoted event recorded, got %d", got)
+	}
+
+	cancel()
+
+	if err := waitDone(t, done); !errors.Is(err, context.Canceled) {
+		t.Errorf("want the promoted run to tail until canceled, got %v", err)
+	}
+}
+
+// TestStateJSONRoundTrip_PreservesPoison pins the poison mark's persistence
+// through the state codec: lifecycle state serialized outside the
+// orchestrator — a user-wired snapshot over the exported store, a
+// diagnostic dump — feeds State back through JSON, and a mark that did not
+// persist would launder a poisoned fold into a clean one. The fold here is
+// a cover-up whose final shape validates clean; only the mark carries the
+// verdict.
+func TestStateJSONRoundTrip_PreservesPoison(t *testing.T) {
+	t.Parallel()
+
+	events := newEventStore(t)
+
+	v1 := projection.ID{Name: "orders", Version: 1}
+	at := time.Date(2026, 8, 17, 10, 0, 0, 0, time.UTC)
+
+	appendRawLifecycleEvent(t, events, lifecycle.RebuildInitiated{Attempt: uuid.Must(uuid.NewV4()), Target: v1, Reason: "first build", At: at})
+	appendRawLifecycleEvent(t, events, lifecycle.Abandoned{Cause: "burning v1"})
+	appendRawLifecycleEvent(t, events, lifecycle.RebuildInitiated{Attempt: uuid.Must(uuid.NewV4()), Target: v1, Reason: "reusing the burned version", At: at})
+	appendRawLifecycleEvent(t, events, lifecycle.Abandoned{Cause: "covering the tracks"})
+
+	replay, err := lifecycle.NewStore(events)
+	if err != nil {
+		t.Fatalf("creating the replay store: %v", err)
+	}
+
+	folded, err := replay.Load(t.Context(), lifecycle.StreamUUID("orders"), nil)
+	if err != nil {
+		t.Fatalf("folding the covered-up stream: %v", err)
+	}
+
+	poisoned := folded.State()
+	if poisoned.InvalidReason == "" {
+		t.Fatal("fixture: want the cover-up fold poisoned")
+	}
+
+	data, err := json.Marshal(poisoned)
+	if err != nil {
+		t.Fatalf("marshaling the poisoned state: %v", err)
+	}
+
+	var restored lifecycle.State
+	if err := json.Unmarshal(data, &restored); err != nil {
+		t.Fatalf("unmarshaling: %v", err)
+	}
+
+	if restored.InvalidReason != poisoned.InvalidReason {
+		t.Errorf("want the poison mark to survive the round trip, got %q (was %q)", restored.InvalidReason, poisoned.InvalidReason)
+	}
+}
+
+// TestStateJSONRoundTrip_PreservesCutoverRevision pins the revision's
+// persistence through the state codec: the revision is the routing fencing
+// token, and external serialization that dropped it would restart fencing
+// at zero.
+func TestStateJSONRoundTrip_PreservesCutoverRevision(t *testing.T) {
+	t.Parallel()
+
+	h := newHarness(t)
+	h.appendDomain(2)
+
+	completeFirstBuild(t, h.orchestrator)
+
+	state, err := h.orchestrator.Get(t.Context(), "orders")
+	if err != nil {
+		t.Fatalf("getting state: %v", err)
+	}
+
+	if state.CutoverRevision != 1 {
+		t.Fatalf("fixture: want cutover revision 1 after the first build, got %d", state.CutoverRevision)
+	}
+
+	data, err := json.Marshal(state)
+	if err != nil {
+		t.Fatalf("marshaling: %v", err)
+	}
+
+	var restored lifecycle.State
+	if err := json.Unmarshal(data, &restored); err != nil {
+		t.Fatalf("unmarshaling: %v", err)
+	}
+
+	if restored.CutoverRevision != 1 {
+		t.Errorf("want cutover revision 1 to survive the round trip, got %d", restored.CutoverRevision)
+	}
+}
+
+// TestObservation_RefusesAForeignNamedStream pins the address check on the
+// one load path: a stream whose events name another projection — written
+// there by a bug or by tampering — folds clean on its own terms, so only
+// the check against the addressing name can refuse it. Observation and
+// every command entry run the same check; a foreign fold must never be
+// served or acted on as "orders".
+func TestObservation_RefusesAForeignNamedStream(t *testing.T) {
+	t.Parallel()
+
+	h := newHarness(t)
+
+	appendRawLifecycleEvent(t, h.events, lifecycle.RebuildInitiated{
+		Attempt: uuid.Must(uuid.NewV4()),
+		Target:  projection.ID{Name: "customers", Version: 1},
+		Reason:  "foreign history at the orders address",
+		At:      time.Date(2026, 8, 20, 10, 0, 0, 0, time.UTC),
+	})
+
+	if _, err := h.orchestrator.Get(t.Context(), "orders"); !errors.Is(err, lifecycle.ErrInvalidState) {
+		t.Errorf("want Get refused with ErrInvalidState, got %v", err)
+	}
+
+	if _, err := h.orchestrator.Resume(t.Context(), "orders"); !errors.Is(err, lifecycle.ErrInvalidState) {
+		t.Errorf("want Resume refused with ErrInvalidState, got %v", err)
 	}
 }

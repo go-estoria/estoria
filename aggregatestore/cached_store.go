@@ -3,6 +3,7 @@ package aggregatestore
 import (
 	"context"
 	"errors"
+	"sync"
 
 	"github.com/go-estoria/estoria"
 	"github.com/go-estoria/estoria/typeid"
@@ -32,6 +33,15 @@ type CachedStore[S any] struct {
 	inner Store[S]
 	cache AggregateCache[S]
 	log   estoria.Logger
+
+	// freshness records the newest version published per aggregate.
+	// Publications race — two loads or saves can reach the cache backend out
+	// of order — and the backend itself offers no ordering, so this store
+	// tracks the high-water mark itself: publish skips writes below it, and a
+	// hit below it is served as a miss instead. The mutex guards only the
+	// map; no backend call runs under it.
+	mu        sync.Mutex
+	freshness map[string]int64
 }
 
 // NewCachedStore creates a new CachedStore.
@@ -47,9 +57,10 @@ func NewCachedStore[S any](
 	}
 
 	return &CachedStore[S]{
-		inner: inner,
-		cache: cacher,
-		log:   estoria.GetLogger().WithGroup("cachedstore"),
+		inner:     inner,
+		cache:     cacher,
+		log:       estoria.GetLogger().WithGroup("cachedstore"),
+		freshness: map[string]int64{},
 	}, nil
 }
 
@@ -87,8 +98,13 @@ func (s *CachedStore[S]) Load(ctx context.Context, id uuid.UUID, opts *LoadOptio
 
 	entry, err := s.cache.GetAggregate(ctx, aggregateID)
 	switch {
-	case err == nil && entry != nil:
+	case err == nil && entry != nil && s.isFresh(aggregateID, entry.Version):
 		return newAggregate(aggregateID, entry.State, entry.Version), nil
+	case err == nil && entry != nil:
+		// An out-of-order publication landed after a newer one: serving the
+		// entry would regress reads, so load from the inner store instead —
+		// and let the publication below heal the backend entry.
+		s.log.Debug("cache entry predates a newer publication", "aggregate_id", aggregateID)
 	case err != nil:
 		s.log.Warn("failed to read cache", "aggregate_id", aggregateID, "error", err)
 	default:
@@ -100,11 +116,40 @@ func (s *CachedStore[S]) Load(ctx context.Context, id uuid.UUID, opts *LoadOptio
 		return nil, LoadError{Operation: "loading from inner aggregate store", Err: err}
 	}
 
-	if err := s.cache.PutAggregate(ctx, aggregate.ID(), CachedAggregate[S]{State: aggregate.State(), Version: aggregate.Version()}); err != nil {
+	if err := s.publish(ctx, aggregate.ID(), CachedAggregate[S]{State: aggregate.State(), Version: aggregate.Version()}); err != nil {
 		s.log.Warn("failed to write cache", "aggregate_id", aggregateID, "error", err)
 	}
 
 	return aggregate, nil
+}
+
+// publish writes the entry to the cache unless a newer version has already
+// been published, advancing the aggregate's freshness high-water mark. The
+// skip alone cannot prevent every regression — a write that passed the check
+// can still land at the backend after a newer one — so serving reads applies
+// the same mark to hits; between them, an out-of-order publication is never
+// served. Re-publishing the version already at the mark is allowed: that is
+// how a hit refused as stale heals the backend entry.
+func (s *CachedStore[S]) publish(ctx context.Context, aggregateID typeid.ID, entry CachedAggregate[S]) error {
+	s.mu.Lock()
+	if entry.Version < s.freshness[aggregateID.String()] {
+		s.mu.Unlock()
+		return nil
+	}
+
+	s.freshness[aggregateID.String()] = entry.Version
+	s.mu.Unlock()
+
+	return s.cache.PutAggregate(ctx, aggregateID, entry)
+}
+
+// isFresh reports whether a cached version is at or above the aggregate's
+// published high-water mark and may be served.
+func (s *CachedStore[S]) isFresh(aggregateID typeid.ID, version int64) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return version >= s.freshness[aggregateID.String()]
 }
 
 // Hydrate hydrates an aggregate by deferring to the inner store.
@@ -132,7 +177,7 @@ func (s *CachedStore[S]) Save(ctx context.Context, aggregate *Aggregate[S], opts
 		return nil
 	}
 
-	if err := s.cache.PutAggregate(ctx, aggregate.ID(), CachedAggregate[S]{State: aggregate.State(), Version: aggregate.Version()}); err != nil {
+	if err := s.publish(ctx, aggregate.ID(), CachedAggregate[S]{State: aggregate.State(), Version: aggregate.Version()}); err != nil {
 		s.log.Warn("failed to write cache", "aggregate_id", aggregate.ID(), "error", err)
 	}
 

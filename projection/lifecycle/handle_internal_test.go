@@ -177,19 +177,19 @@ type nopHandler struct{}
 
 func (nopHandler) Handle(context.Context, *eventstore.Event) error { return nil }
 
-// gatedSaveStore delegates and, when armed, parks the next Save on a gate:
-// entered closes when the parked save begins, and the save completes when
-// the gate closes. It holds promotion's append open so exit-publication
-// ordering can be observed.
-type gatedSaveStore struct {
-	aggregatestore.Store[State]
+// gatedAppendStore delegates and, when armed, parks the next append on a
+// gate: entered closes when the parked append begins, and the append
+// completes when the gate closes. It holds promotion's append open so
+// exit-publication ordering can be observed.
+type gatedAppendStore struct {
+	eventstore.Store
 
 	mu      sync.Mutex
 	entered chan struct{}
 	gate    chan struct{}
 }
 
-func (s *gatedSaveStore) armSaveGate() (entered, gate chan struct{}) {
+func (s *gatedAppendStore) armAppendGate() (entered, gate chan struct{}) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -199,7 +199,7 @@ func (s *gatedSaveStore) armSaveGate() (entered, gate chan struct{}) {
 	return s.entered, s.gate
 }
 
-func (s *gatedSaveStore) Save(ctx context.Context, aggregate *aggregatestore.Aggregate[State], opts *aggregatestore.SaveOptions) error {
+func (s *gatedAppendStore) AppendStream(ctx context.Context, streamID typeid.ID, events []*eventstore.WritableEvent, opts eventstore.AppendStreamOptions) ([]*eventstore.Event, error) {
 	s.mu.Lock()
 	entered, gate := s.entered, s.gate
 	s.entered, s.gate = nil, nil
@@ -210,7 +210,7 @@ func (s *gatedSaveStore) Save(ctx context.Context, aggregate *aggregatestore.Agg
 		<-gate
 	}
 
-	return s.Store.Save(ctx, aggregate, opts)
+	return s.Store.AppendStream(ctx, streamID, events, opts)
 }
 
 // caughtUpRebuildForTest builds a handle over a real caught-up lifecycle
@@ -221,7 +221,7 @@ func (s *gatedSaveStore) Save(ctx context.Context, aggregate *aggregatestore.Agg
 // deterministically. The real store makes a mutant that skips an arm
 // observable as a durably recorded promotion rather than as a fixture
 // panic.
-func caughtUpRebuildForTest(t *testing.T, store aggregatestore.Store[State]) (*Rebuild, *certification) {
+func caughtUpRebuildForTest(t *testing.T, gate *gatedAppendStore) (*Rebuild, *certification) {
 	t.Helper()
 
 	events, err := esmemory.NewEventStore()
@@ -229,26 +229,25 @@ func caughtUpRebuildForTest(t *testing.T, store aggregatestore.Store[State]) (*R
 		t.Fatalf("creating event store: %v", err)
 	}
 
+	lifecycleEvents := eventstore.Store(events)
+	if gate != nil {
+		gate.Store = events
+		lifecycleEvents = gate
+	}
+
 	orchestrator, err := NewOrchestrator(Config{
 		Events:          events,
 		Checkpoints:     cpmemory.NewCheckpointStore(),
 		Handler:         func(projection.ID) (projection.EventHandler, error) { return nopHandler{}, nil },
-		LifecycleEvents: events,
-		DecorateProjections: func(base aggregatestore.Store[State]) (aggregatestore.Store[State], error) {
-			if store == nil {
-				store = base
-				return base, nil
-			}
-
-			if wrapper, ok := store.(*gatedSaveStore); ok {
-				wrapper.Store = base
-			}
-
-			return store, nil
-		},
+		LifecycleEvents: lifecycleEvents,
 	})
 	if err != nil {
 		t.Fatalf("creating orchestrator: %v", err)
+	}
+
+	store, err := NewStore(events)
+	if err != nil {
+		t.Fatalf("creating the history store: %v", err)
 	}
 
 	v1 := projection.ID{Name: "orders", Version: 1}
@@ -400,12 +399,12 @@ func TestPromote_RevocationCarriesTheCause(t *testing.T) {
 func TestPublishProcessorExit_SerializesWithPromotion(t *testing.T) {
 	t.Parallel()
 
-	store := &gatedSaveStore{}
+	store := &gatedAppendStore{}
 
 	r, certificate := caughtUpRebuildForTest(t, store)
 	r.certificate = certificate
 
-	entered, gate := store.armSaveGate()
+	entered, gate := store.armAppendGate()
 
 	promoted := make(chan error, 1)
 
