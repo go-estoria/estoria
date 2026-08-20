@@ -38,7 +38,9 @@ type Config struct {
 	// must succeed for versions whose storage is already absent: a retirement
 	// interrupted after its teardown re-resolves the handler on repair, so a
 	// factory that validates or prepares against the removed storage would
-	// wedge the lifecycle in the retiring phase forever.
+	// wedge the lifecycle in the retiring phase forever. Independent repairs
+	// can resolve the same version concurrently — nothing serializes retries
+	// across processes — so the factory must tolerate concurrent invocation.
 	Handler func(id projection.ID) (projection.EventHandler, error)
 
 	// Projections is the aggregate store holding projection lifecycle
@@ -217,7 +219,7 @@ func (o *Orchestrator) SetRetirementPolicy(ctx context.Context, name string, cha
 	}
 
 	current := aggregate.State().RetirementPolicy.Generation
-	if current == math.MaxInt64 {
+	if current >= math.MaxInt64-1 {
 		return fmt.Errorf("cannot record a retirement policy for projection %q: the policy generation is exhausted", name)
 	}
 

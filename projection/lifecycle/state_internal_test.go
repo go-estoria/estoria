@@ -773,6 +773,19 @@ func TestFold_PoisonBranches(t *testing.T) {
 			},
 		},
 		{
+			name:       "policy transition past the reachable ceiling",
+			prior:      withPolicy(State{Name: "orders", Live: ordersV6, CutoverRevision: 1, Allocated: 6}, math.MaxInt64-1, "router"),
+			event:      RetirementPolicySet{Generation: math.MaxInt64, Witnesses: []string{"router"}, Actor: "op", Reason: "gate", At: internalAt},
+			wantReason: "generations are exhausted",
+			applied: func(t *testing.T, got State) {
+				t.Helper()
+
+				if got.RetirementPolicy.Generation != math.MaxInt64 {
+					t.Errorf("want the transition applied as recorded, got %+v", got.RetirementPolicy)
+				}
+			},
+		},
+		{
 			name:       "retirement receipt attests the wrong witness",
 			prior:      withPolicy(stateInPhase(PhasePromoted), 1, "router"),
 			event:      RetireStarted{Retiring: ordersV6, PolicyGeneration: 1, Witnesses: []string{"router"}, Receipts: []WitnessReceipt{{Witness: "auditor", Cutover: Cutover{Live: ordersV7, Revision: 2}}}, At: internalAt},
@@ -820,6 +833,32 @@ func TestFold_PoisonBranches(t *testing.T) {
 
 			tt.applied(t, got)
 		})
+	}
+}
+
+// TestFold_PolicyCeilingBoundary pins the exhaustion arm's edge: the last
+// reachable transition — to generation MaxInt64-1, each generation consuming
+// a stream event beside the initiation — applies cleanly; only transitions
+// past it poison.
+func TestFold_PolicyCeilingBoundary(t *testing.T) {
+	t.Parallel()
+
+	prior := withPolicy(State{Name: "orders", Live: ordersV6, CutoverRevision: 1, Allocated: 6}, math.MaxInt64-2, "router")
+
+	got := RetirementPolicySet{
+		Generation: math.MaxInt64 - 1,
+		Witnesses:  []string{"router"},
+		Actor:      "op",
+		Reason:     "gate",
+		At:         internalAt,
+	}.ApplyTo(prior)
+
+	if got.InvalidReason != "" {
+		t.Fatalf("want the final reachable transition applied cleanly, got poisoned: %s", got.InvalidReason)
+	}
+
+	if got.RetirementPolicy.Generation != math.MaxInt64-1 {
+		t.Errorf("want the ceiling generation installed, got %+v", got.RetirementPolicy)
 	}
 }
 
@@ -1364,6 +1403,15 @@ func TestValidate_RetirementPolicyAndCapture(t *testing.T) {
 			wantErr: "negative policy generation",
 		},
 		{
+			name:    "a generation at the unreachable maximum",
+			state:   withPolicy(stateInPhase(PhaseNone), math.MaxInt64, "router"),
+			wantErr: "reachable transition count",
+		},
+		{
+			name:  "a generation at the reachable ceiling",
+			state: withPolicy(stateInPhase(PhaseNone), math.MaxInt64-1, "router"),
+		},
+		{
 			name: "witnesses alongside the unwitnessed mode",
 			state: func() State {
 				s := stateInPhase(PhaseNone)
@@ -1628,6 +1676,7 @@ func TestValidateSnapshotState_Contract(t *testing.T) {
 		{name: "witnessed retiring payload is accepted", state: withPolicy(withCapturedWitnesses(stateInPhase(PhaseRetiring), "router"), 1, "router"), accept: true},
 		{name: "clean payload with captured witnesses and no policy is rejected", state: withCapturedWitnesses(stateInPhase(PhaseRetiring), "router"), accept: false},
 		{name: "clean payload whose capture diverges from the sole generation is rejected", state: withPolicy(withCapturedWitnesses(stateInPhase(PhaseRetiring), "auditor"), 1, "router"), accept: false},
+		{name: "clean payload at the unreachable maximum generation is rejected", state: withPolicy(stateInPhase(PhaseNone), math.MaxInt64, "router"), accept: false},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()

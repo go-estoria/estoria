@@ -487,8 +487,9 @@ func (e PreviousRetired) ApplyTo(s State) State {
 // configuration only resolves implementations for the IDs the policy names.
 // Generations count transitions by exactly one, and every transition
 // carries the actor and reason that authorized it. A policy recorded before
-// the lifecycle's first admission, or past the final representable
-// generation, poisons the fold.
+// the lifecycle's first admission, or past the reachable generation ceiling
+// (each transition consumes a stream event beside the initiation, so
+// MaxInt64-1 is the last recordable generation), poisons the fold.
 type RetirementPolicySet struct {
 	Generation  int64
 	Witnesses   []string
@@ -510,7 +511,7 @@ func (e RetirementPolicySet) ApplyTo(s State) State {
 	case s.Name == "":
 		s = s.poison("retirement policy recorded before lifecycle initialization",
 			"generation", e.Generation)
-	case s.RetirementPolicy.Generation == math.MaxInt64:
+	case s.RetirementPolicy.Generation >= math.MaxInt64-1:
 		s = s.poison("retirement policy generations are exhausted",
 			"projection", s.Name, "recorded_generation", e.Generation)
 	case e.Generation != s.RetirementPolicy.Generation+1:

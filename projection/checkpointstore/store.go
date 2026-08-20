@@ -52,6 +52,9 @@ type Store interface {
 	Save(ctx context.Context, id projection.ID, position int64) error
 
 	// Delete removes the projection's checkpoint, or reports
-	// ErrCheckpointNotFound if none exists.
+	// ErrCheckpointNotFound if none exists. Deletes of the same ID may run
+	// concurrently — independent retirement repairs overlap, and nothing
+	// serializes them across processes — and every overlapping caller must
+	// receive success or ErrCheckpointNotFound.
 	Delete(ctx context.Context, id projection.ID) error
 }

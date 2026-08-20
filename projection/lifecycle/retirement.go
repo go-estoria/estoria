@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 )
 
 // A RetirementPolicy is the durable witness policy governing a projection's
@@ -16,7 +17,9 @@ import (
 // override.
 type RetirementPolicy struct {
 	// Generation is the policy transition count: each RetirementPolicySet
-	// increments it by exactly one.
+	// increments it by exactly one. Each transition consumes a stream event
+	// beside the lifecycle's initiation, so MaxInt64-1 is the last reachable
+	// generation; MaxInt64 cannot arise from any fold.
 	Generation int64
 
 	// Witnesses are the stable IDs of the setters that must vouch for the
@@ -41,6 +44,8 @@ func (p RetirementPolicy) validate() error {
 	switch {
 	case p.Generation < 0:
 		return errors.New("negative policy generation")
+	case p.Generation == math.MaxInt64:
+		return errors.New("policy generation exceeds the reachable transition count")
 	case p.Generation == 0 && (len(p.Witnesses) != 0 || p.Unwitnessed):
 		return errors.New("policy content recorded with no generation")
 	case p.Generation > 0 && p.Unwitnessed && len(p.Witnesses) != 0:
@@ -87,7 +92,9 @@ type WitnessReceipt struct {
 // durable policy requires attests to serving the exact live cutover, so a
 // route still directing reads at the version about to be destroyed refuses
 // the retirement. CutoverSetter implementations satisfy the interface
-// through their AppliedCutover side.
+// through their AppliedCutover side. Attestations may be requested
+// concurrently: preflights and rechecks from independent retirement retries
+// overlap, and nothing serializes them across processes.
 type RetirementWitness interface {
 	// AppliedCutover reports the cutover the witness currently serves for
 	// the named projection, per the CutoverSetter contract.

@@ -1234,8 +1234,11 @@ type retireConfig struct {
 // WithRetirementOverride authorizes this one retirement without witness
 // attestation, durably audited: the actor and reason are recorded in the
 // reservation. It substitutes for a witness policy, not for the teardown
-// preconditions, and a retry of an already-reserved retirement ignores it —
-// the reservation's captured gate governs.
+// preconditions, and it applies only where the gate applies — a fresh
+// reservation of a nonzero previous version. A retry of an already-reserved
+// retirement refuses it (the reservation's captured gate governs, and
+// nothing could durably record a retry's authorization), as does a
+// first rebuild's completion (which destroys nothing and is not gated).
 func WithRetirementOverride(actor, reason string) RetireOption {
 	return func(c *retireConfig) {
 		if actor == "" || reason == "" {
@@ -1254,10 +1257,12 @@ func WithRetirementOverride(actor, reason string) RetireOption {
 // delete run only after the reservation is durable; PreviousRetired records
 // completion, vacating the attempt slot. A Retire interrupted between
 // reservation and completion is repaired by calling Retire again — from
-// PhaseRetiring it skips the reservation and re-runs the teardown, which
-// the projection.Teardowner contract requires to be idempotent and
-// concurrent-safe: independent handles can repair the same retirement, and
-// nothing serializes their teardowns across processes.
+// PhaseRetiring it skips the reservation and re-runs the teardown.
+// Overlapping repairs are legal — nothing serializes retries across handles
+// or processes — so every collaborator a repair invokes must tolerate
+// concurrent invocation for the same version: the handler factory, the
+// witnesses, the teardown (idempotent and concurrent-safe, per the
+// projection.Teardowner contract), and the checkpoint delete.
 //
 // Destruction is gated on the durable retirement policy. Every witness the
 // policy requires is resolved from the orchestrator's registrations and
@@ -1306,12 +1311,20 @@ func (r *Rebuild) Retire(ctx context.Context, opts ...RetireOption) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	// Refresh before reserving, so the common stale-handle case fails fast
-	// with a phase error instead of a version conflict. The reservation
-	// append remains the arbiter.
-	if err := r.orchestrator.config.Projections.Hydrate(ctx, r.aggregate, nil); err != nil {
+	// Re-establish authority from the durable fold before any destructive
+	// effect: the handle's aggregate may descend from a cache-served load,
+	// whose state can share memory with the cache and with every caller the
+	// wired store served — so the membership and teardown target that govern
+	// destruction are refolded from the stream itself, never trusted from a
+	// retained view. The fresh fold also refreshes the common stale-handle
+	// case into a fast phase error; the reservation append remains the
+	// arbiter.
+	loaded, err := r.hydrateFresh(ctx, 0)
+	if err != nil {
 		return fmt.Errorf("refreshing lifecycle state: %w", err)
 	}
+
+	r.aggregate = loaded
 
 	if err := checkLifecycleAggregate(r.aggregate, r.name); err != nil {
 		return err
@@ -1333,7 +1346,12 @@ func (r *Rebuild) Retire(ctx context.Context, opts ...RetireOption) error {
 
 	if previous.Version == 0 {
 		// A first rebuild: nothing to tear down, and nothing to reserve
-		// against. Record completion directly.
+		// against — and so nothing an override could authorize or be
+		// recorded in.
+		if config.override != (RetirementOverride{}) {
+			return fmt.Errorf("projection %q: a first rebuild's completion destroys nothing and is not gated; the retirement override does not apply", state.Name)
+		}
+
 		return r.recordRetirement(ctx, previous, nil)
 	}
 

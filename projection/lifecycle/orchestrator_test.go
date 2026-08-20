@@ -6431,6 +6431,167 @@ func TestState_MutationCannotAmendTheCapturedMembership(t *testing.T) {
 	}
 }
 
+// TestRetire_RetainedStoreMutationCannotWeakenThePolicy pins retirement
+// authority against the store the caller wired and retains: a cached load
+// shares memory with the cache entry later loads are served from, so a
+// mutation through the retained store's aggregate must not change which
+// witnesses a resumed handle's retirement resolves — destruction derives its
+// authority from the durable fold, not from any served view.
+func TestRetire_RetainedStoreMutationCannotWeakenThePolicy(t *testing.T) {
+	t.Parallel()
+
+	events := newEventStore(t)
+
+	inner, err := lifecycle.NewStore(events)
+	if err != nil {
+		t.Fatalf("creating lifecycle store: %v", err)
+	}
+
+	projections, err := aggregatestore.NewCachedStore(inner, newMemoryAggregateCache())
+	if err != nil {
+		t.Fatalf("creating cached lifecycle store: %v", err)
+	}
+
+	h := buildHarness(t, events, projections)
+	_, _, v2, done := promotedSecondVersion(t, h)
+
+	if err := h.orchestrator.SetRetirementPolicy(t.Context(), "orders", lifecycle.RetirementPolicyChange{
+		Witnesses: []string{"auditor"}, Actor: "op", Reason: "gate retirements",
+	}); err != nil {
+		t.Fatalf("recording the policy: %v", err)
+	}
+
+	// The registered router serves the live cutover, so a membership swapped
+	// to name it would attest cleanly and destroy storage.
+	h.waitLive(v2)
+
+	tampered, err := projections.Load(t.Context(), lifecycle.StreamUUID("orders"), nil)
+	if err != nil {
+		t.Fatalf("loading through the retained store: %v", err)
+	}
+
+	state := tampered.State()
+	if len(state.RetirementPolicy.Witnesses) != 1 {
+		t.Fatalf("fixture: want the policy visible through the retained store, got %+v", state.RetirementPolicy)
+	}
+
+	state.RetirementPolicy.Witnesses[0] = "router"
+
+	resumed, err := h.orchestrator.Resume(t.Context(), "orders")
+	if err != nil {
+		t.Fatalf("resuming: %v", err)
+	}
+
+	err = resumed.Retire(t.Context())
+	if err == nil || !strings.Contains(err.Error(), `"auditor"`) || !strings.Contains(err.Error(), "not registered") {
+		t.Fatalf("want retirement authority derived from the durable fold, got %v", err)
+	}
+
+	if got := countEventsOfType(t, h.events, lifecycle.RetireStarted{}.EventType()); got != 0 {
+		t.Errorf("want no reservation through the tampered cache, got %d", got)
+	}
+
+	if dropped := h.model.droppedTables(); len(dropped) != 0 {
+		t.Fatalf("want nothing destroyed through the tampered cache, got %v", dropped)
+	}
+
+	// The refused Retire installed the fresh fold, so this handle is current
+	// enough to contend; the runner's own handle never observed the policy
+	// event and Rollback deliberately does not refresh.
+	if err := resumed.Rollback(t.Context()); err != nil {
+		t.Errorf("want rollback still possible, got %v", err)
+	}
+
+	if err := waitDone(t, done); err != nil {
+		t.Errorf("want Run to return nil after the rollback, got %v", err)
+	}
+}
+
+// TestRetire_FirstVersionRefusesOverride pins the override's scope: a first
+// rebuild's completion destroys nothing and is not gated, so an override —
+// which no reservation exists to record — is refused rather than silently
+// accepted as unaudited authorization.
+func TestRetire_FirstVersionRefusesOverride(t *testing.T) {
+	t.Parallel()
+
+	h := newHarness(t)
+	h.appendDomain(3)
+
+	r := h.begin("first version")
+	_, done := runAsync(t, r)
+	waitPhase(t, r, lifecycle.PhaseCaughtUp)
+
+	if err := r.Promote(t.Context()); err != nil {
+		t.Fatalf("promoting: %v", err)
+	}
+
+	err := r.Retire(t.Context(), lifecycle.WithRetirementOverride("op", "not applicable"))
+	if err == nil || !strings.Contains(err.Error(), "override does not apply") {
+		t.Fatalf("want the inapplicable override refused, got %v", err)
+	}
+
+	if got := countEventsOfType(t, h.events, lifecycle.PreviousRetired{}.EventType()); got != 0 {
+		t.Fatalf("want no completion recorded under the refused override, got %d", got)
+	}
+
+	if err := r.Retire(t.Context()); err != nil {
+		t.Fatalf("completing the first rebuild: %v", err)
+	}
+
+	if err := waitDone(t, done); err != nil {
+		t.Errorf("want Run to return nil after completion, got %v", err)
+	}
+}
+
+// TestRetire_RecordsEveryWitnessReceipt pins the successful multi-witness
+// protocol: every required witness is attested and every ordered receipt is
+// recorded, at the reservation and again at the completion.
+func TestRetire_RecordsEveryWitnessReceipt(t *testing.T) {
+	t.Parallel()
+
+	live := lifecycle.Cutover{Live: projection.ID{Name: "orders", Version: 2}, Revision: 2}
+
+	h := newHarness(t,
+		lifecycle.WithRetirementWitness("gate_a", stubWitness{cutover: live}),
+		lifecycle.WithRetirementWitness("gate_b", stubWitness{cutover: live}),
+	)
+	r2, v1, _, done := promotedSecondVersion(t, h)
+
+	if err := h.orchestrator.SetRetirementPolicy(t.Context(), "orders", lifecycle.RetirementPolicyChange{
+		Witnesses: []string{"gate_a", "gate_b"}, Actor: "op", Reason: "gate retirements",
+	}); err != nil {
+		t.Fatalf("recording the policy: %v", err)
+	}
+
+	if err := r2.Retire(t.Context()); err != nil {
+		t.Fatalf("retiring: %v", err)
+	}
+
+	want := []lifecycle.WitnessReceipt{{Witness: "gate_a", Cutover: live}, {Witness: "gate_b", Cutover: live}}
+
+	reservations := recordedReservations(t, h.events)
+	if len(reservations) != 1 {
+		t.Fatalf("want exactly one reservation, got %d", len(reservations))
+	}
+
+	if r := reservations[0]; !reflect.DeepEqual(r.Witnesses, []string{"gate_a", "gate_b"}) || !reflect.DeepEqual(r.Receipts, want) {
+		t.Errorf("want both ordered attestations captured by the reservation, got %+v", r)
+	}
+
+	completions := recordedCompletions(t, h.events)
+	if last := completions[len(completions)-1]; !reflect.DeepEqual(last.Receipts, want) {
+		t.Errorf("want both ordered attestations re-recorded by the completion, got %+v", last)
+	}
+
+	if dropped := h.model.droppedTables(); len(dropped) != 1 || dropped[0] != v1 {
+		t.Errorf("want %s torn down, got %v", v1, dropped)
+	}
+
+	if err := waitDone(t, done); err != nil {
+		t.Errorf("want Run to return nil after the rebuild completes, got %v", err)
+	}
+}
+
 // TestGet_ReturnsDetachedState pins the orchestrator-level boundary: behind
 // a caching aggregate store, the state Get returns must not share memory
 // with the cache entry later loads are served from.
@@ -6618,20 +6779,22 @@ func TestRetire_ReservationSaveFailureDestroysNothing(t *testing.T) {
 }
 
 // TestRetire_UnobservedReservationDestroysNothing pins the stale-handle
-// boundary: a reservation that is durable but unobserved (the save reported
-// ErrEventsAppended) stops the retirement before any destruction, and the
-// repair runs from a fresh handle against the recorded reservation.
+// boundary: a reservation that is durable but unobserved (the append landed,
+// the save could not confirm it — the faithful ErrEventsAppended shape, with
+// the handle's state genuinely not advanced) stops the retirement before any
+// destruction, and the repair runs from a fresh handle against the recorded
+// reservation.
 func TestRetire_UnobservedReservationDestroysNothing(t *testing.T) {
 	t.Parallel()
 
 	events := newEventStore(t)
+	writer := &truncatingWriter{Store: events}
 
-	inner, err := lifecycle.NewStore(events)
+	projections, err := lifecycle.NewStore(writer)
 	if err != nil {
 		t.Fatalf("creating lifecycle store: %v", err)
 	}
 
-	projections := &eventsAppendedStore{Store: inner}
 	model := newReadModel()
 	checkpoints := cpmemory.NewCheckpointStore()
 
@@ -6664,11 +6827,15 @@ func TestRetire_UnobservedReservationDestroysNothing(t *testing.T) {
 		t.Fatalf("promoting v2: %v", err)
 	}
 
-	projections.armFailure()
+	writer.armFailure()
 
 	err = r2.Retire(t.Context(), lifecycle.WithRetirementOverride("test", "unobserved reservation scenario"))
 	if err == nil || !errors.Is(err, aggregatestore.ErrEventsAppended) || !strings.Contains(err.Error(), "stale") {
 		t.Fatalf("want the unobserved reservation to stop the stale handle, got %v", err)
+	}
+
+	if got := r2.State().Attempt.Phase; got != lifecycle.PhasePromoted {
+		t.Fatalf("want the stale handle genuinely unadvanced in %s, got %s", lifecycle.PhasePromoted, got)
 	}
 
 	if dropped := model.droppedTables(); len(dropped) != 0 {
@@ -6816,16 +6983,17 @@ func TestSetRetirementPolicy_RefusesExhaustedGeneration(t *testing.T) {
 		t.Fatalf("beginning: %v", err)
 	}
 
-	// A structurally valid state at the generation ceiling, installed
-	// through the snapshot layer: unreachable by folding — the ceiling is
-	// the point of refusal — but exactly what the command must survive.
+	// A structurally valid state at the generation ceiling — MaxInt64-1, the
+	// last value countable transitions can reach beside the initiation event
+	// — installed through the snapshot layer: exactly what the command must
+	// refuse to transition past.
 	writeLifecycleSnapshot(t, snapshots, lifecycle.State{
 		Name:            "orders",
 		Live:            projection.ID{Name: "orders", Version: 1},
 		CutoverRevision: 1,
 		Allocated:       1,
 		RetirementPolicy: lifecycle.RetirementPolicy{
-			Generation: math.MaxInt64,
+			Generation: math.MaxInt64 - 1,
 			Witnesses:  []string{"router"},
 		},
 	}, 1)
