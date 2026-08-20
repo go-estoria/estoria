@@ -139,6 +139,10 @@ type State struct {
 	// is the audit record of past attempts.
 	Attempt AttemptState
 
+	// RetirementPolicy is the durable witness policy governing retirements,
+	// zero until the first audited RetirementPolicySet.
+	RetirementPolicy RetirementPolicy
+
 	// InvalidReason records the first fold inconsistency, permanently; empty
 	// means none was observed. Final-state shape cannot prove historical
 	// consistency — a malformed event can assign both sides of any equality
@@ -199,6 +203,31 @@ type AttemptState struct {
 
 	// RetiringAt is when retirement of the previous version started.
 	RetiringAt time.Time
+
+	// RetiringWitnesses is the witness membership the retirement reservation
+	// captured: a retry from PhaseRetiring resolves and re-attests exactly
+	// these IDs, never current process configuration. Empty for an
+	// unwitnessed or overridden reservation, and outside PhaseRetiring.
+	RetiringWitnesses []string
+}
+
+// Vacant reports whether no attempt is in flight. AttemptState carries a
+// slice, so the zero comparison lives here; TestAttemptStateVacant sweeps
+// the fields reflectively so a new field cannot silently escape it.
+func (a AttemptState) Vacant() bool {
+	return a.ID == uuid.Nil &&
+		a.Target == (projection.ID{}) &&
+		a.Previous == (projection.ID{}) &&
+		a.Phase == PhaseNone &&
+		a.Reason == "" &&
+		a.Runner == uuid.Nil &&
+		a.InitiatedAt.IsZero() &&
+		a.ClaimedAt.IsZero() &&
+		a.CaughtUpAt.IsZero() &&
+		a.CaughtUpPos == 0 &&
+		a.PromotedAt.IsZero() &&
+		a.RetiringAt.IsZero() &&
+		len(a.RetiringWitnesses) == 0
 }
 
 // NewState is the estoria.StateFactory for projection lifecycle aggregates.
@@ -262,11 +291,15 @@ func (s State) validate() error {
 	}
 
 	if s.Name == "" {
-		if s.Allocated != 0 || s.Live != (projection.ID{}) || s.CutoverRevision != 0 || s.Attempt != (AttemptState{}) {
+		if s.Allocated != 0 || s.Live != (projection.ID{}) || s.CutoverRevision != 0 || !s.Attempt.Vacant() || !s.RetirementPolicy.zero() {
 			return errors.New("state records no projection name but is not empty")
 		}
 
 		return nil
+	}
+
+	if err := s.RetirementPolicy.validate(); err != nil {
+		return fmt.Errorf("retirement policy: %w", err)
 	}
 
 	if err := (projection.ID{Name: s.Name, Version: 1}).Validate(); err != nil {
@@ -317,7 +350,7 @@ func (s State) validate() error {
 	recorded := s.CutoverRevision
 	completed := int64(s.Allocated)
 
-	if s.Attempt != (AttemptState{}) {
+	if !s.Attempt.Vacant() {
 		completed--
 
 		if s.Attempt.Phase == PhasePromoted || s.Attempt.Phase == PhaseRetiring {
@@ -327,7 +360,7 @@ func (s State) validate() error {
 	}
 
 	if err := unreachableRest(live, recorded, completed); err != nil {
-		if s.Attempt == (AttemptState{}) {
+		if s.Attempt.Vacant() {
 			return fmt.Errorf("cutover history: %w", err)
 		}
 
@@ -375,7 +408,7 @@ func (s State) validateAttempt() error {
 
 	switch a.Phase {
 	case PhaseNone:
-		if a != (AttemptState{}) {
+		if !a.Vacant() {
 			return errors.New("attempt slot records no phase but is not vacant")
 		}
 
@@ -383,6 +416,14 @@ func (s State) validateAttempt() error {
 	case PhaseCreated, PhaseBuilding, PhaseCaughtUp, PhasePromoted, PhaseRetiring:
 	default:
 		return fmt.Errorf("unknown attempt phase %s", a.Phase)
+	}
+
+	if a.Phase != PhaseRetiring && len(a.RetiringWitnesses) != 0 {
+		return errors.New("captured retirement witnesses outside the retiring phase")
+	}
+
+	if err := invalidWitnessSet(a.RetiringWitnesses); err != nil {
+		return fmt.Errorf("captured retirement witnesses: %w", err)
 	}
 
 	if a.ID.IsNil() {

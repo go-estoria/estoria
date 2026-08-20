@@ -36,5 +36,6 @@ func allDomainEvents() []estoria.DomainEvent[State] {
 		Abandoned{},
 		RetireStarted{},
 		PreviousRetired{},
+		RetirementPolicySet{},
 	}
 }

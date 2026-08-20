@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1083,10 +1084,11 @@ func (r *Rebuild) Promote(ctx context.Context) error {
 	}
 
 	appendErr := r.appendLocked(ctx, Promoted{
-		Previous: state.Live,
-		Next:     state.Attempt.Target,
-		Revision: state.CutoverRevision + 1,
-		At:       time.Now(),
+		Previous:         state.Live,
+		Next:             state.Attempt.Target,
+		Revision:         state.CutoverRevision + 1,
+		PolicyGeneration: state.RetirementPolicy.Generation,
+		At:               time.Now(),
 	})
 	if appendErr == nil {
 		// Consumed: the flip is recorded and observed.
@@ -1218,6 +1220,31 @@ func (r *Rebuild) Abandon(ctx context.Context, cause string) error {
 	return errors.Join(appendErr, r.awaitProcessorStop(ctx))
 }
 
+// A RetireOption configures one retirement.
+type RetireOption func(*retireConfig)
+
+// retireConfig collects a retirement's options.
+type retireConfig struct {
+	override  RetirementOverride
+	optionErr error
+}
+
+// WithRetirementOverride authorizes this one retirement without witness
+// attestation, durably audited: the actor and reason are recorded in the
+// reservation. It substitutes for a witness policy, not for the teardown
+// preconditions, and a retry of an already-reserved retirement ignores it —
+// the reservation's captured gate governs.
+func WithRetirementOverride(actor, reason string) RetireOption {
+	return func(c *retireConfig) {
+		if actor == "" || reason == "" {
+			c.optionErr = errors.Join(c.optionErr, errors.New("a retirement override requires an actor and a reason"))
+			return
+		}
+
+		c.override = RetirementOverride{Actor: actor, Reason: reason}
+	}
+}
+
 // Retire completes a successful rebuild by removing the previous version.
 // Reserve-then-act-then-record: RetireStarted is appended first, contending
 // directly with Rollback on the lifecycle stream so exactly one wins and
@@ -1228,18 +1255,46 @@ func (r *Rebuild) Abandon(ctx context.Context, cause string) error {
 // PhaseRetiring it skips the reservation and re-runs the contractually
 // idempotent teardown.
 //
+// Destruction is gated on the durable retirement policy. Every witness the
+// policy requires is resolved from the orchestrator's registrations and
+// must attest to serving the exact live (version, revision) pair — first
+// while rollback remains available, and again after the reservation, so
+// the receipts recorded with the reservation and the completion bound the
+// destruction. A projection with no recorded policy refuses to retire
+// unless the call carries an audited WithRetirementOverride; an explicitly
+// unwitnessed policy retires without attestation. A retry from
+// PhaseRetiring re-attests the membership the reservation captured, never
+// current process configuration.
+//
 // Retiring a nonzero previous version requires its handler to implement
-// projection.Teardowner. The capability is resolved before anything is
-// reserved — a refused retirement leaves rollback available — and the same
-// resolved handler performs the teardown. The previous version's steady-state
-// processor must be stopped and joined before Retire: teardown does not fence
-// a running processor, and its writes would race the removal.
+// projection.Teardowner. The capability and the witness gate are resolved
+// before anything is reserved — a refused retirement leaves rollback
+// available — and the same resolved handler performs the teardown. The
+// previous version's steady-state processor must be stopped and joined
+// before Retire: teardown does not fence a running processor, and its
+// writes would race the removal. Read quiescence is what the witnesses
+// attest: a route still serving the version about to be destroyed cannot
+// vouch for the live cutover.
 //
 // A first rebuild has no previous version, so there is nothing to tear down
 // and — rollback being impossible without a rollback target — nothing to
 // reserve against: Retire completes it by recording PreviousRetired with a
-// zero ID.
-func (r *Rebuild) Retire(ctx context.Context) error {
+// zero ID and no receipts.
+func (r *Rebuild) Retire(ctx context.Context, opts ...RetireOption) error {
+	var config retireConfig
+
+	for _, opt := range opts {
+		if opt == nil {
+			return errors.New("retire option must not be nil")
+		}
+
+		opt(&config)
+	}
+
+	if config.optionErr != nil {
+		return config.optionErr
+	}
+
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -1271,7 +1326,7 @@ func (r *Rebuild) Retire(ctx context.Context) error {
 	if previous.Version == 0 {
 		// A first rebuild: nothing to tear down, and nothing to reserve
 		// against. Record completion directly.
-		return r.recordRetirement(ctx, previous)
+		return r.recordRetirement(ctx, previous, nil)
 	}
 
 	// Resolve the teardown capability before reserving: a retirement that
@@ -1287,14 +1342,62 @@ func (r *Rebuild) Retire(ctx context.Context) error {
 		return fmt.Errorf("cannot retire %s: its handler does not implement projection.Teardowner", previous)
 	}
 
+	// The witness gate: a fresh retirement captures the active policy's
+	// membership (or the audited override); a retry re-attests exactly what
+	// its reservation captured.
+	var required []string
+
+	if state.Attempt.Phase == PhaseRetiring {
+		required = state.Attempt.RetiringWitnesses
+	} else {
+		switch {
+		case config.override != (RetirementOverride{}):
+		case state.RetirementPolicy.zero():
+			return fmt.Errorf("cannot retire %s: projection %q has no retirement policy; record one with SetRetirementPolicy or authorize this retirement with WithRetirementOverride",
+				previous, state.Name)
+		case state.RetirementPolicy.Unwitnessed:
+		default:
+			required = state.RetirementPolicy.Witnesses
+		}
+	}
+
+	witnesses, err := r.resolveWitnesses(required)
+	if err != nil {
+		return fmt.Errorf("cannot retire %s: %w", previous, err)
+	}
+
+	// Preflight while rollback remains available (or, on a retry, before
+	// the teardown re-runs): every required witness vouches for the exact
+	// live cutover.
+	cutover := Cutover{Live: state.Live, Revision: state.CutoverRevision}
+
+	receipts, err := attest(ctx, witnesses, required, state.Name, cutover)
+	if err != nil {
+		return fmt.Errorf("retirement preflight for %s: %w", previous, err)
+	}
+
 	if state.Attempt.Phase == PhasePromoted {
-		err := r.appendLocked(ctx, RetireStarted{Retiring: previous, At: time.Now()})
+		err := r.appendLocked(ctx, RetireStarted{
+			Retiring:         previous,
+			PolicyGeneration: state.RetirementPolicy.Generation,
+			Witnesses:        required,
+			Receipts:         receipts,
+			Override:         config.override,
+			At:               time.Now(),
+		})
 		if err != nil {
 			if errors.Is(err, aggregatestore.ErrEventsAppended) {
 				return staleHandleError("retirement start", err)
 			}
 
 			return err
+		}
+
+		// Recheck the captured set after the reservation: the attestation
+		// that counts is the one no concurrent rollback can undercut. A
+		// refusal here leaves the reservation standing; retry Retire.
+		if receipts, err = attest(ctx, witnesses, required, state.Name, cutover); err != nil {
+			return fmt.Errorf("retirement recheck for %s (the reservation stands; retry Retire): %w", previous, err)
 		}
 	}
 
@@ -1309,13 +1412,66 @@ func (r *Rebuild) Retire(ctx context.Context) error {
 		return fmt.Errorf("deleting checkpoint for %s: %w", previous, err)
 	}
 
-	return r.recordRetirement(ctx, previous)
+	return r.recordRetirement(ctx, previous, receipts)
 }
 
-// recordRetirement appends the PreviousRetired completion, mapping a
-// durable-but-unobserved append to the stale-handle contract.
-func (r *Rebuild) recordRetirement(ctx context.Context, retired projection.ID) error {
-	err := r.appendLocked(ctx, PreviousRetired{Retired: retired})
+// resolveWitnesses maps required witness IDs to their registered
+// implementations, refusing when any is missing: an unregistered required
+// witness refuses the retirement rather than weakening it.
+func (r *Rebuild) resolveWitnesses(ids []string) ([]RetirementWitness, error) {
+	witnesses := make([]RetirementWitness, len(ids))
+
+	var missing []string
+
+	for i, id := range ids {
+		witness, ok := r.orchestrator.witnesses[id]
+		if !ok {
+			missing = append(missing, strconv.Quote(id))
+			continue
+		}
+
+		witnesses[i] = witness
+	}
+
+	if len(missing) > 0 {
+		return nil, fmt.Errorf("required retirement witnesses are not registered: %s", strings.Join(missing, ", "))
+	}
+
+	return witnesses, nil
+}
+
+// attest collects one receipt per required witness, each attesting to
+// serving exactly the given cutover; any witness that cannot vouch refuses
+// the retirement.
+func attest(ctx context.Context, witnesses []RetirementWitness, ids []string, name string, cutover Cutover) ([]WitnessReceipt, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+
+	receipts := make([]WitnessReceipt, len(ids))
+
+	for i, witness := range witnesses {
+		applied, err := witness.AppliedCutover(ctx, name)
+		if err != nil {
+			return nil, fmt.Errorf("witness %q cannot vouch for %s: %w", ids[i], name, err)
+		}
+
+		if applied != cutover {
+			return nil, fmt.Errorf("witness %q serves %s at revision %d, not the live %s at revision %d",
+				ids[i], applied.Live, applied.Revision, cutover.Live, cutover.Revision)
+		}
+
+		receipts[i] = WitnessReceipt{Witness: ids[i], Cutover: applied}
+	}
+
+	return receipts, nil
+}
+
+// recordRetirement appends the PreviousRetired completion with its final
+// receipts, mapping a durable-but-unobserved append to the stale-handle
+// contract.
+func (r *Rebuild) recordRetirement(ctx context.Context, retired projection.ID, receipts []WitnessReceipt) error {
+	err := r.appendLocked(ctx, PreviousRetired{Retired: retired, Receipts: receipts})
 	if err != nil && errors.Is(err, aggregatestore.ErrEventsAppended) {
 		return staleHandleError("retirement", err)
 	}

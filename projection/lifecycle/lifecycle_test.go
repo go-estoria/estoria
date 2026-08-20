@@ -1,6 +1,7 @@
 package lifecycle_test
 
 import (
+	"reflect"
 	"testing"
 	"time"
 
@@ -45,6 +46,16 @@ func caughtUp() lifecycle.CaughtUp {
 
 func promoted() lifecycle.Promoted {
 	return lifecycle.Promoted{Previous: previousID, Next: targetID, Revision: 2, At: promotedAt}
+}
+
+func policySet() lifecycle.RetirementPolicySet {
+	return lifecycle.RetirementPolicySet{Generation: 1, Witnesses: []string{"router"}, Reason: "gate retirements", Actor: "op", At: retiringAt}
+}
+
+func retireStarted() lifecycle.RetireStarted {
+	// The fixture retires under an audited override: these folds record no
+	// witness policy, and the fold refuses an ungoverned reservation.
+	return lifecycle.RetireStarted{Retiring: previousID, Override: lifecycle.RetirementOverride{Actor: "test", Reason: "fixture retirement"}, At: retiringAt}
 }
 
 // priorState is the state a v7-over-v6 rebuild is initiated against: v6 live
@@ -108,7 +119,7 @@ func TestRebuildInitiated_ApplyTo(t *testing.T) {
 		},
 	}
 
-	if got != want {
+	if !reflect.DeepEqual(got, want) {
 		t.Errorf("want state %+v, got %+v", want, got)
 	}
 }
@@ -168,7 +179,7 @@ func TestTransitions(t *testing.T) {
 		},
 		{
 			name:  "RunnerClaimed preserves the retiring phase",
-			prior: fold(initiated(), claimed(), lifecycle.BuildStarted{}, caughtUp(), promoted(), lifecycle.RetireStarted{Retiring: previousID, At: retiringAt}),
+			prior: fold(initiated(), claimed(), lifecycle.BuildStarted{}, caughtUp(), promoted(), retireStarted()),
 			event: lifecycle.RunnerClaimed{Attempt: attemptID, Runner: runner2ID, FromPosition: 4_000, At: retiringAt},
 			want: func(s lifecycle.State) lifecycle.State {
 				s.Attempt.Runner = runner2ID
@@ -242,7 +253,7 @@ func TestTransitions(t *testing.T) {
 		{
 			name:  "RetireStarted reserves the retirement",
 			prior: fold(initiated(), claimed(), lifecycle.BuildStarted{}, caughtUp(), promoted()),
-			event: lifecycle.RetireStarted{Retiring: previousID, At: retiringAt},
+			event: retireStarted(),
 			want: func(s lifecycle.State) lifecycle.State {
 				s.Attempt.Phase = lifecycle.PhaseRetiring
 				s.Attempt.RetiringAt = retiringAt
@@ -250,8 +261,46 @@ func TestTransitions(t *testing.T) {
 			},
 		},
 		{
+			name:  "RetirementPolicySet records the durable policy",
+			prior: base,
+			event: policySet(),
+			want: func(s lifecycle.State) lifecycle.State {
+				s.RetirementPolicy = lifecycle.RetirementPolicy{Generation: 1, Witnesses: []string{"router"}}
+				return s
+			},
+		},
+		{
+			name:  "RetirementPolicySet supersedes the previous policy",
+			prior: fold(initiated(), policySet()),
+			event: lifecycle.RetirementPolicySet{Generation: 2, Unwitnessed: true, Reason: "single route", Actor: "op", At: retiringAt},
+			want: func(s lifecycle.State) lifecycle.State {
+				s.RetirementPolicy = lifecycle.RetirementPolicy{Generation: 2, Unwitnessed: true}
+				return s
+			},
+		},
+		{
+			name:  "RetireStarted captures the witnessed membership",
+			prior: fold(initiated(), claimed(), lifecycle.BuildStarted{}, caughtUp(), policySet(), promotedUnderPolicy()),
+			event: lifecycle.RetireStarted{Retiring: previousID, PolicyGeneration: 1, Witnesses: []string{"router"}, Receipts: routerReceipts(), At: retiringAt},
+			want: func(s lifecycle.State) lifecycle.State {
+				s.Attempt.Phase = lifecycle.PhaseRetiring
+				s.Attempt.RetiringAt = retiringAt
+				s.Attempt.RetiringWitnesses = []string{"router"}
+				return s
+			},
+		},
+		{
+			name:  "PreviousRetired with matching receipts completes the witnessed retirement",
+			prior: fold(initiated(), claimed(), lifecycle.BuildStarted{}, caughtUp(), policySet(), promotedUnderPolicy(), lifecycle.RetireStarted{Retiring: previousID, PolicyGeneration: 1, Witnesses: []string{"router"}, Receipts: routerReceipts(), At: retiringAt}),
+			event: lifecycle.PreviousRetired{Retired: previousID, Receipts: routerReceipts()},
+			want: func(s lifecycle.State) lifecycle.State {
+				s.Attempt = lifecycle.AttemptState{}
+				return s
+			},
+		},
+		{
 			name:  "PreviousRetired completes the rebuild, leaving the live version",
-			prior: fold(initiated(), claimed(), lifecycle.BuildStarted{}, caughtUp(), promoted(), lifecycle.RetireStarted{Retiring: previousID, At: retiringAt}),
+			prior: fold(initiated(), claimed(), lifecycle.BuildStarted{}, caughtUp(), promoted(), retireStarted()),
 			event: lifecycle.PreviousRetired{Retired: previousID},
 			want: func(s lifecycle.State) lifecycle.State {
 				s.Attempt = lifecycle.AttemptState{}
@@ -262,7 +311,7 @@ func TestTransitions(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			if got, want := tt.event.ApplyTo(tt.prior), tt.want(tt.prior); got != want {
+			if got, want := tt.event.ApplyTo(tt.prior), tt.want(tt.prior); !reflect.DeepEqual(got, want) {
 				t.Errorf("want state %+v, got %+v", want, got)
 			}
 		})
@@ -275,11 +324,46 @@ func TestFold_HappyPath(t *testing.T) {
 	t.Parallel()
 
 	state := fold(initiated(), claimed(), lifecycle.BuildStarted{}, caughtUp(), promoted(),
-		lifecycle.RetireStarted{Retiring: previousID, At: retiringAt},
+		retireStarted(),
 		lifecycle.PreviousRetired{Retired: previousID})
 
 	want := lifecycle.State{Name: "orders", Live: targetID, CutoverRevision: 2, Allocated: 7}
-	if state != want {
+	if !reflect.DeepEqual(state, want) {
+		t.Errorf("want state %+v, got %+v", want, state)
+	}
+}
+
+// promotedUnderPolicy is promoted() bound to policy generation 1.
+func promotedUnderPolicy() lifecycle.Promoted {
+	return lifecycle.Promoted{Previous: previousID, Next: targetID, Revision: 2, PolicyGeneration: 1, At: promotedAt}
+}
+
+// routerReceipts is the router's attestation of the promoted cutover.
+func routerReceipts() []lifecycle.WitnessReceipt {
+	return []lifecycle.WitnessReceipt{{Witness: "router", Cutover: lifecycle.Cutover{Live: targetID, Revision: 2}}}
+}
+
+// TestFold_WitnessedRetirement pins the full witnessed protocol end to end:
+// the policy is durable, the promotion is bound to its generation, the
+// reservation captures the membership with preflight receipts, and the
+// completion re-attests them — leaving the slot vacant and the policy
+// standing.
+func TestFold_WitnessedRetirement(t *testing.T) {
+	t.Parallel()
+
+	state := fold(initiated(), claimed(), lifecycle.BuildStarted{}, caughtUp(),
+		policySet(),
+		promotedUnderPolicy(),
+		lifecycle.RetireStarted{Retiring: previousID, PolicyGeneration: 1, Witnesses: []string{"router"}, Receipts: routerReceipts(), At: retiringAt},
+		lifecycle.PreviousRetired{Retired: previousID, Receipts: routerReceipts()},
+	)
+
+	want := lifecycle.State{
+		Name: "orders", Live: targetID, CutoverRevision: 2, Allocated: 7,
+		RetirementPolicy: lifecycle.RetirementPolicy{Generation: 1, Witnesses: []string{"router"}},
+	}
+
+	if !reflect.DeepEqual(state, want) {
 		t.Errorf("want state %+v, got %+v", want, state)
 	}
 }
@@ -293,7 +377,7 @@ func TestFold_NeverReuseAfterRollback(t *testing.T) {
 		lifecycle.RolledBack{From: targetID, RevertedTo: previousID, Revision: 3, At: promotedAt})
 
 	want := lifecycle.State{Name: "orders", Live: previousID, CutoverRevision: 3, Allocated: 7}
-	if state != want {
+	if !reflect.DeepEqual(state, want) {
 		t.Errorf("want state %+v, got %+v", want, state)
 	}
 
@@ -355,7 +439,7 @@ func TestEvents_RoundTripJSON(t *testing.T) {
 	codec := estoria.JSONDomainEventCodec[lifecycle.State]{}
 	prior := fold(initiated(), claimed(), lifecycle.BuildStarted{})
 
-	for _, event := range allEvents() {
+	for _, event := range append(allEvents(), retirementShapes()...) {
 		t.Run(event.EventType(), func(t *testing.T) {
 			t.Parallel()
 
@@ -369,7 +453,7 @@ func TestEvents_RoundTripJSON(t *testing.T) {
 				t.Fatalf("unmarshaling: %v", err)
 			}
 
-			if got, want := decoded.ApplyTo(prior), event.ApplyTo(prior); got != want {
+			if got, want := decoded.ApplyTo(prior), event.ApplyTo(prior); !reflect.DeepEqual(got, want) {
 				t.Errorf("want the decoded event to fold identically:\nwant %+v\ngot  %+v", want, got)
 			}
 		})
@@ -379,7 +463,7 @@ func TestEvents_RoundTripJSON(t *testing.T) {
 func TestNewState(t *testing.T) {
 	t.Parallel()
 
-	if got := lifecycle.NewState(uuid.Must(uuid.NewV4())); got != (lifecycle.State{}) {
+	if got := lifecycle.NewState(uuid.Must(uuid.NewV4())); !reflect.DeepEqual(got, lifecycle.State{}) {
 		t.Errorf("want a zero state regardless of stream UUID, got %+v", got)
 	}
 }
@@ -434,7 +518,7 @@ func TestLifecycleAggregate_EndToEnd(t *testing.T) {
 		t.Fatalf("loading aggregate: %v", err)
 	}
 
-	if got, want := loaded.State(), aggregate.State(); got != want {
+	if got, want := loaded.State(), aggregate.State(); !reflect.DeepEqual(got, want) {
 		t.Errorf("want hydrated state to match saved state:\nwant %+v\ngot  %+v", want, got)
 	}
 
@@ -452,7 +536,28 @@ func allEvents() []estoria.DomainEvent[lifecycle.State] {
 		promoted(),
 		lifecycle.RolledBack{From: targetID, RevertedTo: previousID, At: promotedAt},
 		lifecycle.Abandoned{Cause: "handler bug discovered mid-replay"},
-		lifecycle.RetireStarted{Retiring: previousID, At: retiringAt},
+		lifecycle.RetireStarted{
+			Retiring:         previousID,
+			PolicyGeneration: 1,
+			Witnesses:        []string{"router"},
+			Receipts:         []lifecycle.WitnessReceipt{{Witness: "router", Cutover: lifecycle.Cutover{Live: targetID, Revision: 2}}},
+			At:               retiringAt,
+		},
+		lifecycle.PreviousRetired{
+			Retired:  previousID,
+			Receipts: []lifecycle.WitnessReceipt{{Witness: "router", Cutover: lifecycle.Cutover{Live: targetID, Revision: 2}}},
+		},
+		lifecycle.RetirementPolicySet{Generation: 1, Witnesses: []string{"auditor", "router"}, Reason: "gate", Actor: "op", At: retiringAt},
+	}
+}
+
+// retirementShapes returns the retirement events' alternate legal shapes —
+// the audited override, the receiptless completion, the unwitnessed policy —
+// so their round trips are pinned alongside the richest forms in allEvents.
+func retirementShapes() []estoria.DomainEvent[lifecycle.State] {
+	return []estoria.DomainEvent[lifecycle.State]{
+		retireStarted(),
 		lifecycle.PreviousRetired{Retired: previousID},
+		lifecycle.RetirementPolicySet{Generation: 1, Unwitnessed: true, Reason: "single-route deployment", Actor: "op", At: retiringAt},
 	}
 }

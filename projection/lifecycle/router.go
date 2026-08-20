@@ -130,6 +130,14 @@ var (
 // incrementally from the last folded global position. Refresh advances it on
 // demand, and WithRefreshInterval advances it automatically when the cache is
 // older than the interval.
+//
+// A StreamRouter is deliberately not a RetirementWitness: it re-derives
+// routes from the record, so it can only attest what the record says —
+// never that the routes actually serving reads have converged on it. With
+// the default zero refresh interval its cache may serve a stale route
+// indefinitely, so no finite retirement delay over it is safe; retirement
+// gating requires witnesses that serve routes, which is what CutoverSetter
+// implementations are.
 type StreamRouter struct {
 	events          eventstore.GlobalReader
 	refreshInterval time.Duration

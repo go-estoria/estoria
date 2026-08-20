@@ -771,8 +771,10 @@ func recordCutover(t *testing.T, store aggregatestore.Store[lifecycle.State], ne
 	case previous == (projection.ID{}):
 		aggregate.Append(lifecycle.PreviousRetired{})
 	default:
+		// The fixture retires under an audited override: it records no
+		// witness policy, and the fold refuses an ungoverned reservation.
 		aggregate.Append(
-			lifecycle.RetireStarted{Retiring: previous, At: promotedAt},
+			lifecycle.RetireStarted{Retiring: previous, Override: lifecycle.RetirementOverride{Actor: "fixture", Reason: "fixture retirement"}, At: promotedAt},
 			lifecycle.PreviousRetired{Retired: previous},
 		)
 	}
@@ -786,7 +788,7 @@ func recordCutover(t *testing.T, store aggregatestore.Store[lifecycle.State], ne
 		t.Fatalf("recordCutover produced a poisoned history: %s", state.InvalidReason)
 	}
 
-	if state.Attempt != (lifecycle.AttemptState{}) {
+	if !state.Attempt.Vacant() {
 		t.Fatalf("recordCutover left the attempt slot occupied in phase %s", state.Attempt.Phase)
 	}
 }

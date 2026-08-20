@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"time"
 
 	"github.com/go-estoria/estoria"
@@ -58,6 +59,7 @@ type Orchestrator struct {
 	autoPromote       bool
 	reconcileInterval time.Duration
 	processorOptions  []processor.Option
+	witnesses         map[string]RetirementWitness
 	log               estoria.Logger
 
 	// optionErr collects invalid options for NewOrchestrator to report, so a
@@ -81,6 +83,7 @@ func NewOrchestrator(config Config, opts ...OrchestratorOption) (*Orchestrator, 
 	orchestrator := &Orchestrator{
 		config:            config,
 		reconcileInterval: DefaultReconcileInterval,
+		witnesses:         map[string]RetirementWitness{},
 		log:               estoria.GetLogger().WithGroup("lifecycle"),
 	}
 
@@ -179,6 +182,57 @@ func (o *Orchestrator) Get(ctx context.Context, name string) (State, error) {
 	}
 
 	return aggregate.State(), nil
+}
+
+// SetRetirementPolicy records an audited transition of the named
+// projection's retirement policy: the witness IDs that must vouch for the
+// live cutover before a retirement destroys storage, or the explicit choice
+// to retire unwitnessed. History defines the required policy — a restarted
+// process configured with fewer witnesses cannot weaken the gate — and
+// every transition carries the actor and reason authorizing it. The witness
+// set is canonicalized (sorted, unique) before recording. The projection
+// must have a recorded lifecycle; concurrent transitions are arbitrated by
+// the lifecycle stream, and the loser's save reports a version mismatch.
+func (o *Orchestrator) SetRetirementPolicy(ctx context.Context, name string, change RetirementPolicyChange) error {
+	switch {
+	case change.Actor == "" || change.Reason == "":
+		return errors.New("a retirement policy transition requires an actor and a reason")
+	case change.Unwitnessed && len(change.Witnesses) != 0:
+		return errors.New("a retirement policy names witnesses or is unwitnessed, not both")
+	case !change.Unwitnessed && len(change.Witnesses) == 0:
+		return errors.New("a retirement policy names at least one witness or is explicitly unwitnessed")
+	}
+
+	witnesses := slices.Clone(change.Witnesses)
+	slices.Sort(witnesses)
+
+	if err := invalidWitnessSet(witnesses); err != nil {
+		return fmt.Errorf("retirement policy witnesses: %w", err)
+	}
+
+	aggregate, err := o.loadAggregate(ctx, name)
+	if err != nil {
+		return err
+	}
+
+	aggregate.Append(RetirementPolicySet{
+		Generation:  aggregate.State().RetirementPolicy.Generation + 1,
+		Witnesses:   witnesses,
+		Unwitnessed: change.Unwitnessed,
+		Reason:      change.Reason,
+		Actor:       change.Actor,
+		At:          time.Now(),
+	})
+
+	if err := o.config.Projections.Save(ctx, aggregate, nil); err != nil {
+		if errors.Is(err, aggregatestore.ErrEventsAppended) {
+			return fmt.Errorf("retirement policy recorded, but this view is stale; reload before issuing further commands: %w", err)
+		}
+
+		return fmt.Errorf("recording retirement policy: %w", err)
+	}
+
+	return nil
 }
 
 // loadAggregate loads the named projection's lifecycle aggregate and
@@ -288,6 +342,28 @@ func WithReconcileInterval(interval time.Duration) OrchestratorOption {
 		}
 
 		o.reconcileInterval = interval
+	}
+}
+
+// WithRetirementWitness registers the implementation for a witness ID the
+// durable retirement policy may name. Configuration resolves
+// implementations; lifecycle history decides which IDs must vouch — an
+// unregistered required ID refuses the retirement rather than weakening it.
+func WithRetirementWitness(id string, witness RetirementWitness) OrchestratorOption {
+	return func(o *Orchestrator) {
+		switch {
+		case id == "":
+			o.optionErr = errors.Join(o.optionErr, errors.New("retirement witness ID must not be empty"))
+		case witness == nil:
+			o.optionErr = errors.Join(o.optionErr, fmt.Errorf("retirement witness %q must not be nil", id))
+		default:
+			if _, exists := o.witnesses[id]; exists {
+				o.optionErr = errors.Join(o.optionErr, fmt.Errorf("retirement witness %q registered twice", id))
+				return
+			}
+
+			o.witnesses[id] = witness
+		}
 	}
 }
 

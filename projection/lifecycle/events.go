@@ -2,6 +2,7 @@ package lifecycle
 
 import (
 	"math"
+	"slices"
 	"time"
 
 	"github.com/go-estoria/estoria"
@@ -205,7 +206,13 @@ type Promoted struct {
 	Previous projection.ID
 	Next     projection.ID
 	Revision int64
-	At       time.Time
+
+	// PolicyGeneration binds the promotion to the retirement policy
+	// generation active when it was recorded, so the policy era that
+	// governed every flip is durable and auditable.
+	PolicyGeneration int64
+
+	At time.Time
 }
 
 // EventType returns the type of event.
@@ -235,6 +242,9 @@ func (e Promoted) ApplyTo(s State) State {
 	case e.Revision != s.CutoverRevision+1:
 		s = s.poison("promotion recorded outside the cutover revision sequence",
 			"projection", s.Name, "recorded_revision", e.Revision, "revision", s.CutoverRevision)
+	case e.PolicyGeneration != s.RetirementPolicy.Generation:
+		s = s.poison("promotion bound to an inactive retirement policy generation",
+			"projection", s.Name, "recorded_generation", e.PolicyGeneration, "active_generation", s.RetirementPolicy.Generation)
 	}
 
 	s.Live = e.Next
@@ -340,9 +350,21 @@ func (Abandoned) ApplyTo(s State) State {
 // directly by PreviousRetired, and a reservation for an attempt with no
 // previous poisons the fold rather than passing the lineage check on two
 // zero values.
+//
+// The reservation captures the retirement's witness gate durably: the
+// active policy generation, the required witness IDs, and one preflight
+// receipt per witness attesting to the exact live cutover — or the audited
+// override that authorized proceeding without them. A retry from
+// PhaseRetiring uses the captured membership, never current process
+// configuration, so a restarted process cannot weaken a reservation it did
+// not make.
 type RetireStarted struct {
-	Retiring projection.ID
-	At       time.Time
+	Retiring         projection.ID
+	PolicyGeneration int64
+	Witnesses        []string
+	Receipts         []WitnessReceipt
+	Override         RetirementOverride
+	At               time.Time
 }
 
 // EventType returns the type of event.
@@ -363,10 +385,42 @@ func (e RetireStarted) ApplyTo(s State) State {
 	case e.Retiring != s.Attempt.Previous:
 		s = s.poison("retirement reserved for a version that was not the attempt's previous",
 			"projection", s.Name, "recorded_retiring", e.Retiring, "previous", s.Attempt.Previous)
+	case e.PolicyGeneration != s.RetirementPolicy.Generation:
+		s = s.poison("retirement reserved under an inactive policy generation",
+			"projection", s.Name, "recorded_generation", e.PolicyGeneration, "active_generation", s.RetirementPolicy.Generation)
+	}
+
+	switch {
+	case e.Override != (RetirementOverride{}):
+		switch {
+		case e.Override.Actor == "" || e.Override.Reason == "":
+			s = s.poison("retirement override recorded without an actor and reason",
+				"projection", s.Name, "attempt", s.Attempt.ID)
+		case len(e.Witnesses) != 0 || len(e.Receipts) != 0:
+			s = s.poison("overridden retirement records witnesses",
+				"projection", s.Name, "attempt", s.Attempt.ID)
+		}
+	case s.RetirementPolicy.zero():
+		s = s.poison("retirement reserved with neither a policy nor an audited override",
+			"projection", s.Name, "attempt", s.Attempt.ID)
+	case s.RetirementPolicy.Unwitnessed:
+		if len(e.Witnesses) != 0 || len(e.Receipts) != 0 {
+			s = s.poison("unwitnessed retirement records witnesses",
+				"projection", s.Name, "attempt", s.Attempt.ID)
+		}
+	case !slices.Equal(e.Witnesses, s.RetirementPolicy.Witnesses):
+		s = s.poison("retirement captured a witness set that is not the active policy's",
+			"projection", s.Name, "captured", e.Witnesses, "required", s.RetirementPolicy.Witnesses)
+	default:
+		if err := invalidReceipts(e.Receipts, e.Witnesses, Cutover{Live: s.Live, Revision: s.CutoverRevision}); err != nil {
+			s = s.poison("retirement receipts do not attest the live cutover",
+				"projection", s.Name, "cause", err.Error())
+		}
 	}
 
 	s.Attempt.Phase = PhaseRetiring
 	s.Attempt.RetiringAt = e.At
+	s.Attempt.RetiringWitnesses = slices.Clone(e.Witnesses)
 
 	return s
 }
@@ -380,8 +434,13 @@ func (e RetireStarted) ApplyTo(s State) State {
 // two completion forms are exclusive: a reserved retirement completes only
 // from PhaseRetiring with a previous version recorded, so a completion
 // cannot vacate the evidence of a reservation that had nothing to reserve.
+//
+// Receipts are the final attestations: one per witness the reservation
+// captured, taken after the reservation and before the teardown, each
+// vouching for the exact live cutover.
 type PreviousRetired struct {
-	Retired projection.ID
+	Retired  projection.ID
+	Receipts []WitnessReceipt
 }
 
 // EventType returns the type of event.
@@ -405,9 +464,71 @@ func (e PreviousRetired) ApplyTo(s State) State {
 	case e.Retired != s.Attempt.Previous:
 		s = s.poison("retirement completed for a version that was not the attempt's previous",
 			"projection", s.Name, "recorded_retired", e.Retired, "previous", s.Attempt.Previous)
+	case firstVersion && len(e.Receipts) != 0:
+		s = s.poison("first-version retirement completion records receipts",
+			"projection", s.Name, "attempt", s.Attempt.ID)
+	case reserved:
+		if err := invalidReceipts(e.Receipts, s.Attempt.RetiringWitnesses, Cutover{Live: s.Live, Revision: s.CutoverRevision}); err != nil {
+			s = s.poison("retirement completion receipts do not re-attest the captured witnesses",
+				"projection", s.Name, "cause", err.Error())
+		}
 	}
 
 	s.Attempt = AttemptState{}
+
+	return s
+}
+
+// RetirementPolicySet records an audited transition of the projection's
+// retirement policy: the durable witness membership — or the explicit
+// choice to retire unwitnessed — that governs retirements from this point.
+// Lifecycle history defines the required policy so a restarted process
+// configured with fewer witnesses cannot silently weaken the gate;
+// configuration only resolves implementations for the IDs the policy names.
+// Generations count transitions by exactly one, and every transition
+// carries the actor and reason that authorized it.
+type RetirementPolicySet struct {
+	Generation  int64
+	Witnesses   []string
+	Unwitnessed bool
+	Reason      string
+	Actor       string
+	At          time.Time
+}
+
+// EventType returns the type of event.
+func (RetirementPolicySet) EventType() string { return "retirementpolicyset" }
+
+// New returns a new instance of the event.
+func (RetirementPolicySet) New() estoria.DomainEvent[State] { return &RetirementPolicySet{} }
+
+// ApplyTo applies the event to state, returning the new state.
+func (e RetirementPolicySet) ApplyTo(s State) State {
+	switch {
+	case e.Generation != s.RetirementPolicy.Generation+1:
+		s = s.poison("retirement policy generation is discontinuous",
+			"projection", s.Name, "recorded_generation", e.Generation, "active_generation", s.RetirementPolicy.Generation)
+	case e.Actor == "" || e.Reason == "":
+		s = s.poison("retirement policy transition recorded without an actor and reason",
+			"projection", s.Name, "generation", e.Generation)
+	case e.Unwitnessed && len(e.Witnesses) != 0:
+		s = s.poison("retirement policy records witnesses alongside the unwitnessed mode",
+			"projection", s.Name, "generation", e.Generation)
+	case !e.Unwitnessed && len(e.Witnesses) == 0:
+		s = s.poison("retirement policy records neither witnesses nor the unwitnessed mode",
+			"projection", s.Name, "generation", e.Generation)
+	default:
+		if err := invalidWitnessSet(e.Witnesses); err != nil {
+			s = s.poison("retirement policy witness set is not canonical",
+				"projection", s.Name, "generation", e.Generation, "cause", err.Error())
+		}
+	}
+
+	s.RetirementPolicy = RetirementPolicy{
+		Generation:  e.Generation,
+		Witnesses:   slices.Clone(e.Witnesses),
+		Unwitnessed: e.Unwitnessed,
+	}
 
 	return s
 }
