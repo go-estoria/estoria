@@ -1442,10 +1442,8 @@ func (r *Rebuild) Retire(ctx context.Context, opts ...RetireOption) error {
 
 		// Recheck exactly what the reservation captured, as an event-only
 		// refold records it: the attestation that counts is the one no
-		// concurrent rollback can undercut, and the reservation's save
-		// republished the handle's state to whatever read decorations the
-		// wired store carries, so nothing captured before it is trusted
-		// afterward.
+		// concurrent rollback can undercut, so nothing captured before the
+		// reservation's append is trusted afterward.
 		if receipts, err = r.reattestReservation(ctx, previous); err != nil {
 			return err
 		}

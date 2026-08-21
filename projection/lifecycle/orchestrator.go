@@ -190,8 +190,10 @@ func (o *Orchestrator) Begin(ctx context.Context, name, reason string) (*Rebuild
 // and Retire are deliberately not runner-scoped.
 //
 // The resumed view is an event-only fold of the lifecycle stream, and every
-// command on the handle re-derives its verdicts from a fresh fold before
-// acting, so what Resume observed never authorizes anything.
+// mutating command on the handle except Promote re-derives its verdicts from
+// a fresh fold before acting — Promote acts on the in-process certificate a
+// run establishes instead (see Rebuild.Promote) — so what Resume observed
+// never authorizes anything.
 func (o *Orchestrator) Resume(ctx context.Context, name string) (*Rebuild, error) {
 	aggregate, err := o.loadAggregate(ctx, name)
 	if err != nil {

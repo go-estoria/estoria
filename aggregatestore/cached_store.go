@@ -3,7 +3,6 @@ package aggregatestore
 import (
 	"context"
 	"errors"
-	"sync"
 
 	"github.com/go-estoria/estoria"
 	"github.com/go-estoria/estoria/typeid"
@@ -23,25 +22,39 @@ type CachedAggregate[S any] struct {
 // Entries are keyed by their typed ID rather than a bare UUID so that a cache backend
 // shared across aggregate types produces distinct, self-describing keys. A get that
 // finds nothing returns a nil entry and a nil error.
+//
+// The backend is the ordering authority for publications. Writes race: one
+// store's concurrent commands, or several stores sharing one backend, can
+// reach it out of order, and only the backend sees every write. Both write
+// operations are therefore conditional on the versions the backend already
+// holds, and each comparison must be atomic with its effect, per aggregate.
+// Eviction remains the backend's own policy: dropping an entry or a fence
+// forgets history rather than regressing it, re-admitting an out-of-order
+// publication only if it arrives after the backend's retention horizon.
 type AggregateCache[S any] interface {
 	GetAggregate(ctx context.Context, aggregateID typeid.ID) (*CachedAggregate[S], error)
+
+	// PutAggregate stores the entry unless the cache holds a newer entry or
+	// fence for the aggregate: an entry below either is dropped without
+	// error, having already lost the race at the backend.
 	PutAggregate(ctx context.Context, aggregateID typeid.ID, entry CachedAggregate[S]) error
+
+	// FenceAggregate records that versions below the given one are stale
+	// even when no newer entry exists to displace them: it evicts any entry
+	// below the fence and makes future puts below it no-ops. Fences only
+	// rise; fencing below an existing fence or entry changes nothing.
+	FenceAggregate(ctx context.Context, aggregateID typeid.ID, version int64) error
 }
 
-// CachedStore wraps an aggreate store with an AggregateCache to cache aggregates.
+// CachedStore wraps an aggregate store with an AggregateCache to cache aggregates.
+// Publication ordering lives in the cache backend (see AggregateCache): the
+// store publishes unconditionally and lets the backend drop whatever arrives
+// out of order, so any number of stores can share one backend without any of
+// them serving a regressed entry.
 type CachedStore[S any] struct {
 	inner Store[S]
 	cache AggregateCache[S]
 	log   estoria.Logger
-
-	// freshness records the newest version published per aggregate.
-	// Publications race — two loads or saves can reach the cache backend out
-	// of order — and the backend itself offers no ordering, so this store
-	// tracks the high-water mark itself: publish skips writes below it, and a
-	// hit below it is served as a miss instead. The mutex guards only the
-	// map; no backend call runs under it.
-	mu        sync.Mutex
-	freshness map[string]int64
 }
 
 // NewCachedStore creates a new CachedStore.
@@ -57,10 +70,9 @@ func NewCachedStore[S any](
 	}
 
 	return &CachedStore[S]{
-		inner:     inner,
-		cache:     cacher,
-		log:       estoria.GetLogger().WithGroup("cachedstore"),
-		freshness: map[string]int64{},
+		inner: inner,
+		cache: cacher,
+		log:   estoria.GetLogger().WithGroup("cachedstore"),
 	}, nil
 }
 
@@ -98,13 +110,8 @@ func (s *CachedStore[S]) Load(ctx context.Context, id uuid.UUID, opts *LoadOptio
 
 	entry, err := s.cache.GetAggregate(ctx, aggregateID)
 	switch {
-	case err == nil && entry != nil && s.isFresh(aggregateID, entry.Version):
-		return newAggregate(aggregateID, entry.State, entry.Version), nil
 	case err == nil && entry != nil:
-		// An out-of-order publication landed after a newer one: serving the
-		// entry would regress reads, so load from the inner store instead —
-		// and let the publication below heal the backend entry.
-		s.log.Debug("cache entry predates a newer publication", "aggregate_id", aggregateID)
+		return newAggregate(aggregateID, entry.State, entry.Version), nil
 	case err != nil:
 		s.log.Warn("failed to read cache", "aggregate_id", aggregateID, "error", err)
 	default:
@@ -116,40 +123,11 @@ func (s *CachedStore[S]) Load(ctx context.Context, id uuid.UUID, opts *LoadOptio
 		return nil, LoadError{Operation: "loading from inner aggregate store", Err: err}
 	}
 
-	if err := s.publish(ctx, aggregate.ID(), CachedAggregate[S]{State: aggregate.State(), Version: aggregate.Version()}); err != nil {
+	if err := s.cache.PutAggregate(ctx, aggregate.ID(), CachedAggregate[S]{State: aggregate.State(), Version: aggregate.Version()}); err != nil {
 		s.log.Warn("failed to write cache", "aggregate_id", aggregateID, "error", err)
 	}
 
 	return aggregate, nil
-}
-
-// publish writes the entry to the cache unless a newer version has already
-// been published, advancing the aggregate's freshness high-water mark. The
-// skip alone cannot prevent every regression — a write that passed the check
-// can still land at the backend after a newer one — so serving reads applies
-// the same mark to hits; between them, an out-of-order publication is never
-// served. Re-publishing the version already at the mark is allowed: that is
-// how a hit refused as stale heals the backend entry.
-func (s *CachedStore[S]) publish(ctx context.Context, aggregateID typeid.ID, entry CachedAggregate[S]) error {
-	s.mu.Lock()
-	if entry.Version < s.freshness[aggregateID.String()] {
-		s.mu.Unlock()
-		return nil
-	}
-
-	s.freshness[aggregateID.String()] = entry.Version
-	s.mu.Unlock()
-
-	return s.cache.PutAggregate(ctx, aggregateID, entry)
-}
-
-// isFresh reports whether a cached version is at or above the aggregate's
-// published high-water mark and may be served.
-func (s *CachedStore[S]) isFresh(aggregateID typeid.ID, version int64) bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	return version >= s.freshness[aggregateID.String()]
 }
 
 // Hydrate hydrates an aggregate by deferring to the inner store.
@@ -157,27 +135,50 @@ func (s *CachedStore[S]) Hydrate(ctx context.Context, aggregate *Aggregate[S], o
 	return s.inner.Hydrate(ctx, aggregate, opts)
 }
 
-// Save saves an aggregate using the inner store, then updates the cache.
+// Save saves an aggregate using the inner store, then updates the cache. The
+// cache write is conditional at the backend, so a publication that loses a
+// race cannot regress what a concurrent save published (see AggregateCache).
+// A save that advanced the stream without leaving a publishable state — a
+// SkipApply save, or a failure after its events were appended — fences the
+// cache instead, so the entry it outdated cannot be served while the next
+// load repopulates from the inner store.
 func (s *CachedStore[S]) Save(ctx context.Context, aggregate *Aggregate[S], opts *SaveOptions) error {
 	if aggregate == nil {
 		return SaveError{Err: ErrNilAggregate}
 	}
 
 	if err := s.inner.Save(ctx, aggregate, opts); err != nil {
+		// Events carried by ErrEventsAppended are durable facts the cached
+		// entry no longer reflects. The exact durable tip is unknowable here —
+		// the inner store may be any composition — but it is at least one past
+		// the version this aggregate applied, and any entry this save could be
+		// racing is at or below that version, so the minimal fence evicts
+		// every entry the append outdated without ever refusing an honest
+		// republication from the recovery reload.
+		if errors.Is(err, ErrEventsAppended) {
+			if fenceErr := s.cache.FenceAggregate(ctx, aggregate.ID(), aggregate.Version()+1); fenceErr != nil {
+				s.log.Warn("failed to fence cache after a post-append save failure",
+					"aggregate_id", aggregate.ID(), "error", fenceErr)
+			}
+		}
+
 		return SaveError{AggregateID: aggregate.ID(), Operation: "saving to inner aggregate store", Err: err}
 	}
 
-	// An aggregate saved with SkipApply still has events queued, so its state and version
-	// trail what was just persisted. Caching it would serve that trailing state to later
-	// loads, so leave the previous entry alone and let the next load repopulate it.
-	if len(aggregate.unappliedEvents) > 0 {
-		s.log.Debug("skipping cache write for aggregate with unapplied events",
-			"aggregate_id", aggregate.ID(),
-			"unapplied_events", len(aggregate.unappliedEvents))
+	// An aggregate saved with SkipApply still has events queued, so its state
+	// and version trail what was just persisted, and there is nothing to
+	// publish. The queued events carry their store-assigned versions, so the
+	// newest one is the exact durable tip to fence at.
+	if n := len(aggregate.unappliedEvents); n > 0 {
+		if err := s.cache.FenceAggregate(ctx, aggregate.ID(), aggregate.unappliedEvents[n-1].Version); err != nil {
+			s.log.Warn("failed to fence cache after a skip-apply save",
+				"aggregate_id", aggregate.ID(), "error", err)
+		}
+
 		return nil
 	}
 
-	if err := s.publish(ctx, aggregate.ID(), CachedAggregate[S]{State: aggregate.State(), Version: aggregate.Version()}); err != nil {
+	if err := s.cache.PutAggregate(ctx, aggregate.ID(), CachedAggregate[S]{State: aggregate.State(), Version: aggregate.Version()}); err != nil {
 		s.log.Warn("failed to write cache", "aggregate_id", aggregate.ID(), "error", err)
 	}
 

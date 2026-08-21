@@ -64,8 +64,8 @@ func buildHarness(t *testing.T, events *esmemory.EventStore, opts ...lifecycle.O
 }
 
 // buildHarnessWithLifecycleEvents additionally separates the lifecycle event
-// store from the domain store, so tests can interpose on the event-only
-// folds every command entry and runtime verdict derives from.
+// store from the domain store, so tests can interpose on the one store every
+// lifecycle fold and append flows through.
 func buildHarnessWithLifecycleEvents(t *testing.T, events *esmemory.EventStore, lifecycleEvents eventstore.Store, opts ...lifecycle.OrchestratorOption) *harness {
 	t.Helper()
 
@@ -1516,6 +1516,74 @@ func TestRun_RefusesStaleTerminalRebuild(t *testing.T) {
 	}
 }
 
+// TestRun_RefusesTruncatedPrefix pins that Run's entry decides from a fold
+// built from scratch, not from the handle's retained prefix: with a retained
+// version-1 handle, a valid version-2 claim, and the stream's prefix
+// truncated through version 1, the from-scratch fold sees the break in
+// continuity and refuses before appending. Hydrating the retained aggregate
+// incrementally would instead accept the retained prefix as the missing
+// history, absorb the claim, and record another claim plus BuildStarted over
+// a stream this handle never validated.
+func TestRun_RefusesTruncatedPrefix(t *testing.T) {
+	t.Parallel()
+
+	h := newHarness(t)
+	r := h.begin("truncated prefix")
+
+	attemptID := r.State().Attempt.ID
+
+	// A valid competing claim lands at version 2: it names the in-flight
+	// attempt and carries a runner, so the fold accepts it in any runnable
+	// phase, phase-preservingly.
+	store, err := lifecycle.NewStore(h.events)
+	if err != nil {
+		t.Fatalf("creating lifecycle store: %v", err)
+	}
+
+	aggregate, err := store.Load(t.Context(), lifecycle.StreamUUID("orders"), nil)
+	if err != nil {
+		t.Fatalf("loading lifecycle aggregate: %v", err)
+	}
+
+	aggregate.Append(lifecycle.RunnerClaimed{
+		Attempt: attemptID,
+		Runner:  uuid.Must(uuid.NewV4()),
+		At:      time.Now(),
+	})
+	if err := store.Save(t.Context(), aggregate, nil); err != nil {
+		t.Fatalf("recording the competing claim: %v", err)
+	}
+
+	// Truncate the prefix through version 1: reads now begin at the claim,
+	// and the retained handle's version-1 view is the only witness to what
+	// was removed.
+	if err := h.events.DeleteStream(t.Context(), ordersLifecycleStreamID(), eventstore.DeleteStreamOptions{ToVersion: 1}); err != nil {
+		t.Fatalf("truncating the lifecycle stream: %v", err)
+	}
+
+	_, done := runAsync(t, r)
+
+	if err := waitDone(t, done); err == nil {
+		t.Fatal("want the truncated prefix refused at entry, got a running rebuild")
+	}
+
+	// The refusal precedes any append: the stream still holds exactly the
+	// surviving claim.
+	iter, err := h.events.ReadStream(t.Context(), ordersLifecycleStreamID(), eventstore.ReadStreamOptions{})
+	if err != nil {
+		t.Fatalf("reading the lifecycle stream: %v", err)
+	}
+
+	events, err := eventstore.Collect(t.Context(), iter)
+	if err != nil {
+		t.Fatalf("collecting lifecycle events: %v", err)
+	}
+
+	if len(events) != 1 || events[0].StreamVersion != 2 {
+		t.Errorf("want the stream unchanged (one event at version 2), got %d events", len(events))
+	}
+}
+
 // TestPromote_RecordedDespiteSaveFailure pins the ErrEventsAppended
 // contract: when the save fails after the event is durable, the flip
 // happened — the effect worker observes it from the stream, and the returned
@@ -2035,8 +2103,8 @@ func TestRun_UnobservedClaimRefusedWhenSuperseded(t *testing.T) {
 
 	// The resumed run's claim append is truncated — durable but unobserved —
 	// and a competing claim lands before the recovery reload observes it:
-	// the entry refresh stays on the wired projections store, so the reload
-	// is the first authority-level read.
+	// the entry refresh consumes the first authority read, so skipping one
+	// read lands the interception on the recovery reload.
 	attemptID := resumed.State().Attempt.ID
 
 	writer.armFailure()
@@ -2095,8 +2163,8 @@ func TestRun_ClaimRecoveryFailurePreservesEventsAppended(t *testing.T) {
 
 	errRecovery := errors.New("recovery load refused")
 
-	// The entry refresh stays on the wired projections store, so the
-	// recovery reload is the first authority-level read, and it fails.
+	// The entry refresh consumes the first authority read; the interception
+	// skips it and fails the recovery reload.
 	writer.armFailure()
 	authority.armHydrateIntercept(1, func(context.Context) error { return errRecovery })
 
@@ -3435,8 +3503,8 @@ func TestNewOrchestrator_Validation(t *testing.T) {
 }
 
 // ordersLifecycleStreamID is the typeid of the "orders" projection's
-// lifecycle stream, for raw event appends and snapshot writes that model
-// tampering outside the aggregate.
+// lifecycle stream, for raw stream operations — appends, reads, truncation —
+// performed outside the aggregate.
 func ordersLifecycleStreamID() typeid.ID {
 	return typeid.ID{Type: lifecycle.StreamType, UUID: lifecycle.StreamUUID("orders")}
 }

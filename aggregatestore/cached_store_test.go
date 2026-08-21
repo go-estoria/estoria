@@ -16,8 +16,9 @@ import (
 
 // mockCache is a mock implementation of aggregatestore.AggregateCache.
 type mockCache[E any] struct {
-	GetAggregateFn func(context.Context, typeid.ID) (*aggregatestore.CachedAggregate[E], error)
-	PutAggregateFn func(context.Context, typeid.ID, aggregatestore.CachedAggregate[E]) error
+	GetAggregateFn   func(context.Context, typeid.ID) (*aggregatestore.CachedAggregate[E], error)
+	PutAggregateFn   func(context.Context, typeid.ID, aggregatestore.CachedAggregate[E]) error
+	FenceAggregateFn func(context.Context, typeid.ID, int64) error
 }
 
 var _ aggregatestore.AggregateCache[mockEntity] = (*mockCache[mockEntity])(nil)
@@ -36,6 +37,14 @@ func (c *mockCache[E]) PutAggregate(ctx context.Context, id typeid.ID, entry agg
 	}
 
 	return fmt.Errorf("unexpected call: PutAggregate(id=%s, entry=%v)", id, entry)
+}
+
+func (c *mockCache[E]) FenceAggregate(ctx context.Context, id typeid.ID, version int64) error {
+	if c.FenceAggregateFn != nil {
+		return c.FenceAggregateFn(ctx, id, version)
+	}
+
+	return fmt.Errorf("unexpected call: FenceAggregate(id=%s, version=%d)", id, version)
 }
 
 func TestNewCachedStore(t *testing.T) {
@@ -559,6 +568,10 @@ func (c *gatedPutCache[S]) PutAggregate(ctx context.Context, id typeid.ID, entry
 	return c.inner.PutAggregate(ctx, id, entry)
 }
 
+func (c *gatedPutCache[S]) FenceAggregate(ctx context.Context, id typeid.ID, version int64) error {
+	return c.inner.FenceAggregate(ctx, id, version)
+}
+
 // TestCachedStore_ConcurrentSavesCannotRegressTheCache pins cache publication
 // against out-of-order completion: command A's save persists version 2 but
 // parks inside its cache write; command B reads version 2 from the store,
@@ -583,7 +596,7 @@ func TestCachedStore_ConcurrentSavesCannotRegressTheCache(t *testing.T) {
 	}
 
 	gated := &gatedPutCache[account]{
-		inner:       newMapAggregateCache[account](),
+		inner:       aggregatestore.NewMemoryAggregateCache[account](),
 		armed:       true,
 		gateVersion: 2,
 		entered:     make(chan struct{}),
@@ -660,16 +673,15 @@ func TestCachedStore_ConcurrentSavesCannotRegressTheCache(t *testing.T) {
 		t.Errorf("want the newest state (balance 12), got %d", balance)
 	}
 
-	// The backend entry heals too: a refused-as-stale hit republishes the
-	// version already at the high-water mark, so the regressed entry cannot
-	// outlive the load that detected it.
+	// The backend refused the parked write outright, so the regressed entry
+	// never landed and the backend still holds version 3.
 	entry, err := gated.inner.GetAggregate(t.Context(), loaded.ID())
 	if err != nil || entry == nil {
 		t.Fatalf("reading the backing cache entry: %+v, %v", entry, err)
 	}
 
 	if entry.Version != 3 {
-		t.Errorf("want the backing entry healed to version 3, got %d", entry.Version)
+		t.Errorf("want the backing entry still at version 3, got %d", entry.Version)
 	}
 }
 
@@ -703,9 +715,8 @@ func (s *gatedLoadStore) Load(ctx context.Context, id uuid.UUID, opts *aggregate
 // TestCachedStore_LateLoadPublicationCannotRegressTheCache pins the other
 // publication race: a cache-miss load reads version 2 from the inner store
 // and parks before publishing; a save then persists and publishes version 3;
-// the load's whole publication — high-water mark and write alike — runs
-// last, carrying the older version. It must not displace the newer entry or
-// regress the mark it is compared against.
+// the load's publication runs last, carrying the older version, and the
+// backend must drop it.
 func TestCachedStore_LateLoadPublicationCannotRegressTheCache(t *testing.T) {
 	t.Parallel()
 
@@ -736,7 +747,7 @@ func TestCachedStore_LateLoadPublicationCannotRegressTheCache(t *testing.T) {
 		release: make(chan struct{}),
 	}
 
-	cached, err := aggregatestore.NewCachedStore(aggregatestore.Store[account](gatedInner), newMapAggregateCache[account]())
+	cached, err := aggregatestore.NewCachedStore(aggregatestore.Store[account](gatedInner), aggregatestore.NewMemoryAggregateCache[account]())
 	if err != nil {
 		t.Fatalf("creating cached store: %v", err)
 	}
@@ -784,5 +795,293 @@ func TestCachedStore_LateLoadPublicationCannotRegressTheCache(t *testing.T) {
 
 	if balance := loaded.State().Balance; balance != 12 {
 		t.Errorf("want the newest state (balance 12), got %d", balance)
+	}
+}
+
+// TestCachedStore_SharedBackendCannotBeRegressedAcrossStores pins publication
+// ordering as a property of the shared backend, not of any one store: two
+// CachedStores over one backend publish out of order, and no store sees both
+// writes. W1 misses and parks its version-2 publication; W2 persists and
+// publishes version 3; the released write lands last and the backend must
+// drop it. The publishing store and a store with no history alike must then
+// serve version 3, and the backend entry itself must still hold it.
+func TestCachedStore_SharedBackendCannotBeRegressedAcrossStores(t *testing.T) {
+	t.Parallel()
+
+	eventStore, err := memory.NewEventStore()
+	if err != nil {
+		t.Fatalf("creating event store: %v", err)
+	}
+
+	base, err := aggregatestore.New(eventStore, "account", newAccount,
+		aggregatestore.WithEventTypes[account](fundsDeposited{}, fundsWithdrawn{}))
+	if err != nil {
+		t.Fatalf("creating event sourced store: %v", err)
+	}
+
+	shared := aggregatestore.NewMemoryAggregateCache[account]()
+	gated := &gatedPutCache[account]{
+		inner:       shared,
+		armed:       true,
+		gateVersion: 2,
+		entered:     make(chan struct{}),
+		release:     make(chan struct{}),
+	}
+
+	w1, err := aggregatestore.NewCachedStore[account](base, gated)
+	if err != nil {
+		t.Fatalf("creating cached store w1: %v", err)
+	}
+
+	w2, err := aggregatestore.NewCachedStore[account](base, shared)
+	if err != nil {
+		t.Fatalf("creating cached store w2: %v", err)
+	}
+
+	// Version 2 exists durably before either store's cache sees anything.
+	id := uuid.Must(uuid.NewV4())
+	seed := base.New(id)
+	seed.Append(fundsDeposited{Amount: 10}, fundsDeposited{Amount: 5})
+	if err := base.Save(t.Context(), seed, nil); err != nil {
+		t.Fatalf("seeding: %v", err)
+	}
+
+	// W1 misses, reads version 2, and parks inside its put to the shared backend.
+	read := make(chan error, 1)
+	go func() {
+		_, err := w1.Load(context.Background(), id, nil)
+		read <- err
+	}()
+
+	select {
+	case <-gated.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for w1's cache write to park")
+	}
+
+	// W2 persists and publishes version 3 to the shared backend.
+	aggregate, err := base.Load(t.Context(), id, nil)
+	if err != nil {
+		t.Fatalf("w2 load: %v", err)
+	}
+
+	aggregate.Append(fundsWithdrawn{Amount: 3})
+	if err := w2.Save(t.Context(), aggregate, nil); err != nil {
+		t.Fatalf("w2 save: %v", err)
+	}
+
+	// Release W1's parked put: version 2 lands after version 3.
+	close(gated.release)
+	if err := <-read; err != nil {
+		t.Fatalf("w1 load: %v", err)
+	}
+
+	loaded, err := w1.Load(t.Context(), id, nil)
+	if err != nil {
+		t.Fatalf("loading through w1: %v", err)
+	}
+
+	if loaded.Version() != 3 {
+		t.Errorf("w1: want the cache serving version 3, got %d (the shared backend regressed)", loaded.Version())
+	}
+
+	// A store with no publication history over the same backend must not
+	// serve a regressed entry either.
+	w3, err := aggregatestore.NewCachedStore[account](base, shared)
+	if err != nil {
+		t.Fatalf("creating cached store w3: %v", err)
+	}
+
+	loaded3, err := w3.Load(t.Context(), id, nil)
+	if err != nil {
+		t.Fatalf("loading through w3: %v", err)
+	}
+
+	if loaded3.Version() != 3 {
+		t.Errorf("w3: want the cache serving version 3, got %d", loaded3.Version())
+	}
+
+	entry, err := shared.GetAggregate(t.Context(), loaded.ID())
+	if err != nil || entry == nil {
+		t.Fatalf("reading the backing cache entry: %+v, %v", entry, err)
+	}
+
+	if entry.Version != 3 {
+		t.Errorf("want the backing entry still at version 3, got %d", entry.Version)
+	}
+}
+
+// TestCachedStore_SkipApplySaveFencesTheCache pins the durable advance a
+// SkipApply save makes without leaving a publishable state: the stream moves,
+// the aggregate's state and version stay behind, and the old cache entry is
+// now stale. The save must fence the cache at the newest appended version —
+// any lower, and a racing publication below the durable tip would still land
+// and be served.
+func TestCachedStore_SkipApplySaveFencesTheCache(t *testing.T) {
+	t.Parallel()
+
+	eventStore, err := memory.NewEventStore()
+	if err != nil {
+		t.Fatalf("creating event store: %v", err)
+	}
+
+	base, err := aggregatestore.New(eventStore, "account", newAccount,
+		aggregatestore.WithEventTypes[account](fundsDeposited{}, fundsWithdrawn{}))
+	if err != nil {
+		t.Fatalf("creating event sourced store: %v", err)
+	}
+
+	cache := aggregatestore.NewMemoryAggregateCache[account]()
+
+	cached, err := aggregatestore.NewCachedStore[account](base, cache)
+	if err != nil {
+		t.Fatalf("creating cached store: %v", err)
+	}
+
+	id := uuid.Must(uuid.NewV4())
+	seed := cached.New(id)
+	seed.Append(fundsDeposited{Amount: 10})
+	if err := cached.Save(t.Context(), seed, nil); err != nil {
+		t.Fatalf("seeding: %v", err)
+	}
+
+	// The skip-apply save appends two events: versions 2 and 3 become durable
+	// while the aggregate stays at version 1.
+	aggregate, err := base.Load(t.Context(), id, nil)
+	if err != nil {
+		t.Fatalf("loading: %v", err)
+	}
+
+	aggregate.Append(fundsDeposited{Amount: 5}, fundsDeposited{Amount: 7})
+	if err := cached.Save(t.Context(), aggregate, &aggregatestore.SaveOptions{SkipApply: true}); err != nil {
+		t.Fatalf("skip-apply save: %v", err)
+	}
+
+	// A racing publication below the durable tip must be refused by the
+	// fence: version 2 is as stale as version 1 once version 3 is a fact.
+	if err := cache.PutAggregate(t.Context(), seed.ID(), aggregatestore.CachedAggregate[account]{
+		State:   account{Balance: 999},
+		Version: 2,
+	}); err != nil {
+		t.Fatalf("racing put: %v", err)
+	}
+
+	loaded, err := cached.Load(t.Context(), id, nil)
+	if err != nil {
+		t.Fatalf("loading through the cache: %v", err)
+	}
+
+	if loaded.Version() != 3 {
+		t.Errorf("want version 3 after the durable advance, got %d (stale entry served)", loaded.Version())
+	}
+
+	if balance := loaded.State().Balance; balance != 22 {
+		t.Errorf("want the durable state (balance 22), got %d", balance)
+	}
+
+	// The load repopulated the backend at the durable tip.
+	entry, err := cache.GetAggregate(t.Context(), seed.ID())
+	if err != nil || entry == nil {
+		t.Fatalf("reading the backing cache entry: %+v, %v", entry, err)
+	}
+
+	if entry.Version != 3 {
+		t.Errorf("want the backing entry repopulated at version 3, got %d", entry.Version)
+	}
+}
+
+// postAppendFailStore forces the faithful ErrEventsAppended shape: the inner
+// save appends durably but applies nothing (skip-apply), and the returned
+// error reports the events as appended but unapplied.
+type postAppendFailStore struct {
+	aggregatestore.Store[account]
+	armed bool
+}
+
+func (s *postAppendFailStore) Save(ctx context.Context, aggregate *aggregatestore.Aggregate[account], opts *aggregatestore.SaveOptions) error {
+	if !s.armed {
+		return s.Store.Save(ctx, aggregate, opts)
+	}
+	s.armed = false
+
+	forced := aggregatestore.SaveOptions{SkipApply: true}
+	if err := s.Store.Save(ctx, aggregate, &forced); err != nil {
+		return err
+	}
+
+	return fmt.Errorf("applying aggregate event: %w", aggregatestore.ErrEventsAppended)
+}
+
+// TestCachedStore_PostAppendFailureFencesTheCache pins the recovery contract
+// ErrEventsAppended documents: the events are durable facts, the caller
+// discards the aggregate and reloads, and the reload replays them. The cached
+// entry predates the append, so the failing save must fence it out before the
+// error surfaces; the fence is minimal — one past the version the aggregate
+// applied — which outranks every entry the append outdated without blocking
+// the reload's republication.
+func TestCachedStore_PostAppendFailureFencesTheCache(t *testing.T) {
+	t.Parallel()
+
+	eventStore, err := memory.NewEventStore()
+	if err != nil {
+		t.Fatalf("creating event store: %v", err)
+	}
+
+	base, err := aggregatestore.New(eventStore, "account", newAccount,
+		aggregatestore.WithEventTypes[account](fundsDeposited{}, fundsWithdrawn{}))
+	if err != nil {
+		t.Fatalf("creating event sourced store: %v", err)
+	}
+
+	failing := &postAppendFailStore{Store: base}
+	cache := aggregatestore.NewMemoryAggregateCache[account]()
+
+	cached, err := aggregatestore.NewCachedStore[account](failing, cache)
+	if err != nil {
+		t.Fatalf("creating cached store: %v", err)
+	}
+
+	id := uuid.Must(uuid.NewV4())
+	seed := cached.New(id)
+	seed.Append(fundsDeposited{Amount: 10})
+	if err := cached.Save(t.Context(), seed, nil); err != nil {
+		t.Fatalf("seeding: %v", err)
+	}
+
+	aggregate, err := base.Load(t.Context(), id, nil)
+	if err != nil {
+		t.Fatalf("loading: %v", err)
+	}
+
+	aggregate.Append(fundsDeposited{Amount: 5})
+	failing.armed = true
+
+	err = cached.Save(t.Context(), aggregate, nil)
+	if !errors.Is(err, aggregatestore.ErrEventsAppended) {
+		t.Fatalf("want a save error carrying ErrEventsAppended, got %v", err)
+	}
+
+	// The documented recovery: discard the aggregate and reload it.
+	loaded, err := cached.Load(t.Context(), id, nil)
+	if err != nil {
+		t.Fatalf("reloading through the cache: %v", err)
+	}
+
+	if loaded.Version() != 2 {
+		t.Errorf("want the reload replaying the appended events (version 2), got %d (stale entry served)", loaded.Version())
+	}
+
+	if balance := loaded.State().Balance; balance != 15 {
+		t.Errorf("want the durable state (balance 15), got %d", balance)
+	}
+
+	// The reload republished at the durable tip: the fence admitted it.
+	entry, err := cache.GetAggregate(t.Context(), seed.ID())
+	if err != nil || entry == nil {
+		t.Fatalf("reading the backing cache entry: %+v, %v", entry, err)
+	}
+
+	if entry.Version != 2 {
+		t.Errorf("want the backing entry republished at version 2, got %d", entry.Version)
 	}
 }
