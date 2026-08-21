@@ -4,7 +4,9 @@ import (
 	"encoding/json"
 	"errors"
 	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/go-estoria/estoria"
 	"github.com/go-estoria/estoria/aggregatestore"
@@ -302,6 +304,150 @@ func (c brokenCodec) UnmarshalState(data []byte, dest **ptrCounter) error {
 }
 
 func (c brokenCodec) ContentType() string { return estoria.ContentTypeJSON }
+
+// rawCodec is a valid zero-copy StateCodec: it returns and installs the
+// very slices it is handed.
+type rawCodec struct{}
+
+func (rawCodec) MarshalState(state []byte) ([]byte, error) { return state, nil }
+
+func (rawCodec) UnmarshalState(data []byte, dest *[]byte) error {
+	*dest = data
+	return nil
+}
+
+func (rawCodec) ContentType() string { return "application/octet-stream" }
+
+// TestMemoryAggregateCache_ZeroCopyCodecCannotAlias pins the byte-level half
+// of the detachment contract: the cache clones what a marshal returns and
+// what an unmarshal consumes, so even a codec that retains or installs its
+// slices leaves callers and cache sharing nothing.
+func TestMemoryAggregateCache_ZeroCopyCodecCannotAlias(t *testing.T) {
+	t.Parallel()
+
+	cache := aggregatestore.NewMemoryAggregateCache[[]byte](aggregatestore.WithCacheStateCodec[[]byte](rawCodec{}))
+	id := typeid.New("blob", uuid.Must(uuid.NewV4()))
+
+	state := []byte("aaaa")
+	if err := cache.PutAggregate(t.Context(), id, aggregatestore.CachedAggregate[[]byte]{State: state, Version: 1}); err != nil {
+		t.Fatalf("putting: %v", err)
+	}
+
+	// The putter mutates its slice after the put: the entry must not see it.
+	state[0] = 'z'
+
+	first, err := cache.GetAggregate(t.Context(), id)
+	if err != nil || first == nil {
+		t.Fatalf("first get: %+v, %v", first, err)
+	}
+
+	if string(first.State) != "aaaa" {
+		t.Fatalf("want the entry detached from the putter (%q), got %q", "aaaa", first.State)
+	}
+
+	// One getter mutates its slice: the next get must not see it.
+	first.State[0] = 'q'
+
+	second, err := cache.GetAggregate(t.Context(), id)
+	if err != nil || second == nil {
+		t.Fatalf("second get: %+v, %v", second, err)
+	}
+
+	if string(second.State) != "aaaa" {
+		t.Errorf("want each get detached from every other (%q), got %q", "aaaa", second.State)
+	}
+}
+
+// overlapCodec detects concurrent entry into its codec methods.
+type overlapCodec struct {
+	inFlight   atomic.Int32
+	overlapped atomic.Bool
+}
+
+func (c *overlapCodec) enter() {
+	if c.inFlight.Add(1) > 1 {
+		c.overlapped.Store(true)
+	}
+
+	time.Sleep(200 * time.Microsecond)
+}
+
+func (c *overlapCodec) MarshalState(state account) ([]byte, error) {
+	c.enter()
+	defer c.inFlight.Add(-1)
+
+	return json.Marshal(state)
+}
+
+func (c *overlapCodec) UnmarshalState(data []byte, dest *account) error {
+	c.enter()
+	defer c.inFlight.Add(-1)
+
+	return json.Unmarshal(data, dest)
+}
+
+func (c *overlapCodec) ContentType() string { return estoria.ContentTypeJSON }
+
+// TestMemoryAggregateCache_CodecCallsAreSerialized pins that the codec runs
+// under the cache's lock: a codec with internal state faces no concurrency
+// the cache did not already exclude.
+func TestMemoryAggregateCache_CodecCallsAreSerialized(t *testing.T) {
+	t.Parallel()
+
+	codec := &overlapCodec{}
+	cache := aggregatestore.NewMemoryAggregateCache[account](aggregatestore.WithCacheStateCodec[account](estoria.StateCodec[account](codec)))
+	id := typeid.New("account", uuid.Must(uuid.NewV4()))
+
+	if err := cache.PutAggregate(t.Context(), id, cacheEntry(1)); err != nil {
+		t.Fatalf("pre-putting: %v", err)
+	}
+
+	var wg sync.WaitGroup
+	for g := range 8 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := range 25 {
+				if g%2 == 0 {
+					if err := cache.PutAggregate(t.Context(), id, cacheEntry(int64(g*1000+i+2))); err != nil {
+						t.Errorf("putting: %v", err)
+					}
+				} else if _, err := cache.GetAggregate(t.Context(), id); err != nil {
+					t.Errorf("getting: %v", err)
+				}
+			}
+		}()
+	}
+	wg.Wait()
+
+	if codec.overlapped.Load() {
+		t.Error("want codec calls serialized, got concurrent entry")
+	}
+}
+
+// TestMemoryAggregateCache_StalePutIsDroppedWithoutEncoding pins put's
+// ordering: the floor is checked before the codec runs, so a put that has
+// already lost the race is dropped without error — the failing codec here
+// proves it is never invoked.
+func TestMemoryAggregateCache_StalePutIsDroppedWithoutEncoding(t *testing.T) {
+	t.Parallel()
+
+	cache := aggregatestore.NewMemoryAggregateCache[*ptrCounter](
+		aggregatestore.WithCacheStateCodec[*ptrCounter](brokenCodec{failMarshal: true}))
+	id := typeid.New("ptrcounter", uuid.Must(uuid.NewV4()))
+
+	if err := cache.FenceAggregate(t.Context(), id, 2); err != nil {
+		t.Fatalf("fencing at 2: %v", err)
+	}
+
+	if err := cache.PutAggregate(t.Context(), id, aggregatestore.CachedAggregate[*ptrCounter]{State: &ptrCounter{Balance: 10}, Version: 1}); err != nil {
+		t.Errorf("want the below-fence put dropped without error, got %v", err)
+	}
+
+	if entry, err := cache.GetAggregate(t.Context(), id); err != nil || entry != nil {
+		t.Errorf("want nothing cached, got %+v, %v", entry, err)
+	}
+}
 
 // TestMemoryAggregateCache_CodecFailuresSurface pins that serialization
 // failures are reported, not swallowed: a put that cannot capture state

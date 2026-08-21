@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -340,13 +341,39 @@ func TestCachedStore_Save(t *testing.T) {
 			},
 			haveCache: func() aggregatestore.AggregateCache[mockEntity] {
 				return &mockCache[mockEntity]{
+					FenceAggregateFn: func(context.Context, typeid.ID, int64) error {
+						return nil
+					},
 					PutAggregateFn: func(context.Context, typeid.ID, aggregatestore.CachedAggregate[mockEntity]) error {
 						return nil
 					},
 				}
 			},
 			haveAggregate: func() *aggregatestore.Aggregate[mockEntity] {
-				return newMockAggregate(aggregateID, 0)
+				aggregate := newMockAggregate(aggregateID, 0)
+				aggregate.Append(mockEntityEventA{})
+				return aggregate
+			},
+			wantAggregate: func() *aggregatestore.Aggregate[mockEntity] {
+				return newMockAggregate(aggregateID, 42)
+			}(),
+		},
+		{
+			name: "delegates a save with no queued events and leaves the cache untouched",
+			haveInner: func() aggregatestore.Store[mockEntity] {
+				return &mockAggregateStore[mockEntity]{
+					SaveFn: func(context.Context, *aggregatestore.Aggregate[mockEntity], *aggregatestore.SaveOptions) error {
+						return nil
+					},
+				}
+			},
+			haveCache: func() aggregatestore.AggregateCache[mockEntity] {
+				// The bare mock refuses every cache call: a fence would refuse
+				// the save, so reaching wantAggregate proves none was raised.
+				return &mockCache[mockEntity]{}
+			},
+			haveAggregate: func() *aggregatestore.Aggregate[mockEntity] {
+				return newMockAggregate(aggregateID, 42)
 			},
 			wantAggregate: func() *aggregatestore.Aggregate[mockEntity] {
 				return newMockAggregate(aggregateID, 42)
@@ -362,10 +389,33 @@ func TestCachedStore_Save(t *testing.T) {
 				}
 			},
 			haveCache: func() aggregatestore.AggregateCache[mockEntity] {
+				return &mockCache[mockEntity]{
+					FenceAggregateFn: func(context.Context, typeid.ID, int64) error {
+						return nil
+					},
+				}
+			},
+			haveAggregate: func() *aggregatestore.Aggregate[mockEntity] {
+				aggregate := newMockAggregate(aggregateID, 42)
+				aggregate.Append(mockEntityEventA{})
+				return aggregate
+			},
+			wantErr: errors.New("saving to inner aggregate store: mock error"),
+		},
+		{
+			name: "returns an error when the inner store refuses a no-event save",
+			haveInner: func() aggregatestore.Store[mockEntity] {
+				return &mockAggregateStore[mockEntity]{
+					SaveFn: func(context.Context, *aggregatestore.Aggregate[mockEntity], *aggregatestore.SaveOptions) error {
+						return errors.New("mock error")
+					},
+				}
+			},
+			haveCache: func() aggregatestore.AggregateCache[mockEntity] {
 				return &mockCache[mockEntity]{}
 			},
 			haveAggregate: func() *aggregatestore.Aggregate[mockEntity] {
-				return newMockAggregate(aggregateID, 42)
+				return newMockAggregate(aggregateID, 0)
 			},
 			wantErr: errors.New("saving to inner aggregate store: mock error"),
 		},
@@ -381,13 +431,18 @@ func TestCachedStore_Save(t *testing.T) {
 			},
 			haveCache: func() aggregatestore.AggregateCache[mockEntity] {
 				return &mockCache[mockEntity]{
+					FenceAggregateFn: func(context.Context, typeid.ID, int64) error {
+						return nil
+					},
 					PutAggregateFn: func(context.Context, typeid.ID, aggregatestore.CachedAggregate[mockEntity]) error {
 						return errors.New("mock error")
 					},
 				}
 			},
 			haveAggregate: func() *aggregatestore.Aggregate[mockEntity] {
-				return newMockAggregate(aggregateID, 0)
+				aggregate := newMockAggregate(aggregateID, 0)
+				aggregate.Append(mockEntityEventA{})
+				return aggregate
 			},
 			wantAggregate: func() *aggregatestore.Aggregate[mockEntity] {
 				return newMockAggregate(aggregateID, 42)
@@ -1544,33 +1599,233 @@ func TestCachedStore_ServesDetachedState(t *testing.T) {
 	}
 }
 
-// ctxAwareCache refuses writes once the context is done, modeling a remote
-// backend that honors cancellation.
-type ctxAwareCache[S any] struct {
-	aggregatestore.AggregateCache[S]
+// TestCachedStore_NoEventSaveLeavesTheCacheUntouched pins that a save with
+// no queued events publishes nothing: the inner no-op validates neither
+// state nor version, so state the caller mutated without events must never
+// become servable.
+func TestCachedStore_NoEventSaveLeavesTheCacheUntouched(t *testing.T) {
+	t.Parallel()
+
+	eventStore, err := memory.NewEventStore()
+	if err != nil {
+		t.Fatalf("creating event store: %v", err)
+	}
+
+	base, err := aggregatestore.New(eventStore, "ptrcounter",
+		func(uuid.UUID) *ptrCounter { return &ptrCounter{} },
+		aggregatestore.WithEventTypes[*ptrCounter](ptrBumped{}))
+	if err != nil {
+		t.Fatalf("creating event sourced store: %v", err)
+	}
+
+	mem := aggregatestore.NewMemoryAggregateCache[*ptrCounter]()
+
+	cached, err := aggregatestore.NewCachedStore[*ptrCounter](base, mem)
+	if err != nil {
+		t.Fatalf("creating cached store: %v", err)
+	}
+
+	id := uuid.Must(uuid.NewV4())
+	seed := cached.New(id)
+	seed.Append(ptrBumped{Amount: 10})
+	if err := cached.Save(t.Context(), seed, nil); err != nil {
+		t.Fatalf("seeding: %v", err)
+	}
+
+	aggregate, err := cached.Load(t.Context(), id, nil)
+	if err != nil {
+		t.Fatalf("loading: %v", err)
+	}
+
+	// The caller mutates its (detached) state and saves without events.
+	aggregate.State().Balance = 999
+
+	if err := cached.Save(t.Context(), aggregate, nil); err != nil {
+		t.Fatalf("no-event save: %v", err)
+	}
+
+	// Untouched means untouched: the still-valid entry survives — neither
+	// replaced by the unpersisted state nor evicted by a needless fence.
+	entry, err := mem.GetAggregate(t.Context(), aggregate.ID())
+	if err != nil || entry == nil {
+		t.Fatalf("want the seeded entry still cached, got %+v, %v", entry, err)
+	}
+
+	if entry.Version != 1 || entry.State.Balance != 10 {
+		t.Errorf("want the entry unchanged (version 1, balance 10), got version %d balance %d",
+			entry.Version, entry.State.Balance)
+	}
+
+	loaded, err := cached.Load(t.Context(), id, nil)
+	if err != nil {
+		t.Fatalf("loading after the no-event save: %v", err)
+	}
+
+	if got := loaded.State().Balance; got != 10 {
+		t.Errorf("want the durable state served (balance 10), got %d (unpersisted state published)", got)
+	}
 }
 
-func (c *ctxAwareCache[S]) PutAggregate(ctx context.Context, id typeid.ID, entry aggregatestore.CachedAggregate[S]) error {
-	if err := ctx.Err(); err != nil {
-		return err
+// TestCachedStore_NoEventSaveCannotRepublishBelowTheFence pins the other
+// half of the same rule: with the fence at the durable advance and its
+// publication lost, a no-event save of a supported historical version must
+// not resurrect that version as the cached view.
+func TestCachedStore_NoEventSaveCannotRepublishBelowTheFence(t *testing.T) {
+	t.Parallel()
+
+	base, cached, flaky, id := newFlakyFixture(t)
+
+	seedOne(t, cached, id)
+
+	aggregate, err := base.Load(t.Context(), id, nil)
+	if err != nil {
+		t.Fatalf("loading: %v", err)
+	}
+
+	aggregate.Append(fundsDeposited{Amount: 5})
+	aggregate.Append(fundsDeposited{Amount: 7})
+	flaky.armPutFailures()
+
+	// Durable version 3, fence 2, no entry: the publication was lost.
+	if err := cached.Save(t.Context(), aggregate, nil); err != nil {
+		t.Fatalf("two-event save: %v", err)
+	}
+
+	flaky.disarm()
+
+	historical, err := cached.Load(t.Context(), id, &aggregatestore.LoadOptions{ToVersion: 2})
+	if err != nil {
+		t.Fatalf("versioned load: %v", err)
+	}
+
+	if err := cached.Save(t.Context(), historical, nil); err != nil {
+		t.Fatalf("no-event save of the historical aggregate: %v", err)
+	}
+
+	loaded, err := cached.Load(t.Context(), id, nil)
+	if err != nil {
+		t.Fatalf("unversioned load: %v", err)
+	}
+
+	if loaded.Version() != 3 || loaded.State().Balance != 22 {
+		t.Errorf("want the durable tip served (version 3, balance 22), got version %d balance %d (historical version republished)",
+			loaded.Version(), loaded.State().Balance)
+	}
+}
+
+// TestCachedStore_HookAppendedEventsAreFenced pins the documented composition
+// rule for decorators that introduce events: wrapping CachedStore, a
+// before-save hook's appended events arrive as queued events, the fence
+// decision sees them, and even with every publication failing the entry the
+// append outdated is never served.
+func TestCachedStore_HookAppendedEventsAreFenced(t *testing.T) {
+	t.Parallel()
+
+	base, cached, flaky, id := newFlakyFixture(t)
+
+	hooked, err := aggregatestore.NewHookableStore[account](cached)
+	if err != nil {
+		t.Fatalf("creating hookable store: %v", err)
+	}
+
+	var hookArmed atomic.Bool
+	hooked.BeforeSave(func(_ context.Context, aggregate *aggregatestore.Aggregate[account]) error {
+		if hookArmed.CompareAndSwap(true, false) {
+			aggregate.Append(fundsDeposited{Amount: 5})
+		}
+
+		return nil
+	})
+
+	seedOne(t, cached, id)
+
+	aggregate, err := base.Load(t.Context(), id, nil)
+	if err != nil {
+		t.Fatalf("loading: %v", err)
+	}
+
+	hookArmed.Store(true)
+	flaky.armPutFailures()
+
+	// The caller queues nothing; the hook appends before CachedStore runs.
+	if err := hooked.Save(t.Context(), aggregate, nil); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+
+	durable, err := base.Load(t.Context(), id, nil)
+	if err != nil {
+		t.Fatalf("loading durably: %v", err)
+	}
+
+	if durable.Version() != 2 {
+		t.Fatalf("want the hook's event durable at version 2, got %d", durable.Version())
+	}
+
+	loaded, err := cached.Load(t.Context(), id, nil)
+	if err != nil {
+		t.Fatalf("loading through the cache: %v", err)
+	}
+
+	if loaded.Version() != 2 || loaded.State().Balance != 15 {
+		t.Errorf("want version 2 balance 15 served, got version %d balance %d (stale entry outlived the hook's append)",
+			loaded.Version(), loaded.State().Balance)
+	}
+}
+
+// blockingPutCache blocks one armed put until the caller's context is done
+// or the test releases it, modeling a backend waiting on I/O.
+type blockingPutCache[S any] struct {
+	aggregatestore.AggregateCache[S]
+	mu      sync.Mutex
+	armed   bool
+	entered chan struct{}
+	release chan struct{}
+}
+
+func newBlockingPutCache[S any](t *testing.T) *blockingPutCache[S] {
+	t.Helper()
+
+	cache := &blockingPutCache[S]{
+		AggregateCache: aggregatestore.NewMemoryAggregateCache[S](),
+		entered:        make(chan struct{}),
+		release:        make(chan struct{}),
+	}
+	t.Cleanup(func() { close(cache.release) })
+
+	return cache
+}
+
+func (c *blockingPutCache[S]) arm() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	c.armed = true
+}
+
+func (c *blockingPutCache[S]) PutAggregate(ctx context.Context, id typeid.ID, entry aggregatestore.CachedAggregate[S]) error {
+	c.mu.Lock()
+	gate := c.armed
+	c.armed = false
+	c.mu.Unlock()
+
+	if gate {
+		close(c.entered)
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-c.release:
+			return nil
+		}
 	}
 
 	return c.AggregateCache.PutAggregate(ctx, id, entry)
 }
 
-func (c *ctxAwareCache[S]) FenceAggregate(ctx context.Context, id typeid.ID, version int64) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-
-	return c.AggregateCache.FenceAggregate(ctx, id, version)
-}
-
-// TestCachedStore_PublicationOutlivesTheCallersContext pins that cache work
-// after the append does not die with the caller: the events are facts the
-// moment the inner save returns, so their publication runs detached from the
-// caller's cancellation even against a backend that honors context.
-func TestCachedStore_PublicationOutlivesTheCallersContext(t *testing.T) {
+// TestCachedStore_SaveIsNotStrandedByTheCache pins that post-append cache
+// work runs on the caller's context: a cache waiting on I/O cannot hold a
+// completed save past its caller's cancellation, and the publication lost
+// with it costs a miss, never a stale hit.
+func TestCachedStore_SaveIsNotStrandedByTheCache(t *testing.T) {
 	t.Parallel()
 
 	eventStore, err := memory.NewEventStore()
@@ -1584,15 +1839,9 @@ func TestCachedStore_PublicationOutlivesTheCallersContext(t *testing.T) {
 		t.Fatalf("creating event sourced store: %v", err)
 	}
 
-	parked := &parkedSaveStore{
-		Store:   base,
-		entered: make(chan struct{}),
-		release: make(chan struct{}),
-	}
+	blocking := newBlockingPutCache[account](t)
 
-	mem := aggregatestore.NewMemoryAggregateCache[account]()
-
-	cached, err := aggregatestore.NewCachedStore[account](aggregatestore.Store[account](parked), &ctxAwareCache[account]{AggregateCache: mem})
+	cached, err := aggregatestore.NewCachedStore[account](base, blocking)
 	if err != nil {
 		t.Fatalf("creating cached store: %v", err)
 	}
@@ -1606,11 +1855,10 @@ func TestCachedStore_PublicationOutlivesTheCallersContext(t *testing.T) {
 	}
 
 	aggregate.Append(fundsDeposited{Amount: 5})
-	parked.mu.Lock()
-	parked.armed = true
-	parked.mu.Unlock()
+	blocking.arm()
 
 	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 
 	saved := make(chan error, 1)
 	go func() {
@@ -1618,26 +1866,97 @@ func TestCachedStore_PublicationOutlivesTheCallersContext(t *testing.T) {
 	}()
 
 	select {
-	case <-parked.entered:
+	case <-blocking.entered:
 	case <-time.After(5 * time.Second):
-		t.Fatal("timed out waiting for the save to park")
+		t.Fatal("timed out waiting for the publication to block")
 	}
 
-	// The caller gives up while the committed save is still parked; the
-	// publication must not die with it.
+	// The caller gives up; the completed save must return with it.
 	cancel()
-	close(parked.release)
 
-	if err := <-saved; err != nil {
-		t.Fatalf("save: %v", err)
+	select {
+	case err := <-saved:
+		if err != nil {
+			t.Fatalf("save: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("save stranded in its cache publication after the caller canceled")
 	}
 
-	entry, err := mem.GetAggregate(t.Context(), aggregate.ID())
-	if err != nil || entry == nil {
-		t.Fatalf("want the publication to have landed despite the canceled caller, got %+v, %v", entry, err)
+	loaded, err := cached.Load(t.Context(), id, nil)
+	if err != nil {
+		t.Fatalf("loading after the canceled publication: %v", err)
 	}
 
-	if entry.Version != 2 {
-		t.Errorf("want the published entry at version 2, got %d", entry.Version)
+	if loaded.Version() != 2 || loaded.State().Balance != 15 {
+		t.Errorf("want the durable state served (version 2, balance 15), got version %d balance %d",
+			loaded.Version(), loaded.State().Balance)
+	}
+}
+
+// TestCachedStore_LoadIsNotStrandedByTheCache pins the same property for the
+// miss-path publication: a completed load returns with its canceled caller.
+func TestCachedStore_LoadIsNotStrandedByTheCache(t *testing.T) {
+	t.Parallel()
+
+	eventStore, err := memory.NewEventStore()
+	if err != nil {
+		t.Fatalf("creating event store: %v", err)
+	}
+
+	base, err := aggregatestore.New(eventStore, "account", newAccount,
+		aggregatestore.WithEventTypes[account](fundsDeposited{}, fundsWithdrawn{}))
+	if err != nil {
+		t.Fatalf("creating event sourced store: %v", err)
+	}
+
+	blocking := newBlockingPutCache[account](t)
+
+	cached, err := aggregatestore.NewCachedStore[account](base, blocking)
+	if err != nil {
+		t.Fatalf("creating cached store: %v", err)
+	}
+
+	id := uuid.Must(uuid.NewV4())
+	seed := base.New(id)
+	seed.Append(fundsDeposited{Amount: 10})
+	if err := base.Save(t.Context(), seed, nil); err != nil {
+		t.Fatalf("seeding: %v", err)
+	}
+
+	blocking.arm()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	type loadResult struct {
+		aggregate *aggregatestore.Aggregate[account]
+		err       error
+	}
+
+	loaded := make(chan loadResult, 1)
+	go func() {
+		aggregate, err := cached.Load(ctx, id, nil)
+		loaded <- loadResult{aggregate, err}
+	}()
+
+	select {
+	case <-blocking.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for the miss publication to block")
+	}
+
+	cancel()
+
+	select {
+	case result := <-loaded:
+		if result.err != nil {
+			t.Fatalf("load: %v", result.err)
+		}
+		if result.aggregate.Version() != 1 {
+			t.Errorf("want the loaded aggregate at version 1, got %d", result.aggregate.Version())
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("load stranded in its miss publication after the caller canceled")
 	}
 }

@@ -71,6 +71,12 @@ type AggregateCache[S any] interface {
 // out of order, so any number of stores can share one backend without
 // serving a regressed entry, for as long as the backend retains its
 // ordering fences. Saves are fail-closed against the cache — see Save.
+//
+// The save protocol reads the aggregate's queued events as exactly what the
+// inner store will append. A decorator that introduces events during the
+// save — a before-save hook that appends, for example — must wrap
+// CachedStore rather than sit inside it: between CachedStore and the event
+// store, its events are invisible to the fence decision.
 type CachedStore[S any] struct {
 	inner Store[S]
 	cache AggregateCache[S]
@@ -143,9 +149,7 @@ func (s *CachedStore[S]) Load(ctx context.Context, id uuid.UUID, opts *LoadOptio
 		return nil, LoadError{Operation: "loading from inner aggregate store", Err: err}
 	}
 
-	// The loaded state is a durable fact; publish it even if the caller has
-	// since given up waiting.
-	if err := s.cache.PutAggregate(context.WithoutCancel(ctx), aggregate.ID(), CachedAggregate[S]{State: aggregate.State(), Version: aggregate.Version()}); err != nil {
+	if err := s.cache.PutAggregate(ctx, aggregate.ID(), CachedAggregate[S]{State: aggregate.State(), Version: aggregate.Version()}); err != nil {
 		s.log.Warn("failed to write cache", "aggregate_id", aggregateID, "error", err)
 	}
 
@@ -164,9 +168,13 @@ func (s *CachedStore[S]) Hydrate(ctx context.Context, aggregate *Aggregate[S], o
 // after the append can leave it authoritative — every later cache write is
 // an optimization whose loss costs a miss, never a stale hit. A fence that
 // cannot be raised refuses the save with nothing appended; the caller's
-// events remain queued for retry. Cache work after the append runs on a
-// context detached from the caller's cancellation: the events are facts
-// regardless, and their publication should not be abandoned with them.
+// events remain queued for retry. Cache work after the append runs on the
+// caller's context: a publication lost to cancellation costs only a miss,
+// and a cache that honors the context cannot block the completed save.
+//
+// A save with no queued events appends nothing and validates nothing, so it
+// is delegated with the cache untouched: without an append there is no
+// durable fact to publish and no version to fence ahead of.
 //
 // A save that leaves the aggregate with queued events (SkipApply) publishes
 // no entry — the state trails what was persisted — and instead raises the
@@ -180,17 +188,21 @@ func (s *CachedStore[S]) Save(ctx context.Context, aggregate *Aggregate[S], opts
 		return SaveError{Err: ErrNilAggregate}
 	}
 
-	if len(aggregate.unsavedEvents) > 0 {
-		if err := s.cache.FenceAggregate(ctx, aggregate.ID(), aggregate.Version()+1); err != nil {
-			return SaveError{AggregateID: aggregate.ID(), Operation: "fencing cache before save", Err: err}
+	if len(aggregate.unsavedEvents) == 0 {
+		if err := s.inner.Save(ctx, aggregate, opts); err != nil {
+			return SaveError{AggregateID: aggregate.ID(), Operation: "saving to inner aggregate store", Err: err}
 		}
+
+		return nil
+	}
+
+	if err := s.cache.FenceAggregate(ctx, aggregate.ID(), aggregate.Version()+1); err != nil {
+		return SaveError{AggregateID: aggregate.ID(), Operation: "fencing cache before save", Err: err}
 	}
 
 	if err := s.inner.Save(ctx, aggregate, opts); err != nil {
 		return SaveError{AggregateID: aggregate.ID(), Operation: "saving to inner aggregate store", Err: err}
 	}
-
-	ctx = context.WithoutCancel(ctx)
 
 	// An aggregate saved with SkipApply still has events queued, so its state
 	// and version trail what was just persisted, and there is nothing to
