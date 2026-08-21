@@ -27,10 +27,29 @@ type CachedAggregate[S any] struct {
 // store's concurrent commands, or several stores sharing one backend, can
 // reach it out of order, and only the backend sees every write. Both write
 // operations are therefore conditional on the versions the backend already
-// holds, and each comparison must be atomic with its effect, per aggregate.
-// Eviction remains the backend's own policy: dropping an entry or a fence
-// forgets history rather than regressing it, re-admitting an out-of-order
-// publication only if it arrives after the backend's retention horizon.
+// holds, each comparison atomic with its effect, per aggregate — and reads
+// carry the same obligation: once a put or fence for an aggregate has
+// completed, no later GetAggregate for that aggregate may observe an older
+// view. Reads and writes are linearizable per aggregate; a backend that
+// serves reads from replicas must route or gate them so this holds.
+//
+// A write that returns an error may or may not have taken effect — a
+// timeout can outlive its request — and the backend must remain valid
+// either way, with every ordering invariant intact. Callers treat an
+// errored write as not applied; CachedStore's save protocol relies on the
+// fence failing closed, never open.
+//
+// Entries pass by value in both directions: a backend must not retain state
+// it was handed, or hand out state it retains, in a way that leaves two
+// callers — or a caller and the cache — sharing mutable memory. Serializing
+// backends detach for free; in-memory backends must detach deliberately.
+//
+// Eviction is the backend's own policy, under one ordering rule: an
+// aggregate's fence must outlive the entries it outranks — dropping a
+// payload costs a hit, while dropping a fence early re-admits the very
+// publication it refused. A backend that eventually drops both forgets the
+// aggregate entirely, and the ordering guarantee is scoped to that
+// retention.
 type AggregateCache[S any] interface {
 	GetAggregate(ctx context.Context, aggregateID typeid.ID) (*CachedAggregate[S], error)
 
@@ -49,8 +68,9 @@ type AggregateCache[S any] interface {
 // CachedStore wraps an aggregate store with an AggregateCache to cache aggregates.
 // Publication ordering lives in the cache backend (see AggregateCache): the
 // store publishes unconditionally and lets the backend drop whatever arrives
-// out of order, so any number of stores can share one backend without any of
-// them serving a regressed entry.
+// out of order, so any number of stores can share one backend without
+// serving a regressed entry, for as long as the backend retains its
+// ordering fences. Saves are fail-closed against the cache — see Save.
 type CachedStore[S any] struct {
 	inner Store[S]
 	cache AggregateCache[S]
@@ -123,7 +143,9 @@ func (s *CachedStore[S]) Load(ctx context.Context, id uuid.UUID, opts *LoadOptio
 		return nil, LoadError{Operation: "loading from inner aggregate store", Err: err}
 	}
 
-	if err := s.cache.PutAggregate(ctx, aggregate.ID(), CachedAggregate[S]{State: aggregate.State(), Version: aggregate.Version()}); err != nil {
+	// The loaded state is a durable fact; publish it even if the caller has
+	// since given up waiting.
+	if err := s.cache.PutAggregate(context.WithoutCancel(ctx), aggregate.ID(), CachedAggregate[S]{State: aggregate.State(), Version: aggregate.Version()}); err != nil {
 		s.log.Warn("failed to write cache", "aggregate_id", aggregateID, "error", err)
 	}
 
@@ -135,35 +157,40 @@ func (s *CachedStore[S]) Hydrate(ctx context.Context, aggregate *Aggregate[S], o
 	return s.inner.Hydrate(ctx, aggregate, opts)
 }
 
-// Save saves an aggregate using the inner store, then updates the cache. The
-// cache write is conditional at the backend, so a publication that loses a
-// race cannot regress what a concurrent save published (see AggregateCache).
-// A save that advanced the stream without leaving a publishable state — a
-// SkipApply save, or a failure after its events were appended — fences the
-// cache instead, so the entry it outdated cannot be served while the next
-// load repopulates from the inner store.
+// Save persists the aggregate through the inner store behind a fail-closed
+// cache protocol. Before anything is appended, the cache is fenced one past
+// the aggregate's version: the entry the append is about to outdate stops
+// being served before the events can become facts, so no cache failure
+// after the append can leave it authoritative — every later cache write is
+// an optimization whose loss costs a miss, never a stale hit. A fence that
+// cannot be raised refuses the save with nothing appended; the caller's
+// events remain queued for retry. Cache work after the append runs on a
+// context detached from the caller's cancellation: the events are facts
+// regardless, and their publication should not be abandoned with them.
+//
+// A save that leaves the aggregate with queued events (SkipApply) publishes
+// no entry — the state trails what was persisted — and instead raises the
+// fence to the newest appended version, the exact durable tip. A save that
+// fails after its events were appended (ErrEventsAppended) needs nothing
+// further: the pre-append fence already outranks every entry the append
+// outdated, and the documented discard-and-reload recovery republishes at
+// or above it.
 func (s *CachedStore[S]) Save(ctx context.Context, aggregate *Aggregate[S], opts *SaveOptions) error {
 	if aggregate == nil {
 		return SaveError{Err: ErrNilAggregate}
 	}
 
-	if err := s.inner.Save(ctx, aggregate, opts); err != nil {
-		// Events carried by ErrEventsAppended are durable facts the cached
-		// entry no longer reflects. The exact durable tip is unknowable here —
-		// the inner store may be any composition — but it is at least one past
-		// the version this aggregate applied, and any entry this save could be
-		// racing is at or below that version, so the minimal fence evicts
-		// every entry the append outdated without ever refusing an honest
-		// republication from the recovery reload.
-		if errors.Is(err, ErrEventsAppended) {
-			if fenceErr := s.cache.FenceAggregate(ctx, aggregate.ID(), aggregate.Version()+1); fenceErr != nil {
-				s.log.Warn("failed to fence cache after a post-append save failure",
-					"aggregate_id", aggregate.ID(), "error", fenceErr)
-			}
+	if len(aggregate.unsavedEvents) > 0 {
+		if err := s.cache.FenceAggregate(ctx, aggregate.ID(), aggregate.Version()+1); err != nil {
+			return SaveError{AggregateID: aggregate.ID(), Operation: "fencing cache before save", Err: err}
 		}
+	}
 
+	if err := s.inner.Save(ctx, aggregate, opts); err != nil {
 		return SaveError{AggregateID: aggregate.ID(), Operation: "saving to inner aggregate store", Err: err}
 	}
+
+	ctx = context.WithoutCancel(ctx)
 
 	// An aggregate saved with SkipApply still has events queued, so its state
 	// and version trail what was just persisted, and there is nothing to

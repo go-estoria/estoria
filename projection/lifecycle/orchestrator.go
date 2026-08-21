@@ -76,9 +76,10 @@ type Orchestrator struct {
 	log               estoria.Logger
 
 	// authority folds lifecycle streams directly from LifecycleEvents:
-	// every command entry, every runtime verdict, every observation, and
-	// every append flows through it. It is the only store the orchestrator
-	// touches.
+	// every command entry except Promote's — which acts on the in-process
+	// certificate a run establishes (see Rebuild.Promote) — every runtime
+	// verdict, every observation, and every append flows through it. It is
+	// the only store the orchestrator touches.
 	authority aggregatestore.Store[State]
 
 	// optionErr collects invalid options for NewOrchestrator to report, so a

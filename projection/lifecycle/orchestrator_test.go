@@ -4243,10 +4243,11 @@ func (h *readModelHandler) Teardown(_ context.Context, id projection.ID) error {
 var _ projection.Teardowner = (*readModelHandler)(nil)
 
 // interceptingEventStore delegates and lets tests hook the authority-level
-// stream read every command entry and runtime verdict flows through —
-// command entry refolds, the reconcile loop's fresh view, claim recovery,
-// defeat classification, and retirement authority each hydrate through
-// exactly one read of the lifecycle stream. A hook fires once, after a configured number of
+// stream read every command entry except Promote's — which performs none —
+// and every runtime verdict flows through: command entry refolds, the
+// reconcile loop's fresh view, claim recovery, defeat classification, and
+// retirement authority each hydrate through exactly one read of the
+// lifecycle stream. A hook fires once, after a configured number of
 // untouched calls: replacing the read, running ahead of it, or running
 // after the inner read returned its frozen view but before the fold
 // consumes it. Versioned hydrates — the defeat-classification read, the

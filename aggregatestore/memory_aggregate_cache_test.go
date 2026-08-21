@@ -1,9 +1,12 @@
 package aggregatestore_test
 
 import (
+	"encoding/json"
+	"errors"
 	"sync"
 	"testing"
 
+	"github.com/go-estoria/estoria"
 	"github.com/go-estoria/estoria/aggregatestore"
 	"github.com/go-estoria/estoria/typeid"
 	"github.com/gofrs/uuid/v5"
@@ -235,4 +238,108 @@ func TestMemoryAggregateCache_ConcurrentPublicationsConvergeToNewest(t *testing.
 	if entry.Version != 20 {
 		t.Errorf("want the newest publication stored (version 20), got %d", entry.Version)
 	}
+}
+
+// TestMemoryAggregateCache_DetachesStateAtBothBoundaries pins the detachment
+// contract directly: state handed to a put stays the caller's to mutate, and
+// each get returns state nothing else holds.
+func TestMemoryAggregateCache_DetachesStateAtBothBoundaries(t *testing.T) {
+	t.Parallel()
+
+	cache := aggregatestore.NewMemoryAggregateCache[*ptrCounter]()
+	id := typeid.New("ptrcounter", uuid.Must(uuid.NewV4()))
+
+	original := &ptrCounter{Balance: 10}
+	if err := cache.PutAggregate(t.Context(), id, aggregatestore.CachedAggregate[*ptrCounter]{State: original, Version: 1}); err != nil {
+		t.Fatalf("putting: %v", err)
+	}
+
+	// The caller mutates its state after the put: the entry must not see it.
+	original.Balance = 999
+
+	first, err := cache.GetAggregate(t.Context(), id)
+	if err != nil || first == nil {
+		t.Fatalf("first get: %+v, %v", first, err)
+	}
+
+	if first.State.Balance != 10 {
+		t.Fatalf("want the entry detached from the putter (balance 10), got %d", first.State.Balance)
+	}
+
+	// One getter mutates its state: the next get must not see it.
+	first.State.Balance = 555
+
+	second, err := cache.GetAggregate(t.Context(), id)
+	if err != nil || second == nil {
+		t.Fatalf("second get: %+v, %v", second, err)
+	}
+
+	if second.State.Balance != 10 {
+		t.Errorf("want each get detached from every other (balance 10), got %d", second.State.Balance)
+	}
+}
+
+// brokenCodec fails marshaling or unmarshaling on command.
+type brokenCodec struct {
+	failMarshal   bool
+	failUnmarshal bool
+}
+
+func (c brokenCodec) MarshalState(state *ptrCounter) ([]byte, error) {
+	if c.failMarshal {
+		return nil, errors.New("marshal refused")
+	}
+
+	return json.Marshal(state)
+}
+
+func (c brokenCodec) UnmarshalState(data []byte, dest **ptrCounter) error {
+	if c.failUnmarshal {
+		return errors.New("unmarshal refused")
+	}
+
+	return json.Unmarshal(data, dest)
+}
+
+func (c brokenCodec) ContentType() string { return estoria.ContentTypeJSON }
+
+// TestMemoryAggregateCache_CodecFailuresSurface pins that serialization
+// failures are reported, not swallowed: a put that cannot capture state
+// errors instead of caching something else, and a get that cannot decode
+// errors instead of serving it.
+func TestMemoryAggregateCache_CodecFailuresSurface(t *testing.T) {
+	t.Parallel()
+
+	id := typeid.New("ptrcounter", uuid.Must(uuid.NewV4()))
+
+	t.Run("marshal failure fails the put", func(t *testing.T) {
+		t.Parallel()
+
+		cache := aggregatestore.NewMemoryAggregateCache[*ptrCounter](
+			aggregatestore.WithCacheStateCodec[*ptrCounter](brokenCodec{failMarshal: true}))
+
+		err := cache.PutAggregate(t.Context(), id, aggregatestore.CachedAggregate[*ptrCounter]{State: &ptrCounter{Balance: 10}, Version: 1})
+		if err == nil {
+			t.Fatal("want the put refused when state cannot be marshaled, got nil")
+		}
+
+		if entry, err := cache.GetAggregate(t.Context(), id); err != nil || entry != nil {
+			t.Errorf("want nothing cached after the failed put, got %+v, %v", entry, err)
+		}
+	})
+
+	t.Run("unmarshal failure fails the get", func(t *testing.T) {
+		t.Parallel()
+
+		cache := aggregatestore.NewMemoryAggregateCache[*ptrCounter](
+			aggregatestore.WithCacheStateCodec[*ptrCounter](brokenCodec{failUnmarshal: true}))
+
+		if err := cache.PutAggregate(t.Context(), id, aggregatestore.CachedAggregate[*ptrCounter]{State: &ptrCounter{Balance: 10}, Version: 1}); err != nil {
+			t.Fatalf("putting: %v", err)
+		}
+
+		if _, err := cache.GetAggregate(t.Context(), id); err == nil {
+			t.Fatal("want the get failing when the entry cannot be decoded, got nil")
+		}
+	})
 }

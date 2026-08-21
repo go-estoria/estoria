@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-estoria/estoria"
 	"github.com/go-estoria/estoria/aggregatestore"
 	"github.com/go-estoria/estoria/eventstore/memory"
 	"github.com/go-estoria/estoria/typeid"
@@ -319,14 +320,13 @@ func TestCachedStore_Save(t *testing.T) {
 	aggregateID := uuid.Must(uuid.NewV4())
 
 	for _, tt := range []struct {
-		name                string
-		haveInner           func() aggregatestore.Store[mockEntity]
-		haveCache           func() aggregatestore.AggregateCache[mockEntity]
-		haveOpts            *aggregatestore.SaveOptions
-		haveAggregate       func() *aggregatestore.Aggregate[mockEntity]
-		wantAggregate       *aggregatestore.Aggregate[mockEntity]
-		wantCachedAggregate *aggregatestore.Aggregate[mockEntity]
-		wantErr             error
+		name          string
+		haveInner     func() aggregatestore.Store[mockEntity]
+		haveCache     func() aggregatestore.AggregateCache[mockEntity]
+		haveOpts      *aggregatestore.SaveOptions
+		haveAggregate func() *aggregatestore.Aggregate[mockEntity]
+		wantAggregate *aggregatestore.Aggregate[mockEntity]
+		wantErr       error
 	}{
 		{
 			name: "saves an aggregate using the inner store and adds the aggregate to the cache",
@@ -349,9 +349,6 @@ func TestCachedStore_Save(t *testing.T) {
 				return newMockAggregate(aggregateID, 0)
 			},
 			wantAggregate: func() *aggregatestore.Aggregate[mockEntity] {
-				return newMockAggregate(aggregateID, 42)
-			}(),
-			wantCachedAggregate: func() *aggregatestore.Aggregate[mockEntity] {
 				return newMockAggregate(aggregateID, 42)
 			}(),
 		},
@@ -432,10 +429,6 @@ func TestCachedStore_Save(t *testing.T) {
 			// aggregate has the correct version
 			if gotAggregate.Version() != tt.wantAggregate.Version() {
 				t.Errorf("want aggregate version %d, got %d", tt.wantAggregate.Version(), gotAggregate.Version())
-			}
-
-			if tt.wantCachedAggregate == nil {
-				return
 			}
 		})
 	}
@@ -979,14 +972,26 @@ func TestCachedStore_SkipApplySaveFencesTheCache(t *testing.T) {
 		t.Errorf("want the durable state (balance 22), got %d", balance)
 	}
 
-	// The load repopulated the backend at the durable tip.
+	// The load repopulated the backend at the durable tip, state and all.
 	entry, err := cache.GetAggregate(t.Context(), seed.ID())
 	if err != nil || entry == nil {
 		t.Fatalf("reading the backing cache entry: %+v, %v", entry, err)
 	}
 
-	if entry.Version != 3 {
-		t.Errorf("want the backing entry repopulated at version 3, got %d", entry.Version)
+	if entry.Version != 3 || entry.State.Balance != 22 {
+		t.Errorf("want the backing entry repopulated with the durable payload (version 3, balance 22), got version %d balance %d",
+			entry.Version, entry.State.Balance)
+	}
+
+	// A hit serves exactly what was published.
+	hit, err := cached.Load(t.Context(), id, nil)
+	if err != nil {
+		t.Fatalf("loading the published entry: %v", err)
+	}
+
+	if hit.Version() != 3 || hit.State().Balance != 22 {
+		t.Errorf("want the hit serving the published entry (version 3, balance 22), got version %d balance %d",
+			hit.Version(), hit.State().Balance)
 	}
 }
 
@@ -1083,5 +1088,556 @@ func TestCachedStore_PostAppendFailureFencesTheCache(t *testing.T) {
 
 	if entry.Version != 2 {
 		t.Errorf("want the backing entry republished at version 2, got %d", entry.Version)
+	}
+}
+
+// flakyCache delegates to an inner cache and fails operations on command,
+// for pinning the save protocol's behavior when the cache misbehaves.
+type flakyCache[S any] struct {
+	aggregatestore.AggregateCache[S]
+	mu         sync.Mutex
+	failPuts   bool
+	failFences bool
+	fenceSkips int
+	fenceCalls int
+}
+
+func (c *flakyCache[S]) PutAggregate(ctx context.Context, id typeid.ID, entry aggregatestore.CachedAggregate[S]) error {
+	c.mu.Lock()
+	fail := c.failPuts
+	c.mu.Unlock()
+
+	if fail {
+		return errors.New("cache put refused")
+	}
+
+	return c.AggregateCache.PutAggregate(ctx, id, entry)
+}
+
+func (c *flakyCache[S]) FenceAggregate(ctx context.Context, id typeid.ID, version int64) error {
+	c.mu.Lock()
+	n := c.fenceCalls
+	c.fenceCalls++
+	fail := c.failFences && n >= c.fenceSkips
+	c.mu.Unlock()
+
+	if fail {
+		return errors.New("cache fence refused")
+	}
+
+	return c.AggregateCache.FenceAggregate(ctx, id, version)
+}
+
+// armFenceFailures makes fence calls fail after the next afterCalls calls
+// succeed, counting from now.
+func (c *flakyCache[S]) armFenceFailures(afterCalls int) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	c.failFences = true
+	c.fenceSkips = afterCalls
+	c.fenceCalls = 0
+}
+
+func (c *flakyCache[S]) armPutFailures() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	c.failPuts = true
+}
+
+func (c *flakyCache[S]) disarm() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	c.failPuts = false
+	c.failFences = false
+}
+
+func newFlakyFixture(t *testing.T) (aggregatestore.Store[account], *aggregatestore.CachedStore[account], *flakyCache[account], uuid.UUID) {
+	t.Helper()
+
+	eventStore, err := memory.NewEventStore()
+	if err != nil {
+		t.Fatalf("creating event store: %v", err)
+	}
+
+	base, err := aggregatestore.New(eventStore, "account", newAccount,
+		aggregatestore.WithEventTypes[account](fundsDeposited{}, fundsWithdrawn{}))
+	if err != nil {
+		t.Fatalf("creating event sourced store: %v", err)
+	}
+
+	flaky := &flakyCache[account]{AggregateCache: aggregatestore.NewMemoryAggregateCache[account]()}
+
+	cached, err := aggregatestore.NewCachedStore[account](base, flaky)
+	if err != nil {
+		t.Fatalf("creating cached store: %v", err)
+	}
+
+	return base, cached, flaky, uuid.Must(uuid.NewV4())
+}
+
+func seedOne(t *testing.T, cached *aggregatestore.CachedStore[account], id uuid.UUID) {
+	t.Helper()
+
+	seed := cached.New(id)
+	seed.Append(fundsDeposited{Amount: 10})
+	if err := cached.Save(t.Context(), seed, nil); err != nil {
+		t.Fatalf("seeding: %v", err)
+	}
+}
+
+// TestCachedStore_SaveRefusedWhenTheCacheCannotBeFenced pins the fail-closed
+// half of the save protocol: the pre-append fence is the one cache write
+// whose failure must refuse the save, because everything after the append is
+// unenforceable. Nothing is appended, the events stay queued, and a retry
+// once the cache recovers completes the save.
+func TestCachedStore_SaveRefusedWhenTheCacheCannotBeFenced(t *testing.T) {
+	t.Parallel()
+
+	base, cached, flaky, id := newFlakyFixture(t)
+
+	seedOne(t, cached, id)
+
+	aggregate, err := base.Load(t.Context(), id, nil)
+	if err != nil {
+		t.Fatalf("loading: %v", err)
+	}
+
+	aggregate.Append(fundsDeposited{Amount: 5})
+	flaky.armFenceFailures(0)
+
+	if err := cached.Save(t.Context(), aggregate, nil); err == nil {
+		t.Fatal("want the save refused when the cache cannot be fenced, got nil")
+	}
+
+	// Nothing was appended: the stream still ends at the seed.
+	durable, err := base.Load(t.Context(), id, nil)
+	if err != nil {
+		t.Fatalf("loading durably: %v", err)
+	}
+
+	if durable.Version() != 1 {
+		t.Fatalf("want nothing appended by the refused save, got version %d", durable.Version())
+	}
+
+	// The events stayed queued: the same save succeeds once the cache recovers.
+	flaky.disarm()
+
+	if err := cached.Save(t.Context(), aggregate, nil); err != nil {
+		t.Fatalf("retrying the save: %v", err)
+	}
+
+	loaded, err := cached.Load(t.Context(), id, nil)
+	if err != nil {
+		t.Fatalf("loading through the cache: %v", err)
+	}
+
+	if loaded.Version() != 2 || loaded.State().Balance != 15 {
+		t.Errorf("want the retried save served (version 2, balance 15), got version %d balance %d",
+			loaded.Version(), loaded.State().Balance)
+	}
+}
+
+// TestCachedStore_PublicationFailureCannotServeTheOutdatedEntry pins the
+// fail-open half: once the pre-append fence stands, a failed publication
+// costs a miss, never a stale hit — the entry the append outdated was
+// already evicted, so the load falls through to the inner store.
+func TestCachedStore_PublicationFailureCannotServeTheOutdatedEntry(t *testing.T) {
+	t.Parallel()
+
+	base, cached, flaky, id := newFlakyFixture(t)
+
+	seedOne(t, cached, id)
+
+	aggregate, err := base.Load(t.Context(), id, nil)
+	if err != nil {
+		t.Fatalf("loading: %v", err)
+	}
+
+	aggregate.Append(fundsDeposited{Amount: 5})
+	flaky.armPutFailures()
+
+	if err := cached.Save(t.Context(), aggregate, nil); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+
+	loaded, err := cached.Load(t.Context(), id, nil)
+	if err != nil {
+		t.Fatalf("loading through the cache: %v", err)
+	}
+
+	if loaded.Version() != 2 || loaded.State().Balance != 15 {
+		t.Errorf("want the durable state served despite the failed publication (version 2, balance 15), got version %d balance %d",
+			loaded.Version(), loaded.State().Balance)
+	}
+}
+
+// TestCachedStore_SkipApplyFenceFailureCannotServeTheOutdatedEntry pins the
+// same property for a SkipApply save whose exact post-append fence fails:
+// the pre-append fence already evicted the outdated entry, so the failure
+// downgrades the exactness of the fence, not the safety of reads.
+func TestCachedStore_SkipApplyFenceFailureCannotServeTheOutdatedEntry(t *testing.T) {
+	t.Parallel()
+
+	base, cached, flaky, id := newFlakyFixture(t)
+
+	seedOne(t, cached, id)
+
+	aggregate, err := base.Load(t.Context(), id, nil)
+	if err != nil {
+		t.Fatalf("loading: %v", err)
+	}
+
+	aggregate.Append(fundsDeposited{Amount: 5})
+	flaky.armFenceFailures(1)
+
+	if err := cached.Save(t.Context(), aggregate, &aggregatestore.SaveOptions{SkipApply: true}); err != nil {
+		t.Fatalf("skip-apply save: %v", err)
+	}
+
+	loaded, err := cached.Load(t.Context(), id, nil)
+	if err != nil {
+		t.Fatalf("loading through the cache: %v", err)
+	}
+
+	if loaded.Version() != 2 {
+		t.Errorf("want version 2 after the durable advance, got %d (stale entry served)", loaded.Version())
+	}
+}
+
+// TestCachedStore_PostAppendPublicationFailureCannotServeTheOutdatedEntry
+// pins the ErrEventsAppended path with every post-append cache write
+// failing: the pre-append fence alone must keep the outdated entry from the
+// documented discard-and-reload recovery.
+func TestCachedStore_PostAppendPublicationFailureCannotServeTheOutdatedEntry(t *testing.T) {
+	t.Parallel()
+
+	eventStore, err := memory.NewEventStore()
+	if err != nil {
+		t.Fatalf("creating event store: %v", err)
+	}
+
+	base, err := aggregatestore.New(eventStore, "account", newAccount,
+		aggregatestore.WithEventTypes[account](fundsDeposited{}, fundsWithdrawn{}))
+	if err != nil {
+		t.Fatalf("creating event sourced store: %v", err)
+	}
+
+	failing := &postAppendFailStore{Store: base}
+	flaky := &flakyCache[account]{AggregateCache: aggregatestore.NewMemoryAggregateCache[account]()}
+
+	cached, err := aggregatestore.NewCachedStore[account](failing, flaky)
+	if err != nil {
+		t.Fatalf("creating cached store: %v", err)
+	}
+
+	id := uuid.Must(uuid.NewV4())
+	seedOne(t, cached, id)
+
+	aggregate, err := base.Load(t.Context(), id, nil)
+	if err != nil {
+		t.Fatalf("loading: %v", err)
+	}
+
+	aggregate.Append(fundsDeposited{Amount: 5})
+	failing.armed = true
+	flaky.armFenceFailures(1)
+	flaky.armPutFailures()
+
+	if err := cached.Save(t.Context(), aggregate, nil); !errors.Is(err, aggregatestore.ErrEventsAppended) {
+		t.Fatalf("want a save error carrying ErrEventsAppended, got %v", err)
+	}
+
+	loaded, err := cached.Load(t.Context(), id, nil)
+	if err != nil {
+		t.Fatalf("reloading through the cache: %v", err)
+	}
+
+	if loaded.Version() != 2 {
+		t.Errorf("want the reload replaying the appended events (version 2), got %d (stale entry served)", loaded.Version())
+	}
+}
+
+// parkedSaveStore delegates a save to the inner store and, when armed, parks
+// after the commit and before returning — holding the caller's post-save
+// cache work open while the appended events are already facts.
+type parkedSaveStore struct {
+	aggregatestore.Store[account]
+	mu      sync.Mutex
+	armed   bool
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (s *parkedSaveStore) Save(ctx context.Context, aggregate *aggregatestore.Aggregate[account], opts *aggregatestore.SaveOptions) error {
+	err := s.Store.Save(ctx, aggregate, opts)
+
+	s.mu.Lock()
+	gate := s.armed
+	s.armed = false
+	s.mu.Unlock()
+
+	if gate {
+		close(s.entered)
+		<-s.release
+	}
+
+	return err
+}
+
+// TestCachedStore_SaveWindowCannotServeTheOutdatedEntry pins the window
+// between the append and its publication: the committed events are already
+// visible to a versioned read, so an unversioned load in that window must
+// not serve the entry the commit outdated — the pre-append fence evicted it
+// before the events could become facts.
+func TestCachedStore_SaveWindowCannotServeTheOutdatedEntry(t *testing.T) {
+	t.Parallel()
+
+	eventStore, err := memory.NewEventStore()
+	if err != nil {
+		t.Fatalf("creating event store: %v", err)
+	}
+
+	base, err := aggregatestore.New(eventStore, "account", newAccount,
+		aggregatestore.WithEventTypes[account](fundsDeposited{}, fundsWithdrawn{}))
+	if err != nil {
+		t.Fatalf("creating event sourced store: %v", err)
+	}
+
+	parked := &parkedSaveStore{
+		Store:   base,
+		entered: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+
+	cached, err := aggregatestore.NewCachedStore[account](aggregatestore.Store[account](parked), aggregatestore.NewMemoryAggregateCache[account]())
+	if err != nil {
+		t.Fatalf("creating cached store: %v", err)
+	}
+
+	id := uuid.Must(uuid.NewV4())
+	seedOne(t, cached, id)
+
+	aggregate, err := base.Load(t.Context(), id, nil)
+	if err != nil {
+		t.Fatalf("loading: %v", err)
+	}
+
+	aggregate.Append(fundsDeposited{Amount: 5})
+	parked.mu.Lock()
+	parked.armed = true
+	parked.mu.Unlock()
+
+	saved := make(chan error, 1)
+	go func() {
+		saved <- cached.Save(context.Background(), aggregate, nil)
+	}()
+
+	select {
+	case <-parked.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for the save to park")
+	}
+
+	// The commit is a fact: a versioned load reads it from the stream.
+	versioned, err := cached.Load(t.Context(), id, &aggregatestore.LoadOptions{ToVersion: 2})
+	if err != nil {
+		t.Fatalf("versioned load: %v", err)
+	}
+
+	if versioned.Version() != 2 {
+		t.Fatalf("want the versioned load reading committed version 2, got %d", versioned.Version())
+	}
+
+	// The unversioned load must not serve the entry the commit outdated.
+	loaded, err := cached.Load(t.Context(), id, nil)
+
+	close(parked.release)
+	if err != nil {
+		t.Fatalf("unversioned load: %v", err)
+	}
+
+	if err := <-saved; err != nil {
+		t.Fatalf("save: %v", err)
+	}
+
+	if loaded.Version() != 2 {
+		t.Errorf("want the unversioned load serving committed version 2, got %d (outdated entry served)", loaded.Version())
+	}
+}
+
+// ptrCounter is reference-bearing state whose ApplyTo mutates in place, as
+// the package supports elsewhere. It pins the cache's detachment contract.
+type ptrCounter struct{ Balance int }
+
+type ptrBumped struct {
+	Amount int
+}
+
+func (ptrBumped) EventType() string { return "ptrbumped" }
+
+func (ptrBumped) New() estoria.DomainEvent[*ptrCounter] { return &ptrBumped{} }
+
+func (e ptrBumped) ApplyTo(c *ptrCounter) *ptrCounter {
+	if c == nil {
+		c = &ptrCounter{}
+	}
+	c.Balance += e.Amount
+
+	return c
+}
+
+// TestCachedStore_ServesDetachedState pins the detachment contract through
+// the whole composition: two aggregates loaded from one cache entry must not
+// share memory with each other or with the entry, so a save through one —
+// applying events in place — cannot mutate the other's history.
+func TestCachedStore_ServesDetachedState(t *testing.T) {
+	t.Parallel()
+
+	eventStore, err := memory.NewEventStore()
+	if err != nil {
+		t.Fatalf("creating event store: %v", err)
+	}
+
+	base, err := aggregatestore.New(eventStore, "ptrcounter",
+		func(uuid.UUID) *ptrCounter { return &ptrCounter{} },
+		aggregatestore.WithEventTypes[*ptrCounter](ptrBumped{}))
+	if err != nil {
+		t.Fatalf("creating event sourced store: %v", err)
+	}
+
+	cached, err := aggregatestore.NewCachedStore[*ptrCounter](base, aggregatestore.NewMemoryAggregateCache[*ptrCounter]())
+	if err != nil {
+		t.Fatalf("creating cached store: %v", err)
+	}
+
+	id := uuid.Must(uuid.NewV4())
+	seed := cached.New(id)
+	seed.Append(ptrBumped{Amount: 10})
+	if err := cached.Save(t.Context(), seed, nil); err != nil {
+		t.Fatalf("seeding: %v", err)
+	}
+
+	first, err := cached.Load(t.Context(), id, nil)
+	if err != nil {
+		t.Fatalf("first load: %v", err)
+	}
+
+	second, err := cached.Load(t.Context(), id, nil)
+	if err != nil {
+		t.Fatalf("second load: %v", err)
+	}
+
+	first.Append(ptrBumped{Amount: 5})
+	if err := cached.Save(t.Context(), first, nil); err != nil {
+		t.Fatalf("saving through the first aggregate: %v", err)
+	}
+
+	if second.Version() != 1 {
+		t.Fatalf("want the second aggregate still at version 1, got %d", second.Version())
+	}
+
+	if got := second.State().Balance; got != 10 {
+		t.Errorf("want the version-1 state unchanged (balance 10), got %d (state aliased)", got)
+	}
+}
+
+// ctxAwareCache refuses writes once the context is done, modeling a remote
+// backend that honors cancellation.
+type ctxAwareCache[S any] struct {
+	aggregatestore.AggregateCache[S]
+}
+
+func (c *ctxAwareCache[S]) PutAggregate(ctx context.Context, id typeid.ID, entry aggregatestore.CachedAggregate[S]) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	return c.AggregateCache.PutAggregate(ctx, id, entry)
+}
+
+func (c *ctxAwareCache[S]) FenceAggregate(ctx context.Context, id typeid.ID, version int64) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	return c.AggregateCache.FenceAggregate(ctx, id, version)
+}
+
+// TestCachedStore_PublicationOutlivesTheCallersContext pins that cache work
+// after the append does not die with the caller: the events are facts the
+// moment the inner save returns, so their publication runs detached from the
+// caller's cancellation even against a backend that honors context.
+func TestCachedStore_PublicationOutlivesTheCallersContext(t *testing.T) {
+	t.Parallel()
+
+	eventStore, err := memory.NewEventStore()
+	if err != nil {
+		t.Fatalf("creating event store: %v", err)
+	}
+
+	base, err := aggregatestore.New(eventStore, "account", newAccount,
+		aggregatestore.WithEventTypes[account](fundsDeposited{}, fundsWithdrawn{}))
+	if err != nil {
+		t.Fatalf("creating event sourced store: %v", err)
+	}
+
+	parked := &parkedSaveStore{
+		Store:   base,
+		entered: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+
+	mem := aggregatestore.NewMemoryAggregateCache[account]()
+
+	cached, err := aggregatestore.NewCachedStore[account](aggregatestore.Store[account](parked), &ctxAwareCache[account]{AggregateCache: mem})
+	if err != nil {
+		t.Fatalf("creating cached store: %v", err)
+	}
+
+	id := uuid.Must(uuid.NewV4())
+	seedOne(t, cached, id)
+
+	aggregate, err := base.Load(t.Context(), id, nil)
+	if err != nil {
+		t.Fatalf("loading: %v", err)
+	}
+
+	aggregate.Append(fundsDeposited{Amount: 5})
+	parked.mu.Lock()
+	parked.armed = true
+	parked.mu.Unlock()
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	saved := make(chan error, 1)
+	go func() {
+		saved <- cached.Save(ctx, aggregate, nil)
+	}()
+
+	select {
+	case <-parked.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for the save to park")
+	}
+
+	// The caller gives up while the committed save is still parked; the
+	// publication must not die with it.
+	cancel()
+	close(parked.release)
+
+	if err := <-saved; err != nil {
+		t.Fatalf("save: %v", err)
+	}
+
+	entry, err := mem.GetAggregate(t.Context(), aggregate.ID())
+	if err != nil || entry == nil {
+		t.Fatalf("want the publication to have landed despite the canceled caller, got %+v, %v", entry, err)
+	}
+
+	if entry.Version != 2 {
+		t.Errorf("want the published entry at version 2, got %d", entry.Version)
 	}
 }
