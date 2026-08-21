@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -401,6 +402,38 @@ func TestCachedStore_Save(t *testing.T) {
 				return aggregate
 			},
 			wantErr: errors.New("saving to inner aggregate store: mock error"),
+		},
+		{
+			name: "refuses a save from a negative version before touching the cache",
+			haveInner: func() aggregatestore.Store[mockEntity] {
+				return &mockAggregateStore[mockEntity]{}
+			},
+			haveCache: func() aggregatestore.AggregateCache[mockEntity] {
+				// The bare mock refuses every cache call: any fence would fail
+				// the save with a fencing error, not the validation error.
+				return &mockCache[mockEntity]{}
+			},
+			haveAggregate: func() *aggregatestore.Aggregate[mockEntity] {
+				aggregate := newMockAggregate(aggregateID, -1)
+				aggregate.Append(mockEntityEventA{})
+				return aggregate
+			},
+			wantErr: errors.New("validating aggregate version: aggregate version -1 is invalid"),
+		},
+		{
+			name: "refuses a save that would overflow the version space before touching the cache",
+			haveInner: func() aggregatestore.Store[mockEntity] {
+				return &mockAggregateStore[mockEntity]{}
+			},
+			haveCache: func() aggregatestore.AggregateCache[mockEntity] {
+				return &mockCache[mockEntity]{}
+			},
+			haveAggregate: func() *aggregatestore.Aggregate[mockEntity] {
+				aggregate := newMockAggregate(aggregateID, math.MaxInt64)
+				aggregate.Append(mockEntityEventA{})
+				return aggregate
+			},
+			wantErr: errors.New("validating aggregate version: cannot append 1 events at version 9223372036854775807: aggregate versions end at 9223372036854775807"),
 		},
 		{
 			name: "returns an error when the inner store refuses a no-event save",
@@ -1076,9 +1109,8 @@ func (s *postAppendFailStore) Save(ctx context.Context, aggregate *aggregatestor
 // ErrEventsAppended documents: the events are durable facts, the caller
 // discards the aggregate and reloads, and the reload replays them. The cached
 // entry predates the append, so the failing save must fence it out before the
-// error surfaces; the fence is minimal — one past the version the aggregate
-// applied — which outranks every entry the append outdated without blocking
-// the reload's republication.
+// error surfaces; the fence stands at the durable tip, which outranks every
+// entry the append outdated without blocking the reload's republication.
 func TestCachedStore_PostAppendFailureFencesTheCache(t *testing.T) {
 	t.Parallel()
 
@@ -1329,11 +1361,12 @@ func TestCachedStore_PublicationFailureCannotServeTheOutdatedEntry(t *testing.T)
 	}
 }
 
-// TestCachedStore_SkipApplyFenceFailureCannotServeTheOutdatedEntry pins the
-// same property for a SkipApply save whose exact post-append fence fails:
-// the pre-append fence already evicted the outdated entry, so the failure
-// downgrades the exactness of the fence, not the safety of reads.
-func TestCachedStore_SkipApplyFenceFailureCannotServeTheOutdatedEntry(t *testing.T) {
+// TestCachedStore_LostPublicationCannotAdmitAnIntermediateVersion pins where
+// the pre-append fence stands: at the expected durable tip, not one past the
+// starting version. A two-event save that loses its publication leaves the
+// fence as the only guard, and a racing publication of the intermediate
+// version — equal to any lesser fence — must still be refused.
+func TestCachedStore_LostPublicationCannotAdmitAnIntermediateVersion(t *testing.T) {
 	t.Parallel()
 
 	base, cached, flaky, id := newFlakyFixture(t)
@@ -1346,10 +1379,22 @@ func TestCachedStore_SkipApplyFenceFailureCannotServeTheOutdatedEntry(t *testing
 	}
 
 	aggregate.Append(fundsDeposited{Amount: 5})
-	flaky.armFenceFailures(1)
+	aggregate.Append(fundsDeposited{Amount: 7})
+	flaky.armPutFailures()
 
-	if err := cached.Save(t.Context(), aggregate, &aggregatestore.SaveOptions{SkipApply: true}); err != nil {
-		t.Fatalf("skip-apply save: %v", err)
+	// Durable version 3; the publication of version 3 is lost.
+	if err := cached.Save(t.Context(), aggregate, nil); err != nil {
+		t.Fatalf("two-event save: %v", err)
+	}
+
+	flaky.disarm()
+
+	// A racing publication of the intermediate version arrives at the backend.
+	if err := flaky.AggregateCache.PutAggregate(t.Context(), aggregate.ID(), aggregatestore.CachedAggregate[account]{
+		State:   account{Balance: 15},
+		Version: 2,
+	}); err != nil {
+		t.Fatalf("racing put: %v", err)
 	}
 
 	loaded, err := cached.Load(t.Context(), id, nil)
@@ -1357,15 +1402,27 @@ func TestCachedStore_SkipApplyFenceFailureCannotServeTheOutdatedEntry(t *testing
 		t.Fatalf("loading through the cache: %v", err)
 	}
 
-	if loaded.Version() != 2 {
-		t.Errorf("want version 2 after the durable advance, got %d (stale entry served)", loaded.Version())
+	if loaded.Version() != 3 || loaded.State().Balance != 22 {
+		t.Errorf("want the durable tip served (version 3, balance 22), got version %d balance %d (intermediate version admitted)",
+			loaded.Version(), loaded.State().Balance)
+	}
+
+	entry, err := flaky.GetAggregate(t.Context(), aggregate.ID())
+	if err != nil || entry == nil {
+		t.Fatalf("reading the backing cache entry: %+v, %v", entry, err)
+	}
+
+	if entry.Version != 3 || entry.State.Balance != 22 {
+		t.Errorf("want the backing entry at the durable tip (version 3, balance 22), got version %d balance %d",
+			entry.Version, entry.State.Balance)
 	}
 }
 
 // TestCachedStore_PostAppendPublicationFailureCannotServeTheOutdatedEntry
-// pins the ErrEventsAppended path with every post-append cache write
-// failing: the pre-append fence alone must keep the outdated entry from the
-// documented discard-and-reload recovery.
+// pins the multi-event ErrEventsAppended path with every later cache write
+// failing and a racing intermediate publication arriving: the pre-append
+// fence alone, standing at the durable tip, must keep both outdated
+// versions from the documented discard-and-reload recovery.
 func TestCachedStore_PostAppendPublicationFailureCannotServeTheOutdatedEntry(t *testing.T) {
 	t.Parallel()
 
@@ -1397,12 +1454,20 @@ func TestCachedStore_PostAppendPublicationFailureCannotServeTheOutdatedEntry(t *
 	}
 
 	aggregate.Append(fundsDeposited{Amount: 5})
+	aggregate.Append(fundsDeposited{Amount: 7})
 	failing.armed = true
-	flaky.armFenceFailures(1)
 	flaky.armPutFailures()
 
 	if err := cached.Save(t.Context(), aggregate, nil); !errors.Is(err, aggregatestore.ErrEventsAppended) {
 		t.Fatalf("want a save error carrying ErrEventsAppended, got %v", err)
+	}
+
+	// A racing publication of the intermediate version arrives at the backend.
+	if err := flaky.AggregateCache.PutAggregate(t.Context(), aggregate.ID(), aggregatestore.CachedAggregate[account]{
+		State:   account{Balance: 15},
+		Version: 2,
+	}); err != nil {
+		t.Fatalf("racing put: %v", err)
 	}
 
 	loaded, err := cached.Load(t.Context(), id, nil)
@@ -1410,8 +1475,9 @@ func TestCachedStore_PostAppendPublicationFailureCannotServeTheOutdatedEntry(t *
 		t.Fatalf("reloading through the cache: %v", err)
 	}
 
-	if loaded.Version() != 2 {
-		t.Errorf("want the reload replaying the appended events (version 2), got %d (stale entry served)", loaded.Version())
+	if loaded.Version() != 3 || loaded.State().Balance != 22 {
+		t.Errorf("want the reload replaying the appended events (version 3, balance 22), got version %d balance %d (stale entry served)",
+			loaded.Version(), loaded.State().Balance)
 	}
 }
 

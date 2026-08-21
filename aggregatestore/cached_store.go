@@ -3,6 +3,8 @@ package aggregatestore
 import (
 	"context"
 	"errors"
+	"fmt"
+	"math"
 
 	"github.com/go-estoria/estoria"
 	"github.com/go-estoria/estoria/typeid"
@@ -42,7 +44,9 @@ type CachedAggregate[S any] struct {
 // Entries pass by value in both directions: a backend must not retain state
 // it was handed, or hand out state it retains, in a way that leaves two
 // callers — or a caller and the cache — sharing mutable memory. Serializing
-// backends detach for free; in-memory backends must detach deliberately.
+// backends detach as far as their codec honors its output-ownership
+// contract (see estoria.StateCodec); in-memory backends must detach
+// deliberately.
 //
 // Eviction is the backend's own policy, under one ordering rule: an
 // aggregate's fence must outlive the entries it outranks — dropping a
@@ -162,13 +166,17 @@ func (s *CachedStore[S]) Hydrate(ctx context.Context, aggregate *Aggregate[S], o
 }
 
 // Save persists the aggregate through the inner store behind a fail-closed
-// cache protocol. Before anything is appended, the cache is fenced one past
-// the aggregate's version: the entry the append is about to outdate stops
-// being served before the events can become facts, so no cache failure
-// after the append can leave it authoritative — every later cache write is
-// an optimization whose loss costs a miss, never a stale hit. A fence that
-// cannot be raised refuses the save with nothing appended; the caller's
-// events remain queued for retry. Cache work after the append runs on the
+// cache protocol. Before anything is appended, the cache is fenced at the
+// expected durable tip — the aggregate's version plus its queued events,
+// exactly the versions the checked append assigns on success — so every
+// entry and every racing publication below the new tip, intermediate
+// versions included, stops being servable before the events can become
+// facts. No cache failure after the append can leave an outdated entry
+// authoritative: every later cache write is an optimization whose loss
+// costs a miss, never a stale hit. A fence that cannot be raised refuses
+// the save with nothing appended; the caller's events remain queued for
+// retry. The version arithmetic the fence depends on is validated first,
+// before the cache is touched. Cache work after the append runs on the
 // caller's context: a publication lost to cancellation costs only a miss,
 // and a cache that honors the context cannot block the completed save.
 //
@@ -177,12 +185,11 @@ func (s *CachedStore[S]) Hydrate(ctx context.Context, aggregate *Aggregate[S], o
 // durable fact to publish and no version to fence ahead of.
 //
 // A save that leaves the aggregate with queued events (SkipApply) publishes
-// no entry — the state trails what was persisted — and instead raises the
-// fence to the newest appended version, the exact durable tip. A save that
-// fails after its events were appended (ErrEventsAppended) needs nothing
-// further: the pre-append fence already outranks every entry the append
-// outdated, and the documented discard-and-reload recovery republishes at
-// or above it.
+// no entry — the state trails what was persisted — and a save that fails
+// after its events were appended (ErrEventsAppended) publishes nothing
+// either. Neither needs any cache work after the append: the pre-append
+// fence already stands at the durable tip, and the documented
+// discard-and-reload recovery republishes at it.
 func (s *CachedStore[S]) Save(ctx context.Context, aggregate *Aggregate[S], opts *SaveOptions) error {
 	if aggregate == nil {
 		return SaveError{Err: ErrNilAggregate}
@@ -196,7 +203,26 @@ func (s *CachedStore[S]) Save(ctx context.Context, aggregate *Aggregate[S], opts
 		return nil
 	}
 
-	if err := s.cache.FenceAggregate(ctx, aggregate.ID(), aggregate.Version()+1); err != nil {
+	// The inner store's version guards, applied before the cache is touched:
+	// fence arithmetic over an invalid version would corrupt the ordering the
+	// fence exists to protect.
+	unsaved := int64(len(aggregate.unsavedEvents))
+	if v := aggregate.Version(); v < 0 {
+		return SaveError{
+			AggregateID: aggregate.ID(),
+			Operation:   saveOpValidatingVersion,
+			Err:         fmt.Errorf("aggregate version %d is invalid", v),
+		}
+	} else if unsaved > math.MaxInt64-v {
+		return SaveError{
+			AggregateID: aggregate.ID(),
+			Operation:   saveOpValidatingVersion,
+			Err: fmt.Errorf("cannot append %d events at version %d: aggregate versions end at %d",
+				unsaved, v, int64(math.MaxInt64)),
+		}
+	}
+
+	if err := s.cache.FenceAggregate(ctx, aggregate.ID(), aggregate.Version()+unsaved); err != nil {
 		return SaveError{AggregateID: aggregate.ID(), Operation: "fencing cache before save", Err: err}
 	}
 
@@ -206,14 +232,8 @@ func (s *CachedStore[S]) Save(ctx context.Context, aggregate *Aggregate[S], opts
 
 	// An aggregate saved with SkipApply still has events queued, so its state
 	// and version trail what was just persisted, and there is nothing to
-	// publish. The queued events carry their store-assigned versions, so the
-	// newest one is the exact durable tip to fence at.
-	if n := len(aggregate.unappliedEvents); n > 0 {
-		if err := s.cache.FenceAggregate(ctx, aggregate.ID(), aggregate.unappliedEvents[n-1].Version); err != nil {
-			s.log.Warn("failed to fence cache after a skip-apply save",
-				"aggregate_id", aggregate.ID(), "error", err)
-		}
-
+	// publish; the pre-append fence already stands at the durable tip.
+	if len(aggregate.unappliedEvents) > 0 {
 		return nil
 	}
 

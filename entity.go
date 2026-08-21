@@ -15,10 +15,14 @@ type StateFactory[S any] func(id uuid.UUID) S
 const ContentTypeJSON = "application/json"
 
 // StateCodec is an interface for marshaling aggregate state to and from bytes.
+// Implementations must be safe for concurrent use: consumers call them from
+// multiple goroutines without synchronization.
 type StateCodec[S any] interface {
 	// MarshalState marshals state to bytes.
 	MarshalState(state S) ([]byte, error)
-	// UnmarshalState unmarshals state from bytes.
+	// UnmarshalState unmarshals state from bytes. The decoded state belongs
+	// exclusively to the caller: an implementation must not retain, reuse, or
+	// later mutate memory reachable from dest after returning.
 	UnmarshalState(data []byte, dest *S) error
 	// ContentType returns the MIME content type of the bytes the codec produces
 	// and consumes. It is declared on the payloads the codec encodes, so that

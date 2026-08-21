@@ -1,10 +1,10 @@
 package aggregatestore_test
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -358,71 +358,130 @@ func TestMemoryAggregateCache_ZeroCopyCodecCannotAlias(t *testing.T) {
 	}
 }
 
-// overlapCodec detects concurrent entry into its codec methods.
-type overlapCodec struct {
-	inFlight   atomic.Int32
-	overlapped atomic.Bool
+// fencingCodec fences its own cache from inside a codec call, exercising a
+// codec that calls back into the cache mid-encode or mid-decode.
+type fencingCodec struct {
+	cache         *aggregatestore.MemoryAggregateCache[account]
+	id            typeid.ID
+	fenceOnEncode int64
+	fenceOnDecode int64
 }
 
-func (c *overlapCodec) enter() {
-	if c.inFlight.Add(1) > 1 {
-		c.overlapped.Store(true)
+func (c *fencingCodec) MarshalState(state account) ([]byte, error) {
+	if version := c.fenceOnEncode; version > 0 {
+		c.fenceOnEncode = 0
+		if err := c.cache.FenceAggregate(context.Background(), c.id, version); err != nil {
+			return nil, err
+		}
 	}
-
-	time.Sleep(200 * time.Microsecond)
-}
-
-func (c *overlapCodec) MarshalState(state account) ([]byte, error) {
-	c.enter()
-	defer c.inFlight.Add(-1)
 
 	return json.Marshal(state)
 }
 
-func (c *overlapCodec) UnmarshalState(data []byte, dest *account) error {
-	c.enter()
-	defer c.inFlight.Add(-1)
+func (c *fencingCodec) UnmarshalState(data []byte, dest *account) error {
+	if version := c.fenceOnDecode; version > 0 {
+		c.fenceOnDecode = 0
+		if err := c.cache.FenceAggregate(context.Background(), c.id, version); err != nil {
+			return err
+		}
+	}
 
 	return json.Unmarshal(data, dest)
 }
 
-func (c *overlapCodec) ContentType() string { return estoria.ContentTypeJSON }
+func (c *fencingCodec) ContentType() string { return estoria.ContentTypeJSON }
 
-// TestMemoryAggregateCache_CodecCallsAreSerialized pins that the codec runs
-// under the cache's lock: a codec with internal state faces no concurrency
-// the cache did not already exclude.
-func TestMemoryAggregateCache_CodecCallsAreSerialized(t *testing.T) {
+// newFencingFixture builds a cache whose codec fences that cache reentrantly.
+func newFencingFixture(t *testing.T) (*aggregatestore.MemoryAggregateCache[account], *fencingCodec, typeid.ID) {
+	t.Helper()
+
+	id := typeid.New("account", uuid.Must(uuid.NewV4()))
+	codec := &fencingCodec{id: id}
+	cache := aggregatestore.NewMemoryAggregateCache[account](
+		aggregatestore.WithCacheStateCodec[account](estoria.StateCodec[account](codec)))
+	codec.cache = cache
+
+	return cache, codec, id
+}
+
+// mustFinish fails the test if the operation does not return promptly — the
+// deadlock a codec calling back into a lock-holding cache would produce.
+func mustFinish(t *testing.T, name string, op func() error) {
+	t.Helper()
+
+	done := make(chan error, 1)
+	go func() { done <- op() }()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatalf("%s deadlocked on the reentrant codec", name)
+	}
+}
+
+// TestMemoryAggregateCache_ReentrantCodecCannotDeadlock pins that the codec
+// runs outside the cache's lock: a codec that calls back into the cache
+// completes, a reentrant fence the put outranks changes nothing, and a
+// reentrant fence that outranks the put is honored by the atomic recheck
+// before insertion.
+func TestMemoryAggregateCache_ReentrantCodecCannotDeadlock(t *testing.T) {
 	t.Parallel()
 
-	codec := &overlapCodec{}
-	cache := aggregatestore.NewMemoryAggregateCache[account](aggregatestore.WithCacheStateCodec[account](estoria.StateCodec[account](codec)))
-	id := typeid.New("account", uuid.Must(uuid.NewV4()))
+	t.Run("an outranked fence during encoding changes nothing", func(t *testing.T) {
+		t.Parallel()
 
-	if err := cache.PutAggregate(t.Context(), id, cacheEntry(1)); err != nil {
-		t.Fatalf("pre-putting: %v", err)
-	}
+		cache, codec, id := newFencingFixture(t)
+		codec.fenceOnEncode = 3
 
-	var wg sync.WaitGroup
-	for g := range 8 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for i := range 25 {
-				if g%2 == 0 {
-					if err := cache.PutAggregate(t.Context(), id, cacheEntry(int64(g*1000+i+2))); err != nil {
-						t.Errorf("putting: %v", err)
-					}
-				} else if _, err := cache.GetAggregate(t.Context(), id); err != nil {
-					t.Errorf("getting: %v", err)
-				}
-			}
-		}()
-	}
-	wg.Wait()
+		mustFinish(t, "put", func() error {
+			return cache.PutAggregate(context.Background(), id, cacheEntry(5))
+		})
 
-	if codec.overlapped.Load() {
-		t.Error("want codec calls serialized, got concurrent entry")
-	}
+		if entry, err := cache.GetAggregate(t.Context(), id); err != nil || entry == nil || entry.Version != 5 {
+			t.Errorf("want the put stored over the outranked fence, got %+v, %v", entry, err)
+		}
+	})
+
+	t.Run("an outranking fence during encoding drops the put", func(t *testing.T) {
+		t.Parallel()
+
+		cache, codec, id := newFencingFixture(t)
+		codec.fenceOnEncode = 9
+
+		mustFinish(t, "put", func() error {
+			return cache.PutAggregate(context.Background(), id, cacheEntry(5))
+		})
+
+		if entry, err := cache.GetAggregate(t.Context(), id); err != nil || entry != nil {
+			t.Errorf("want the put dropped by the atomic recheck, got %+v, %v", entry, err)
+		}
+	})
+
+	t.Run("a fence during decoding completes", func(t *testing.T) {
+		t.Parallel()
+
+		cache, codec, id := newFencingFixture(t)
+
+		mustFinish(t, "put", func() error {
+			return cache.PutAggregate(context.Background(), id, cacheEntry(5))
+		})
+
+		codec.fenceOnDecode = 2
+
+		var entry *aggregatestore.CachedAggregate[account]
+		mustFinish(t, "get", func() error {
+			var err error
+			entry, err = cache.GetAggregate(context.Background(), id)
+			return err
+		})
+
+		if entry == nil || entry.Version != 5 {
+			t.Errorf("want the entry the decode-time fence does not outrank still served (version 5), got %+v", entry)
+		}
+	})
 }
 
 // TestMemoryAggregateCache_StalePutIsDroppedWithoutEncoding pins put's

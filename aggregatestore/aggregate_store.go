@@ -171,6 +171,10 @@ type SaveError struct {
 	Err         error
 }
 
+// saveOpValidatingVersion names the save step that guards the version
+// arithmetic, applied identically by every store that performs it.
+const saveOpValidatingVersion = "validating aggregate version"
+
 // Error implements the error interface.
 func (e SaveError) Error() string {
 	if e.Operation == "" {

@@ -232,13 +232,13 @@ func (s *EventSourcedStore[S]) Save(ctx context.Context, aggregate *Aggregate[S]
 	if v := aggregate.Version(); v < 0 {
 		return SaveError{
 			AggregateID: aggregate.ID(),
-			Operation:   "validating aggregate version",
+			Operation:   saveOpValidatingVersion,
 			Err:         fmt.Errorf("aggregate version %d is invalid", v),
 		}
 	} else if int64(len(unsavedEvents)) > math.MaxInt64-v {
 		return SaveError{
 			AggregateID: aggregate.ID(),
-			Operation:   "validating aggregate version",
+			Operation:   saveOpValidatingVersion,
 			Err: fmt.Errorf("cannot append %d events at version %d: aggregate versions end at %d",
 				len(unsavedEvents), v, int64(math.MaxInt64)),
 		}

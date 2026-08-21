@@ -16,9 +16,11 @@ import (
 // comparison atomic with its effect, and every read observes the mutations
 // that completed before it — and its detachment contract: entries are held
 // serialized through a state codec, so no cached state shares memory with
-// any caller. The codec runs under the cache's lock and touches only clones
-// of the stored bytes, so it need be neither safe for concurrent use nor
-// copying: even a zero-copy codec cannot alias an entry. State must
+// any caller. The codec runs outside the cache's lock — it may even call
+// back into the cache — and touches only clones of the stored bytes, so a
+// codec that returns or installs its input cannot alias an entry; decoded
+// state detaches as far as the codec honors the estoria.StateCodec
+// contract, concurrency-safety and output ownership included. State must
 // round-trip its codec; what the codec drops, the cache forgets. The cache
 // is unbounded — entries and fences live until the process exits — so its
 // ordering guarantee is never retention-scoped.
@@ -40,7 +42,9 @@ type memoryCachedState struct {
 type MemoryAggregateCacheOption[S any] func(*MemoryAggregateCache[S])
 
 // WithCacheStateCodec sets the codec entries are serialized through,
-// replacing the default JSON codec. A nil codec keeps the default.
+// replacing the default JSON codec. A nil codec keeps the default. The
+// codec is called outside the cache's lock and must honor the
+// estoria.StateCodec contract, concurrent use included.
 func WithCacheStateCodec[S any](codec estoria.StateCodec[S]) MemoryAggregateCacheOption[S] {
 	return func(c *MemoryAggregateCache[S]) {
 		if codec != nil {
@@ -70,15 +74,17 @@ var _ AggregateCache[struct{}] = (*MemoryAggregateCache[struct{}])(nil)
 // is none. The returned state is freshly decoded: the caller owns it alone.
 func (c *MemoryAggregateCache[S]) GetAggregate(_ context.Context, aggregateID typeid.ID) (*CachedAggregate[S], error) {
 	c.mu.Lock()
-	defer c.mu.Unlock()
-
 	stored, ok := c.entries[aggregateID.String()]
+	c.mu.Unlock()
+
 	if !ok {
 		return nil, nil //nolint:nilnil // a nil entry with a nil error is the cache-miss contract
 	}
 
-	// The codec decodes a clone of the stored bytes, so even a codec that
-	// installs its input hands the caller memory the cache never touches again.
+	// Stored bytes are immutable once written — a put replaces the whole
+	// entry — so decoding outside the lock reads a stable snapshot, and the
+	// codec decodes a clone of it, so even a codec that installs its input
+	// hands the caller memory the cache never touches again.
 	entry := CachedAggregate[S]{Version: stored.version}
 	if err := c.codec.UnmarshalState(bytes.Clone(stored.data), &entry.State); err != nil {
 		return nil, fmt.Errorf("unmarshaling cached state: %w", err)
@@ -92,18 +98,28 @@ func (c *MemoryAggregateCache[S]) GetAggregate(_ context.Context, aggregateID ty
 func (c *MemoryAggregateCache[S]) PutAggregate(_ context.Context, aggregateID typeid.ID, entry CachedAggregate[S]) error {
 	key := aggregateID.String()
 
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
 	// The floor rules before the codec runs: a put that has already lost the
 	// race is dropped without error, never marshaled.
-	if entry.Version < c.floorLocked(key) {
+	c.mu.Lock()
+	floor := c.floorLocked(key)
+	c.mu.Unlock()
+
+	if entry.Version < floor {
 		return nil
 	}
 
 	data, err := c.codec.MarshalState(entry.State)
 	if err != nil {
 		return fmt.Errorf("marshaling state for cache: %w", err)
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	// The codec ran outside the lock — it may even have called back into
+	// this cache — so the floor is rechecked atomically with the insert.
+	if entry.Version < c.floorLocked(key) {
+		return nil
 	}
 
 	// The stored clone shares no memory with whatever the codec returned.
