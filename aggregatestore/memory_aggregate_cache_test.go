@@ -21,6 +21,21 @@ func cacheEntry(version int64) aggregatestore.CachedAggregate[account] {
 	}
 }
 
+// commitFence reserves and immediately commits a fence, the shape a
+// successful save leaves behind.
+func commitFence[S any](t *testing.T, cache *aggregatestore.MemoryAggregateCache[S], id typeid.ID, version int64) {
+	t.Helper()
+
+	token, err := cache.ReserveFence(t.Context(), id, version)
+	if err != nil {
+		t.Fatalf("reserving fence at %d: %v", version, err)
+	}
+
+	if err := cache.CommitFence(t.Context(), id, token); err != nil {
+		t.Fatalf("committing fence at %d: %v", version, err)
+	}
+}
+
 func TestMemoryAggregateCache_PutRefusesRegression(t *testing.T) {
 	t.Parallel()
 
@@ -88,9 +103,7 @@ func TestMemoryAggregateCache_FenceEvictsAndBlocksBelow(t *testing.T) {
 		t.Fatalf("putting version 1: %v", err)
 	}
 
-	if err := cache.FenceAggregate(t.Context(), id, 3); err != nil {
-		t.Fatalf("fencing at 3: %v", err)
-	}
+	commitFence(t, cache, id, 3)
 
 	if entry, err := cache.GetAggregate(t.Context(), id); err != nil || entry != nil {
 		t.Errorf("want the fenced entry evicted, got %+v, %v", entry, err)
@@ -123,9 +136,7 @@ func TestMemoryAggregateCache_FenceKeepsTheEntryItDoesNotOutrank(t *testing.T) {
 		t.Fatalf("putting version 3: %v", err)
 	}
 
-	if err := cache.FenceAggregate(t.Context(), id, 3); err != nil {
-		t.Fatalf("fencing at 3: %v", err)
-	}
+	commitFence(t, cache, id, 3)
 
 	if entry, _ := cache.GetAggregate(t.Context(), id); entry == nil || entry.Version != 3 {
 		t.Errorf("want the at-fence entry kept, got %+v", entry)
@@ -138,9 +149,7 @@ func TestMemoryAggregateCache_FenceWithoutEntryStillBlocks(t *testing.T) {
 	cache := aggregatestore.NewMemoryAggregateCache[account]()
 	id := typeid.New("account", uuid.Must(uuid.NewV4()))
 
-	if err := cache.FenceAggregate(t.Context(), id, 3); err != nil {
-		t.Fatalf("fencing at 3: %v", err)
-	}
+	commitFence(t, cache, id, 3)
 
 	if err := cache.PutAggregate(t.Context(), id, cacheEntry(2)); err != nil {
 		t.Fatalf("putting version 2: %v", err)
@@ -157,13 +166,9 @@ func TestMemoryAggregateCache_FencesOnlyRise(t *testing.T) {
 	cache := aggregatestore.NewMemoryAggregateCache[account]()
 	id := typeid.New("account", uuid.Must(uuid.NewV4()))
 
-	if err := cache.FenceAggregate(t.Context(), id, 5); err != nil {
-		t.Fatalf("fencing at 5: %v", err)
-	}
+	commitFence(t, cache, id, 5)
 
-	if err := cache.FenceAggregate(t.Context(), id, 2); err != nil {
-		t.Fatalf("fencing at 2: %v", err)
-	}
+	commitFence(t, cache, id, 2)
 
 	if err := cache.PutAggregate(t.Context(), id, cacheEntry(3)); err != nil {
 		t.Fatalf("putting version 3: %v", err)
@@ -182,6 +187,140 @@ func TestMemoryAggregateCache_FencesOnlyRise(t *testing.T) {
 	}
 }
 
+// TestMemoryAggregateCache_ReservationBlocksAndEvictsUntilReleased pins the
+// provisional half of the fence protocol: a reservation evicts and blocks
+// below its version like a fence while it stands, and releasing it restores
+// the floor the committed state defines — nothing the failed save reserved
+// stays outlawed.
+func TestMemoryAggregateCache_ReservationBlocksAndEvictsUntilReleased(t *testing.T) {
+	t.Parallel()
+
+	cache := aggregatestore.NewMemoryAggregateCache[account]()
+	id := typeid.New("account", uuid.Must(uuid.NewV4()))
+
+	if err := cache.PutAggregate(t.Context(), id, cacheEntry(2)); err != nil {
+		t.Fatalf("putting version 2: %v", err)
+	}
+
+	token, err := cache.ReserveFence(t.Context(), id, 3)
+	if err != nil {
+		t.Fatalf("reserving fence at 3: %v", err)
+	}
+
+	if entry, err := cache.GetAggregate(t.Context(), id); err != nil || entry != nil {
+		t.Errorf("want the reserved fence evicting the entry below it, got %+v, %v", entry, err)
+	}
+
+	if err := cache.PutAggregate(t.Context(), id, cacheEntry(2)); err != nil {
+		t.Fatalf("putting version 2 under the reservation: %v", err)
+	}
+
+	if entry, err := cache.GetAggregate(t.Context(), id); err != nil || entry != nil {
+		t.Errorf("want the below-reservation put dropped, got %+v, %v", entry, err)
+	}
+
+	if err := cache.ReleaseFence(t.Context(), id, token); err != nil {
+		t.Fatalf("releasing: %v", err)
+	}
+
+	if err := cache.PutAggregate(t.Context(), id, cacheEntry(2)); err != nil {
+		t.Fatalf("putting version 2 after the release: %v", err)
+	}
+
+	if entry, _ := cache.GetAggregate(t.Context(), id); entry == nil || entry.Version != 2 {
+		t.Errorf("want the version-2 put admitted after the release, got %+v", entry)
+	}
+}
+
+// TestMemoryAggregateCache_ReleaseCannotLowerFloorsOthersHold pins the
+// token check: releasing one reservation leaves the committed fence and
+// every concurrent reservation standing.
+func TestMemoryAggregateCache_ReleaseCannotLowerFloorsOthersHold(t *testing.T) {
+	t.Parallel()
+
+	cache := aggregatestore.NewMemoryAggregateCache[account]()
+	id := typeid.New("account", uuid.Must(uuid.NewV4()))
+
+	commitFence(t, cache, id, 2)
+
+	tokenA, err := cache.ReserveFence(t.Context(), id, 3)
+	if err != nil {
+		t.Fatalf("reserving fence A at 3: %v", err)
+	}
+
+	tokenB, err := cache.ReserveFence(t.Context(), id, 5)
+	if err != nil {
+		t.Fatalf("reserving fence B at 5: %v", err)
+	}
+
+	if err := cache.ReleaseFence(t.Context(), id, tokenA); err != nil {
+		t.Fatalf("releasing A: %v", err)
+	}
+
+	if err := cache.PutAggregate(t.Context(), id, cacheEntry(4)); err != nil {
+		t.Fatalf("putting version 4: %v", err)
+	}
+
+	if entry, err := cache.GetAggregate(t.Context(), id); err != nil || entry != nil {
+		t.Errorf("want the put below B's outstanding reservation dropped, got %+v, %v", entry, err)
+	}
+
+	if err := cache.ReleaseFence(t.Context(), id, tokenB); err != nil {
+		t.Fatalf("releasing B: %v", err)
+	}
+
+	if err := cache.PutAggregate(t.Context(), id, cacheEntry(1)); err != nil {
+		t.Fatalf("putting version 1: %v", err)
+	}
+
+	if entry, err := cache.GetAggregate(t.Context(), id); err != nil || entry != nil {
+		t.Errorf("want the put below the committed fence still dropped, got %+v, %v", entry, err)
+	}
+
+	if err := cache.PutAggregate(t.Context(), id, cacheEntry(4)); err != nil {
+		t.Fatalf("putting version 4 after both releases: %v", err)
+	}
+
+	if entry, _ := cache.GetAggregate(t.Context(), id); entry == nil || entry.Version != 4 {
+		t.Errorf("want the version-4 put admitted once only the committed fence stands, got %+v", entry)
+	}
+}
+
+// TestMemoryAggregateCache_CommitOutlivesItsReservation pins the permanent
+// half: a committed reservation joins the fences that only rise, and its
+// token is consumed — a second commit or a late release finds nothing.
+func TestMemoryAggregateCache_CommitOutlivesItsReservation(t *testing.T) {
+	t.Parallel()
+
+	cache := aggregatestore.NewMemoryAggregateCache[account]()
+	id := typeid.New("account", uuid.Must(uuid.NewV4()))
+
+	token, err := cache.ReserveFence(t.Context(), id, 3)
+	if err != nil {
+		t.Fatalf("reserving fence at 3: %v", err)
+	}
+
+	if err := cache.CommitFence(t.Context(), id, token); err != nil {
+		t.Fatalf("committing: %v", err)
+	}
+
+	if err := cache.PutAggregate(t.Context(), id, cacheEntry(2)); err != nil {
+		t.Fatalf("putting version 2: %v", err)
+	}
+
+	if entry, err := cache.GetAggregate(t.Context(), id); err != nil || entry != nil {
+		t.Errorf("want the below-fence put dropped after the commit, got %+v, %v", entry, err)
+	}
+
+	if err := cache.CommitFence(t.Context(), id, token); err == nil {
+		t.Error("want a second commit of a consumed token refused, got nil")
+	}
+
+	if err := cache.ReleaseFence(t.Context(), id, token); err == nil {
+		t.Error("want a release of a consumed token refused, got nil")
+	}
+}
+
 func TestMemoryAggregateCache_AggregatesAreIndependent(t *testing.T) {
 	t.Parallel()
 
@@ -189,9 +328,7 @@ func TestMemoryAggregateCache_AggregatesAreIndependent(t *testing.T) {
 	fenced := typeid.New("account", uuid.Must(uuid.NewV4()))
 	other := typeid.New("account", uuid.Must(uuid.NewV4()))
 
-	if err := cache.FenceAggregate(t.Context(), fenced, 5); err != nil {
-		t.Fatalf("fencing: %v", err)
-	}
+	commitFence(t, cache, fenced, 5)
 
 	if err := cache.PutAggregate(t.Context(), other, cacheEntry(1)); err != nil {
 		t.Fatalf("putting: %v", err)
@@ -225,8 +362,13 @@ func TestMemoryAggregateCache_ConcurrentPublicationsConvergeToNewest(t *testing.
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		if err := cache.FenceAggregate(t.Context(), id, 10); err != nil {
-			t.Errorf("fencing at 10: %v", err)
+		token, err := cache.ReserveFence(t.Context(), id, 10)
+		if err != nil {
+			t.Errorf("reserving fence at 10: %v", err)
+			return
+		}
+		if err := cache.CommitFence(t.Context(), id, token); err != nil {
+			t.Errorf("committing fence at 10: %v", err)
 		}
 	}()
 
@@ -370,7 +512,7 @@ type fencingCodec struct {
 func (c *fencingCodec) MarshalState(state account) ([]byte, error) {
 	if version := c.fenceOnEncode; version > 0 {
 		c.fenceOnEncode = 0
-		if err := c.cache.FenceAggregate(context.Background(), c.id, version); err != nil {
+		if err := c.reentrantFence(version); err != nil {
 			return nil, err
 		}
 	}
@@ -381,12 +523,21 @@ func (c *fencingCodec) MarshalState(state account) ([]byte, error) {
 func (c *fencingCodec) UnmarshalState(data []byte, dest *account) error {
 	if version := c.fenceOnDecode; version > 0 {
 		c.fenceOnDecode = 0
-		if err := c.cache.FenceAggregate(context.Background(), c.id, version); err != nil {
+		if err := c.reentrantFence(version); err != nil {
 			return err
 		}
 	}
 
 	return json.Unmarshal(data, dest)
+}
+
+func (c *fencingCodec) reentrantFence(version int64) error {
+	token, err := c.cache.ReserveFence(context.Background(), c.id, version)
+	if err != nil {
+		return err
+	}
+
+	return c.cache.CommitFence(context.Background(), c.id, token)
 }
 
 func (c *fencingCodec) ContentType() string { return estoria.ContentTypeJSON }
@@ -495,9 +646,7 @@ func TestMemoryAggregateCache_StalePutIsDroppedWithoutEncoding(t *testing.T) {
 		aggregatestore.WithCacheStateCodec[*ptrCounter](brokenCodec{failMarshal: true}))
 	id := typeid.New("ptrcounter", uuid.Must(uuid.NewV4()))
 
-	if err := cache.FenceAggregate(t.Context(), id, 2); err != nil {
-		t.Fatalf("fencing at 2: %v", err)
-	}
+	commitFence(t, cache, id, 2)
 
 	if err := cache.PutAggregate(t.Context(), id, aggregatestore.CachedAggregate[*ptrCounter]{State: &ptrCounter{Balance: 10}, Version: 1}); err != nil {
 		t.Errorf("want the below-fence put dropped without error, got %v", err)

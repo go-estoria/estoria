@@ -205,7 +205,8 @@ func (s *EventSourcedStore[S]) Hydrate(ctx context.Context, aggregate *Aggregate
 
 // Save saves an aggregate by appending its unsaved events to the event store.
 // An error that carries ErrEventsAppended means the events were appended but
-// not applied to the in-memory aggregate. A save that would grow the stream
+// not applied to the in-memory aggregate; an error without it reports that
+// nothing was appended. A save that would grow the stream
 // past the maximum representable aggregate version, or from a negative
 // version, is refused before anything is appended.
 func (s *EventSourcedStore[S]) Save(ctx context.Context, aggregate *Aggregate[S], opts *SaveOptions) error {

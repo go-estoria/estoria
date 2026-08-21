@@ -18,7 +18,11 @@ const ContentTypeJSON = "application/json"
 // Implementations must be safe for concurrent use: consumers call them from
 // multiple goroutines without synchronization.
 type StateCodec[S any] interface {
-	// MarshalState marshals state to bytes.
+	// MarshalState marshals state to bytes. The returned bytes belong
+	// exclusively to the caller: an implementation must not retain, reuse, or
+	// later mutate their backing storage after returning. They may alias
+	// memory the state itself holds, so a consumer that retains them beyond
+	// the state clones them first.
 	MarshalState(state S) ([]byte, error)
 	// UnmarshalState unmarshals state from bytes. The decoded state belongs
 	// exclusively to the caller: an implementation must not retain, reuse, or
