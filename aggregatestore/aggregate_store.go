@@ -193,13 +193,46 @@ func (e SaveError) Unwrap() error {
 var ErrAggregateNotFound = errors.New("aggregate not found")
 
 // ErrEventsAppended reports a save that failed after its events were durably
-// appended to the event store: the events are facts in storage, but the
-// aggregate's in-memory state was not updated to reflect them. Recover by
-// discarding the aggregate and reloading it, which replays the appended events.
+// appended to the event store: the events are facts in storage, but the save
+// did not complete — the aggregate's in-memory state may not reflect them, or
+// a step after the append failed. Recover by discarding the aggregate and
+// reloading it, which replays the appended events.
 //
 // Check for it with errors.Is, which finds it through any amount of wrapping.
-// A save error that does not carry it means nothing was appended.
 var ErrEventsAppended = errors.New("events appended but not applied to the aggregate")
+
+// ErrNoEventsAppended reports a save that failed with nothing appended to the
+// event store: the aggregate's queued events remain exactly as they were, and
+// the save may simply be retried.
+//
+// Check for it with errors.Is. A save error carrying neither
+// ErrNoEventsAppended nor ErrEventsAppended reports an unknown outcome: the
+// append may or may not have become durable — a store can commit and lose its
+// response — and only reading the stream resolves it.
+//
+// A Store decorator must preserve these markers when wrapping an inner save
+// error (wrap with %w) and must mark the save errors it originates: an error
+// raised before delegating inward appended nothing, and one raised after a
+// successful inner save follows events that are already facts.
+var ErrNoEventsAppended = errors.New("no events were appended")
+
+// withSaveOutcome attaches outcome — ErrEventsAppended or ErrNoEventsAppended —
+// to err for errors.Is without restating it in the message: the message
+// already names the failure, and the marker is contract, not prose.
+func withSaveOutcome(outcome, err error) error {
+	return saveOutcomeError{outcome: outcome, err: err}
+}
+
+type saveOutcomeError struct {
+	outcome error
+	err     error
+}
+
+func (e saveOutcomeError) Error() string { return e.err.Error() }
+
+func (e saveOutcomeError) Unwrap() error { return e.err }
+
+func (e saveOutcomeError) Is(target error) bool { return target == e.outcome }
 
 // ErrNilAggregate indicates that the provided aggregate is nil.
 var ErrNilAggregate = errors.New("aggregate is nil")

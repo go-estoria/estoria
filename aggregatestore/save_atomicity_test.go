@@ -86,6 +86,10 @@ func TestSaveAtomicity_PreAppendFailureCarriesNoSentinel(t *testing.T) {
 	if errors.Is(err, aggregatestore.ErrEventsAppended) {
 		t.Errorf("want no ErrEventsAppended for a failure that appended nothing, got: %v", err)
 	}
+
+	if !errors.Is(err, aggregatestore.ErrNoEventsAppended) {
+		t.Errorf("want ErrNoEventsAppended surviving the composition for a refused append, got: %v", err)
+	}
 }
 
 // TestDiscardUnsavedEvents pins the recovery affordance for failed saves: a

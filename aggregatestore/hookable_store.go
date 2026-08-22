@@ -140,16 +140,25 @@ func (s *HookableStore[S]) Hydrate(ctx context.Context, aggregate *Aggregate[S],
 	return nil
 }
 
-// Save saves an aggregate, executing any pre- and post-save hooks.
+// Save saves an aggregate, executing any pre- and post-save hooks. Its
+// errors carry the save-outcome markers the Store contract requires: a
+// pre-save hook error refuses the save with nothing appended
+// (ErrNoEventsAppended), an inner save error passes through with whatever
+// markers the inner store attached, and a post-save hook error follows a
+// save that succeeded, so it carries ErrEventsAppended — the events are
+// facts regardless of what the hook failed to do with them.
 func (s *HookableStore[S]) Save(ctx context.Context, aggregate *Aggregate[S], opts *SaveOptions) error {
 	if aggregate == nil {
-		return SaveError{Err: ErrNilAggregate}
+		return SaveError{Err: withSaveOutcome(ErrNoEventsAppended, ErrNilAggregate)}
 	}
 
 	s.log.Debug("saving aggregate", "aggregate_id", aggregate.ID())
 	for _, hook := range s.hooks[BeforeSave] {
 		if err := hook(ctx, aggregate); err != nil {
-			return SaveError{AggregateID: aggregate.ID(), Operation: "pre-save hook", Err: err}
+			return SaveError{
+				AggregateID: aggregate.ID(), Operation: "pre-save hook",
+				Err: withSaveOutcome(ErrNoEventsAppended, err),
+			}
 		}
 	}
 
@@ -159,7 +168,10 @@ func (s *HookableStore[S]) Save(ctx context.Context, aggregate *Aggregate[S], op
 
 	for _, hook := range s.hooks[AfterSave] {
 		if err := hook(ctx, aggregate); err != nil {
-			return SaveError{AggregateID: aggregate.ID(), Operation: "post-save hook", Err: err}
+			return SaveError{
+				AggregateID: aggregate.ID(), Operation: "post-save hook",
+				Err: withSaveOutcome(ErrEventsAppended, err),
+			}
 		}
 	}
 

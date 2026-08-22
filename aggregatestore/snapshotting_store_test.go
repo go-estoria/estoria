@@ -1724,3 +1724,145 @@ func TestNilState(t *testing.T) {
 		})
 	}
 }
+
+// blobEntity is byte-slice state whose event mutates the slice in place;
+// with a zero-copy codec it exercises both aliasing directions of the
+// estoria.StateCodec contract.
+type blobEntity struct{ Data []byte }
+
+func newBlobEntity(uuid.UUID) blobEntity { return blobEntity{Data: []byte{0}} }
+
+type blobBumped struct{}
+
+func (blobBumped) EventType() string                    { return "blobbumped" }
+func (blobBumped) New() estoria.DomainEvent[blobEntity] { return blobBumped{} }
+func (blobBumped) ApplyTo(s blobEntity) blobEntity      { s.Data[0]++; return s }
+
+// blobCodec is a conforming zero-copy StateCodec: its output aliases the
+// state's own memory, its decode installs the input bytes, and it retains
+// nothing of either.
+type blobCodec struct{}
+
+func (blobCodec) MarshalState(s blobEntity) ([]byte, error) { return s.Data, nil }
+
+func (blobCodec) UnmarshalState(data []byte, dest *blobEntity) error {
+	dest.Data = data
+	return nil
+}
+
+func (blobCodec) ContentType() string { return "application/octet-stream" }
+
+type snapshotAtVersionOne struct{}
+
+func (snapshotAtVersionOne) ShouldSnapshot(_ typeid.ID, version int64, _ time.Time) bool {
+	return version == 1
+}
+
+// TestSnapshottingStore_SnapshotDetachesFromLiveState pins the write-side
+// consumer duty of the StateCodec contract: marshal output may alias live
+// state and the writer may retain what it is handed, so the payload must be
+// detached before it crosses — or the next applied event mutates the
+// retained snapshot in place.
+func TestSnapshottingStore_SnapshotDetachesFromLiveState(t *testing.T) {
+	t.Parallel()
+
+	eventStore, err := memory.NewEventStore()
+	if err != nil {
+		t.Fatalf("creating event store: %v", err)
+	}
+
+	base, err := aggregatestore.New(eventStore, "blob", newBlobEntity,
+		aggregatestore.WithEventTypes[blobEntity](blobBumped{}))
+	if err != nil {
+		t.Fatalf("creating event sourced store: %v", err)
+	}
+
+	var written *snapshotstore.AggregateSnapshot
+	store := &mockSnapshotStore{
+		WriteSnapshotFn: func(_ context.Context, snap *snapshotstore.AggregateSnapshot) error {
+			written = snap
+			return nil
+		},
+	}
+
+	snapping, err := aggregatestore.NewSnapshottingStore[blobEntity](base, store, snapshotAtVersionOne{},
+		aggregatestore.WithStateCodec[blobEntity](blobCodec{}))
+	if err != nil {
+		t.Fatalf("creating snapshotting store: %v", err)
+	}
+
+	aggregate := snapping.New(uuid.Must(uuid.NewV4()))
+	aggregate.Append(blobBumped{}, blobBumped{})
+
+	if err := snapping.Save(t.Context(), aggregate, nil); err != nil {
+		t.Fatalf("saving: %v", err)
+	}
+
+	if written == nil || written.AggregateVersion != 1 {
+		t.Fatalf("want a snapshot written at version 1, got %+v", written)
+	}
+
+	if written.Data[0] != 1 {
+		t.Errorf("want the version-1 snapshot payload frozen at 1, got %d (live state mutated the retained snapshot)", written.Data[0])
+	}
+}
+
+// TestSnapshottingStore_ReloadDetachesFromSnapshotStore pins the read-side
+// consumer duty: snapshot bytes are the reader's to retain, a zero-copy
+// codec may install its input as state, and the replayed tail mutates that
+// state in place — without a clone, inside the retained snapshot itself.
+func TestSnapshottingStore_ReloadDetachesFromSnapshotStore(t *testing.T) {
+	t.Parallel()
+
+	eventStore, err := memory.NewEventStore()
+	if err != nil {
+		t.Fatalf("creating event store: %v", err)
+	}
+
+	base, err := aggregatestore.New(eventStore, "blob", newBlobEntity,
+		aggregatestore.WithEventTypes[blobEntity](blobBumped{}))
+	if err != nil {
+		t.Fatalf("creating event sourced store: %v", err)
+	}
+
+	// Stream at version 2; the store retains a version-1 snapshot.
+	id := uuid.Must(uuid.NewV4())
+	seed := base.New(id)
+	seed.Append(blobBumped{}, blobBumped{})
+	if err := base.Save(t.Context(), seed, nil); err != nil {
+		t.Fatalf("seeding: %v", err)
+	}
+
+	retained := &snapshotstore.AggregateSnapshot{
+		AggregateID:      seed.ID(),
+		AggregateVersion: 1,
+		Data:             []byte{1},
+		DataContentType:  "application/octet-stream",
+	}
+	store := &mockSnapshotStore{
+		ReadSnapshotFn: func(context.Context, typeid.ID, snapshotstore.ReadSnapshotOptions) (*snapshotstore.AggregateSnapshot, error) {
+			return retained, nil
+		},
+	}
+
+	snapping, err := aggregatestore.NewSnapshottingStore[blobEntity](base, store, snapshotAtVersionOne{},
+		aggregatestore.WithStateCodec[blobEntity](blobCodec{}))
+	if err != nil {
+		t.Fatalf("creating snapshotting store: %v", err)
+	}
+
+	for _, name := range []string{"first", "second"} {
+		loaded, err := snapping.Load(t.Context(), id, nil)
+		if err != nil {
+			t.Fatalf("%s load: %v", name, err)
+		}
+
+		if got := loaded.State().Data[0]; got != 2 {
+			t.Errorf("want the %s load replaying to 2, got %d (the replay mutated the retained snapshot)", name, got)
+		}
+	}
+
+	if retained.Data[0] != 1 {
+		t.Errorf("want the retained snapshot payload untouched at 1, got %d", retained.Data[0])
+	}
+}

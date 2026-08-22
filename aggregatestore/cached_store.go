@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"time"
 
 	"github.com/go-estoria/estoria"
 	"github.com/go-estoria/estoria/typeid"
@@ -46,9 +47,11 @@ type CachedAggregate[S any] struct {
 // timeout can outlive its request — and the backend must remain valid
 // either way, with every ordering invariant intact. Callers treat an
 // errored write as not applied; CachedStore's save protocol relies on the
-// reservation failing closed, never open, while a failed commit or release
-// merely leaves the reservation outstanding, which over-blocks — misses,
-// never staleness.
+// reservation failing closed, never open. Because an errored reservation
+// may still have taken effect, settlement is idempotent and token-addressed:
+// the caller mints the token before reserving and can withdraw by token what
+// it cannot confirm was placed. A failed commit or release merely leaves the
+// reservation outstanding, which over-blocks — misses, never staleness.
 //
 // Entries pass by value in both directions: a backend must not retain state
 // it was handed, or hand out state it retains, in a way that leaves two
@@ -74,29 +77,50 @@ type AggregateCache[S any] interface {
 	// the race at the backend.
 	PutAggregate(ctx context.Context, aggregateID typeid.ID, entry CachedAggregate[S]) error
 
-	// ReserveFence places a provisional fence at the given version: it
-	// evicts a stored entry below that version and blocks every put below it
-	// until the reservation is committed or released. The returned token
-	// identifies exactly this reservation.
-	ReserveFence(ctx context.Context, aggregateID typeid.ID, version int64) (FenceToken, error)
+	// ReserveFence places a provisional fence at the given version under the
+	// caller-minted token: it evicts a stored entry below that version and
+	// blocks every put below it until the reservation is committed or
+	// released. Reserving a token already outstanding for the aggregate is
+	// idempotent at the same version and an error at a different one — a
+	// token names exactly one reservation.
+	ReserveFence(ctx context.Context, aggregateID typeid.ID, version int64, token FenceToken) error
 
 	// CommitFence makes the identified reservation permanent, raising the
 	// aggregate's committed fence to the reservation's version and consuming
-	// the token. Committed fences only rise. Committing an unknown token is
-	// an error.
+	// the token. Committed fences only rise. Settlement is idempotent: a
+	// token with no outstanding reservation is treated as already settled
+	// and the call succeeds without effect, so a settlement whose response
+	// was lost can be retried.
 	CommitFence(ctx context.Context, aggregateID typeid.ID, token FenceToken) error
 
 	// ReleaseFence withdraws exactly the identified reservation, consuming
 	// the token: the committed fence and every other outstanding reservation
 	// stand, so releasing one save's reservation can never lower a floor a
-	// concurrent save established. Releasing an unknown token is an error.
+	// concurrent save established. Idempotent like CommitFence: a token with
+	// no outstanding reservation is already settled, and the call succeeds
+	// without effect.
 	ReleaseFence(ctx context.Context, aggregateID typeid.ID, token FenceToken) error
 }
 
-// A FenceToken identifies one outstanding fence reservation at a cache
-// backend, so that committing or releasing one reservation cannot touch
-// another. Tokens are backend-issued and opaque to callers.
+// A FenceToken names one fence reservation at a cache backend, so that
+// committing or releasing one reservation cannot touch another. The caller
+// mints it — unique per reservation — and the backend treats it as opaque.
+// Because the caller knows the token before the reserve call is made, a
+// reservation whose reserve call failed ambiguously can still be settled.
 type FenceToken string
+
+// fenceSettleTimeout bounds fence settlement — the commit or release that
+// resolves a reservation — on a context detached from the caller's.
+// Settlement must survive the caller's cancellation, because abandoning it
+// leaves the reservation standing to over-block, and the bound keeps a hung
+// backend from stranding the completed save instead.
+const fenceSettleTimeout = 5 * time.Second
+
+// settleContext returns the context fence settlement runs on: detached from
+// the caller's cancellation, bounded by fenceSettleTimeout.
+func settleContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(ctx), fenceSettleTimeout)
+}
 
 // CachedStore wraps an aggregate store with an AggregateCache to cache aggregates.
 // Publication ordering lives in the cache backend (see AggregateCache): the
@@ -194,6 +218,22 @@ func (s *CachedStore[S]) Hydrate(ctx context.Context, aggregate *Aggregate[S], o
 	return s.inner.Hydrate(ctx, aggregate, opts)
 }
 
+// commitFence commits the reservation on the settlement context.
+func (s *CachedStore[S]) commitFence(ctx context.Context, id typeid.ID, token FenceToken) error {
+	sctx, cancel := settleContext(ctx)
+	defer cancel()
+
+	return s.cache.CommitFence(sctx, id, token)
+}
+
+// releaseFence releases the reservation on the settlement context.
+func (s *CachedStore[S]) releaseFence(ctx context.Context, id typeid.ID, token FenceToken) error {
+	sctx, cancel := settleContext(ctx)
+	defer cancel()
+
+	return s.cache.ReleaseFence(sctx, id, token)
+}
+
 // Save persists the aggregate through the inner store behind a fail-closed
 // cache protocol. Before anything is appended, a fence is reserved at the
 // expected durable tip — the aggregate's version plus its queued events,
@@ -204,17 +244,27 @@ func (s *CachedStore[S]) Hydrate(ctx context.Context, aggregate *Aggregate[S], o
 // the caller's events remain queued for retry. The version arithmetic the
 // fence depends on is validated first, before the cache is touched.
 //
-// The reservation is provisional until the append settles. Success — or a
-// failure carrying ErrEventsAppended, whose events are facts — commits it
-// into the cache's permanent floor. Any other inner error reports that
-// nothing was appended (the Store contract), so the reservation is
-// released and the floor falls back to committed truth: a failed save
-// cannot leave versions the stream never reached permanently outlawed. A
-// commit or release that itself fails only leaves the reservation
-// outstanding, which over-blocks — misses, never staleness — until the
-// aggregate's next successful save supersedes it.
+// The reservation is provisional until the append's outcome is known.
+// Success — or a failure carrying ErrEventsAppended, whose events are
+// facts — commits it into the cache's permanent floor. A failure carrying
+// ErrNoEventsAppended appended nothing, so the reservation is released and
+// the floor falls back to committed truth: a failed save cannot leave
+// versions the stream never reached permanently outlawed. A failure
+// carrying neither marker is an unknown outcome — an append can commit and
+// lose its response — and the reservation is left standing: if the events
+// are facts the floor is exactly right, and if they are not it over-blocks —
+// misses, never staleness — until the stream reaches the reserved tip.
 //
-// Cache work after the append runs on the caller's context: a publication
+// Settlement — the commit or release that resolves a reservation — runs on
+// a context detached from the caller's and bounded by fenceSettleTimeout: a
+// canceled caller must not abandon a reservation that would then over-block
+// indefinitely. The token is minted here, before reserving, so a
+// reservation whose reserve call fails ambiguously is withdrawn by its
+// token before the save is refused. A settlement that itself fails leaves
+// the reservation standing, with the same bounded consequence: misses,
+// never staleness, until the stream reaches the reserved version.
+//
+// Publication after the append runs on the caller's context: a publication
 // lost to cancellation costs only a miss, and a cache that honors the
 // context cannot block the completed save.
 //
@@ -228,7 +278,7 @@ func (s *CachedStore[S]) Hydrate(ctx context.Context, aggregate *Aggregate[S], o
 // documented discard-and-reload recovery republishes at it.
 func (s *CachedStore[S]) Save(ctx context.Context, aggregate *Aggregate[S], opts *SaveOptions) error {
 	if aggregate == nil {
-		return SaveError{Err: ErrNilAggregate}
+		return SaveError{Err: withSaveOutcome(ErrNoEventsAppended, ErrNilAggregate)}
 	}
 
 	if len(aggregate.unsavedEvents) == 0 {
@@ -247,38 +297,65 @@ func (s *CachedStore[S]) Save(ctx context.Context, aggregate *Aggregate[S], opts
 		return SaveError{
 			AggregateID: aggregate.ID(),
 			Operation:   saveOpValidatingVersion,
-			Err:         fmt.Errorf("aggregate version %d is invalid", v),
+			Err:         withSaveOutcome(ErrNoEventsAppended, fmt.Errorf("aggregate version %d is invalid", v)),
 		}
 	} else if unsaved > math.MaxInt64-v {
 		return SaveError{
 			AggregateID: aggregate.ID(),
 			Operation:   saveOpValidatingVersion,
-			Err: fmt.Errorf("cannot append %d events at version %d: aggregate versions end at %d",
-				unsaved, v, int64(math.MaxInt64)),
+			Err: withSaveOutcome(ErrNoEventsAppended, fmt.Errorf("cannot append %d events at version %d: aggregate versions end at %d",
+				unsaved, v, int64(math.MaxInt64))),
 		}
 	}
 
-	token, err := s.cache.ReserveFence(ctx, aggregate.ID(), aggregate.Version()+unsaved)
+	tokenID, err := uuid.NewV4()
 	if err != nil {
-		return SaveError{AggregateID: aggregate.ID(), Operation: "reserving cache fence before save", Err: err}
+		return SaveError{
+			AggregateID: aggregate.ID(), Operation: "reserving cache fence before save",
+			Err: withSaveOutcome(ErrNoEventsAppended, fmt.Errorf("minting fence token: %w", err)),
+		}
+	}
+	token := FenceToken(tokenID.String())
+
+	if err := s.cache.ReserveFence(ctx, aggregate.ID(), aggregate.Version()+unsaved, token); err != nil {
+		// The interface permits an errored reservation to have taken effect;
+		// the token was minted here exactly so it can be withdrawn anyway.
+		if releaseErr := s.releaseFence(ctx, aggregate.ID(), token); releaseErr != nil {
+			s.log.Warn("failed to release cache fence after a refused reservation; if placed, it over-blocks until the stream reaches it",
+				"aggregate_id", aggregate.ID(), "error", releaseErr)
+		}
+
+		return SaveError{
+			AggregateID: aggregate.ID(), Operation: "reserving cache fence before save",
+			Err: withSaveOutcome(ErrNoEventsAppended, err),
+		}
 	}
 
 	if err := s.inner.Save(ctx, aggregate, opts); err != nil {
-		if errors.Is(err, ErrEventsAppended) {
+		switch {
+		case errors.Is(err, ErrEventsAppended):
 			// The events are facts at the reserved tip; the fence stands.
-			if commitErr := s.cache.CommitFence(ctx, aggregate.ID(), token); commitErr != nil {
+			if commitErr := s.commitFence(ctx, aggregate.ID(), token); commitErr != nil {
 				s.log.Warn("failed to commit cache fence after an append",
 					"aggregate_id", aggregate.ID(), "error", commitErr)
 			}
-		} else if releaseErr := s.cache.ReleaseFence(ctx, aggregate.ID(), token); releaseErr != nil {
-			s.log.Warn("failed to release cache fence after a failed save",
-				"aggregate_id", aggregate.ID(), "error", releaseErr)
+		case errors.Is(err, ErrNoEventsAppended):
+			if releaseErr := s.releaseFence(ctx, aggregate.ID(), token); releaseErr != nil {
+				s.log.Warn("failed to release cache fence after a failed save",
+					"aggregate_id", aggregate.ID(), "error", releaseErr)
+			}
+		default:
+			// Nothing vouches for either outcome: the append may have become
+			// durable and lost its response. The reservation stands — misses,
+			// never staleness — until the stream reaches the reserved tip.
+			s.log.Warn("save failed with an unknown append outcome; cache fence reservation left standing",
+				"aggregate_id", aggregate.ID(), "error", err)
 		}
 
 		return SaveError{AggregateID: aggregate.ID(), Operation: "saving to inner aggregate store", Err: err}
 	}
 
-	if err := s.cache.CommitFence(ctx, aggregate.ID(), token); err != nil {
+	if err := s.commitFence(ctx, aggregate.ID(), token); err != nil {
 		s.log.Warn("failed to commit cache fence after a save",
 			"aggregate_id", aggregate.ID(), "error", err)
 	}

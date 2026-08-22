@@ -21,13 +21,18 @@ func cacheEntry(version int64) aggregatestore.CachedAggregate[account] {
 	}
 }
 
+// newFenceToken mints a unique caller-side token, as the save protocol does.
+func newFenceToken() aggregatestore.FenceToken {
+	return aggregatestore.FenceToken(uuid.Must(uuid.NewV4()).String())
+}
+
 // commitFence reserves and immediately commits a fence, the shape a
 // successful save leaves behind.
 func commitFence[S any](t *testing.T, cache *aggregatestore.MemoryAggregateCache[S], id typeid.ID, version int64) {
 	t.Helper()
 
-	token, err := cache.ReserveFence(t.Context(), id, version)
-	if err != nil {
+	token := newFenceToken()
+	if err := cache.ReserveFence(t.Context(), id, version, token); err != nil {
 		t.Fatalf("reserving fence at %d: %v", version, err)
 	}
 
@@ -202,8 +207,8 @@ func TestMemoryAggregateCache_ReservationBlocksAndEvictsUntilReleased(t *testing
 		t.Fatalf("putting version 2: %v", err)
 	}
 
-	token, err := cache.ReserveFence(t.Context(), id, 3)
-	if err != nil {
+	token := newFenceToken()
+	if err := cache.ReserveFence(t.Context(), id, 3, token); err != nil {
 		t.Fatalf("reserving fence at 3: %v", err)
 	}
 
@@ -243,13 +248,13 @@ func TestMemoryAggregateCache_ReleaseCannotLowerFloorsOthersHold(t *testing.T) {
 
 	commitFence(t, cache, id, 2)
 
-	tokenA, err := cache.ReserveFence(t.Context(), id, 3)
-	if err != nil {
+	tokenA := newFenceToken()
+	if err := cache.ReserveFence(t.Context(), id, 3, tokenA); err != nil {
 		t.Fatalf("reserving fence A at 3: %v", err)
 	}
 
-	tokenB, err := cache.ReserveFence(t.Context(), id, 5)
-	if err != nil {
+	tokenB := newFenceToken()
+	if err := cache.ReserveFence(t.Context(), id, 5, tokenB); err != nil {
 		t.Fatalf("reserving fence B at 5: %v", err)
 	}
 
@@ -288,15 +293,17 @@ func TestMemoryAggregateCache_ReleaseCannotLowerFloorsOthersHold(t *testing.T) {
 
 // TestMemoryAggregateCache_CommitOutlivesItsReservation pins the permanent
 // half: a committed reservation joins the fences that only rise, and its
-// token is consumed — a second commit or a late release finds nothing.
+// token is consumed — settlement is idempotent, so a retried commit or a
+// late release succeeds without effect, and neither disturbs the committed
+// fence.
 func TestMemoryAggregateCache_CommitOutlivesItsReservation(t *testing.T) {
 	t.Parallel()
 
 	cache := aggregatestore.NewMemoryAggregateCache[account]()
 	id := typeid.New("account", uuid.Must(uuid.NewV4()))
 
-	token, err := cache.ReserveFence(t.Context(), id, 3)
-	if err != nil {
+	token := newFenceToken()
+	if err := cache.ReserveFence(t.Context(), id, 3, token); err != nil {
 		t.Fatalf("reserving fence at 3: %v", err)
 	}
 
@@ -312,12 +319,53 @@ func TestMemoryAggregateCache_CommitOutlivesItsReservation(t *testing.T) {
 		t.Errorf("want the below-fence put dropped after the commit, got %+v, %v", entry, err)
 	}
 
-	if err := cache.CommitFence(t.Context(), id, token); err == nil {
-		t.Error("want a second commit of a consumed token refused, got nil")
+	if err := cache.CommitFence(t.Context(), id, token); err != nil {
+		t.Errorf("want a retried commit of a consumed token idempotent, got %v", err)
 	}
 
-	if err := cache.ReleaseFence(t.Context(), id, token); err == nil {
-		t.Error("want a release of a consumed token refused, got nil")
+	if err := cache.ReleaseFence(t.Context(), id, token); err != nil {
+		t.Errorf("want a late release of a consumed token idempotent, got %v", err)
+	}
+
+	// Neither redundant settlement disturbed the committed fence.
+	if err := cache.PutAggregate(t.Context(), id, cacheEntry(2)); err != nil {
+		t.Fatalf("putting version 2 after the redundant settlements: %v", err)
+	}
+
+	if entry, err := cache.GetAggregate(t.Context(), id); err != nil || entry != nil {
+		t.Errorf("want the below-fence put still dropped, got %+v, %v", entry, err)
+	}
+}
+
+// TestMemoryAggregateCache_ReserveRefusesAConflictingToken pins that a token
+// names exactly one reservation: re-reserving it at its own version is an
+// idempotent no-op, re-reserving it at another version is refused, and the
+// original reservation keeps holding its floor either way.
+func TestMemoryAggregateCache_ReserveRefusesAConflictingToken(t *testing.T) {
+	t.Parallel()
+
+	cache := aggregatestore.NewMemoryAggregateCache[account]()
+	id := typeid.New("account", uuid.Must(uuid.NewV4()))
+
+	token := newFenceToken()
+	if err := cache.ReserveFence(t.Context(), id, 10, token); err != nil {
+		t.Fatalf("reserving fence at 10: %v", err)
+	}
+
+	if err := cache.ReserveFence(t.Context(), id, 10, token); err != nil {
+		t.Errorf("want a retried reservation at the same version idempotent, got %v", err)
+	}
+
+	if err := cache.ReserveFence(t.Context(), id, 2, token); err == nil {
+		t.Error("want a reservation reusing the token at another version refused, got nil")
+	}
+
+	if err := cache.PutAggregate(t.Context(), id, cacheEntry(5)); err != nil {
+		t.Fatalf("putting version 5: %v", err)
+	}
+
+	if entry, err := cache.GetAggregate(t.Context(), id); err != nil || entry != nil {
+		t.Errorf("want the original reservation at 10 still dropping the put, got %+v, %v", entry, err)
 	}
 }
 
@@ -362,8 +410,8 @@ func TestMemoryAggregateCache_ConcurrentPublicationsConvergeToNewest(t *testing.
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		token, err := cache.ReserveFence(t.Context(), id, 10)
-		if err != nil {
+		token := newFenceToken()
+		if err := cache.ReserveFence(t.Context(), id, 10, token); err != nil {
 			t.Errorf("reserving fence at 10: %v", err)
 			return
 		}
@@ -532,8 +580,8 @@ func (c *fencingCodec) UnmarshalState(data []byte, dest *account) error {
 }
 
 func (c *fencingCodec) reentrantFence(version int64) error {
-	token, err := c.cache.ReserveFence(context.Background(), c.id, version)
-	if err != nil {
+	token := newFenceToken()
+	if err := c.cache.ReserveFence(context.Background(), c.id, version, token); err != nil {
 		return err
 	}
 

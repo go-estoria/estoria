@@ -92,6 +92,11 @@ type StreamWriter interface {
 	// store-assigned ID, stream ID and version, timestamp, and global position
 	// (where the backend has one), alongside the payload, content type, and
 	// metadata as written.
+	//
+	// An append that returns an error may or may not have taken effect — a
+	// store can commit and lose its response — with one exception: a
+	// StreamVersionMismatchError is a refusal, returned only when nothing
+	// was appended.
 	AppendStream(ctx context.Context, streamID typeid.ID, events []*WritableEvent, opts AppendStreamOptions) ([]*Event, error)
 }
 
@@ -283,6 +288,10 @@ func (e EventUnmarshalingError) Is(target error) bool {
 // StreamVersionMismatchError is returned when the expected stream version does not match
 // the actual stream version. When StreamMustNotExist triggers this error, ExpectedVersion
 // is set to 0, which is indistinguishable from an explicit ExpectVersion of 0.
+//
+// A mismatch is a refusal: implementations return it only when the append
+// left the stream untouched, and callers may rely on nothing having been
+// appended.
 type StreamVersionMismatchError struct {
 	StreamID        typeid.ID
 	ExpectedVersion int64

@@ -1894,3 +1894,99 @@ func mustJSONMarshal(v any) []byte {
 	}
 	return b
 }
+
+// TestEventSourcedStore_Save_MarksAppendOutcomes pins the three-way outcome
+// contract at the append boundary: a version mismatch is a refusal the event
+// store vouches for, an unexplained append error vouches for nothing, and a
+// failure before the append reports nothing appended.
+func TestEventSourcedStore_Save_MarksAppendOutcomes(t *testing.T) {
+	t.Parallel()
+
+	t.Run("a version mismatch reports nothing appended", func(t *testing.T) {
+		t.Parallel()
+
+		eventStore, err := memory.NewEventStore()
+		if err != nil {
+			t.Fatalf("creating event store: %v", err)
+		}
+
+		store, err := aggregatestore.New(eventStore, "mockentity", newMockEntity,
+			aggregatestore.WithEventTypes[mockEntity](mockEntityEventA{}))
+		if err != nil {
+			t.Fatalf("creating store: %v", err)
+		}
+
+		id := uuid.Must(uuid.NewV4())
+		first := store.New(id)
+		first.Append(mockEntityEventA{})
+		if err := store.Save(t.Context(), first, nil); err != nil {
+			t.Fatalf("seeding: %v", err)
+		}
+
+		stale := store.New(id)
+		stale.Append(mockEntityEventA{})
+
+		saveErr := store.Save(t.Context(), stale, nil)
+		if !errors.Is(saveErr, aggregatestore.ErrNoEventsAppended) {
+			t.Errorf("want the refused append carrying ErrNoEventsAppended, got %v", saveErr)
+		}
+		if errors.Is(saveErr, aggregatestore.ErrEventsAppended) {
+			t.Errorf("want no ErrEventsAppended on a refusal, got %v", saveErr)
+		}
+	})
+
+	t.Run("an unexplained append failure vouches for no outcome", func(t *testing.T) {
+		t.Parallel()
+
+		eventStore, err := memory.NewEventStore()
+		if err != nil {
+			t.Fatalf("creating event store: %v", err)
+		}
+
+		store, err := aggregatestore.New(eventStore, "mockentity", newMockEntity,
+			aggregatestore.WithEventTypes[mockEntity](mockEntityEventA{}),
+			aggregatestore.WithEventStreamWriter[mockEntity](mockStreamWriter{
+				appendStreamErr: errors.New("connection reset"),
+			}))
+		if err != nil {
+			t.Fatalf("creating store: %v", err)
+		}
+
+		aggregate := store.New(uuid.Must(uuid.NewV4()))
+		aggregate.Append(mockEntityEventA{})
+
+		saveErr := store.Save(t.Context(), aggregate, nil)
+		if saveErr == nil {
+			t.Fatal("want the append failure surfacing, got nil")
+		}
+		if errors.Is(saveErr, aggregatestore.ErrNoEventsAppended) || errors.Is(saveErr, aggregatestore.ErrEventsAppended) {
+			t.Errorf("want an unexplained append failure carrying neither marker, got %v", saveErr)
+		}
+	})
+
+	t.Run("a failure before the append reports nothing appended", func(t *testing.T) {
+		t.Parallel()
+
+		eventStore, err := memory.NewEventStore()
+		if err != nil {
+			t.Fatalf("creating event store: %v", err)
+		}
+
+		store, err := aggregatestore.New(eventStore, "mockentity", newMockEntity,
+			aggregatestore.WithEventTypes[mockEntity](mockEntityEventA{}),
+			aggregatestore.WithDomainEventCodec(mockEventMarshaler[mockEntity]{
+				marshalErr: errors.New("mock error"),
+			}))
+		if err != nil {
+			t.Fatalf("creating store: %v", err)
+		}
+
+		aggregate := store.New(uuid.Must(uuid.NewV4()))
+		aggregate.Append(mockEntityEventA{})
+
+		saveErr := store.Save(t.Context(), aggregate, nil)
+		if !errors.Is(saveErr, aggregatestore.ErrNoEventsAppended) {
+			t.Errorf("want the pre-append failure carrying ErrNoEventsAppended, got %v", saveErr)
+		}
+	})
+}

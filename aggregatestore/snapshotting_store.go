@@ -1,6 +1,7 @@
 package aggregatestore
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -168,8 +169,12 @@ func (s *SnapshottingStore[S]) Hydrate(ctx context.Context, aggregate *Aggregate
 	// applies the fields it can before failing. Decoding into the live state would
 	// leave that partial state behind and then replay events on top of it, silently
 	// returning a corrupt aggregate with a nil error.
+	//
+	// The payload is cloned first: the bytes are the reader's to retain, and a
+	// zero-copy codec may install its input as state, which the replayed tail
+	// would then mutate in place — inside the retained snapshot itself.
 	state := s.inner.New(aggregate.ID().UUID).State()
-	if err := s.stateCodec.UnmarshalState(snap.Data, &state); err != nil {
+	if err := s.stateCodec.UnmarshalState(bytes.Clone(snap.Data), &state); err != nil {
 		log.Warn("failed to unmarshal snapshot, falling back to full hydration", "error", err)
 		return s.inner.Hydrate(ctx, aggregate, opts)
 	}
@@ -278,7 +283,7 @@ func validateSnapshotState[S any](state *S) error {
 // not applied to the in-memory aggregate.
 func (s *SnapshottingStore[S]) Save(ctx context.Context, aggregate *Aggregate[S], opts *SaveOptions) error {
 	if aggregate == nil {
-		return SaveError{Err: ErrNilAggregate}
+		return SaveError{Err: withSaveOutcome(ErrNoEventsAppended, ErrNilAggregate)}
 	}
 
 	log := s.log.With("aggregate_id", aggregate.ID())
@@ -326,10 +331,13 @@ func (s *SnapshottingStore[S]) Save(ctx context.Context, aggregate *Aggregate[S]
 			continue
 		}
 
+		// The codec's output may alias memory the state still holds — the
+		// StateCodec contract permits it — and the writer may retain what it
+		// is handed, so the payload is detached before it crosses.
 		if err := s.writer.WriteSnapshot(ctx, &snapshotstore.AggregateSnapshot{
 			AggregateID:      aggregate.ID(),
 			AggregateVersion: aggregate.Version(),
-			Data:             data,
+			Data:             bytes.Clone(data),
 			DataContentType:  s.stateCodec.ContentType(),
 		}); err != nil {
 			log.Error("failed to write snapshot", "error", err)

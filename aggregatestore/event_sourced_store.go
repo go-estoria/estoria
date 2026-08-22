@@ -204,22 +204,27 @@ func (s *EventSourcedStore[S]) Hydrate(ctx context.Context, aggregate *Aggregate
 }
 
 // Save saves an aggregate by appending its unsaved events to the event store.
-// An error that carries ErrEventsAppended means the events were appended but
-// not applied to the in-memory aggregate; an error without it reports that
-// nothing was appended. A save that would grow the stream
+// The error reports what became of the append through two markers, checked
+// with errors.Is: one carrying ErrEventsAppended means the events are durable
+// facts; one carrying ErrNoEventsAppended means nothing was appended and the
+// events remain queued; one carrying neither leaves the outcome unknown — the
+// event store failed in a way that vouches for nothing, such as an append
+// whose response was lost. A save that would grow the stream
 // past the maximum representable aggregate version, or from a negative
 // version, is refused before anything is appended.
 func (s *EventSourcedStore[S]) Save(ctx context.Context, aggregate *Aggregate[S], opts *SaveOptions) error {
 	if aggregate == nil {
-		return SaveError{Err: ErrNilAggregate}
+		return SaveError{Err: withSaveOutcome(ErrNoEventsAppended, ErrNilAggregate)}
 	} else if s.eventWriter == nil {
-		return SaveError{AggregateID: aggregate.ID(), Err: errors.New("event store has no event stream writer")}
+		return SaveError{AggregateID: aggregate.ID(), Err: withSaveOutcome(ErrNoEventsAppended,
+			errors.New("event store has no event stream writer"))}
 	}
 
 	unsavedEvents := aggregate.unsavedEvents
 	if len(unsavedEvents) == 0 {
 		if aggregate.Version() == 0 {
-			return SaveError{AggregateID: aggregate.ID(), Err: errors.New("new aggregate has no events to save")}
+			return SaveError{AggregateID: aggregate.ID(), Err: withSaveOutcome(ErrNoEventsAppended,
+				errors.New("new aggregate has no events to save"))}
 		}
 
 		s.log.Debug("no events to save")
@@ -234,14 +239,14 @@ func (s *EventSourcedStore[S]) Save(ctx context.Context, aggregate *Aggregate[S]
 		return SaveError{
 			AggregateID: aggregate.ID(),
 			Operation:   saveOpValidatingVersion,
-			Err:         fmt.Errorf("aggregate version %d is invalid", v),
+			Err:         withSaveOutcome(ErrNoEventsAppended, fmt.Errorf("aggregate version %d is invalid", v)),
 		}
 	} else if int64(len(unsavedEvents)) > math.MaxInt64-v {
 		return SaveError{
 			AggregateID: aggregate.ID(),
 			Operation:   saveOpValidatingVersion,
-			Err: fmt.Errorf("cannot append %d events at version %d: aggregate versions end at %d",
-				len(unsavedEvents), v, int64(math.MaxInt64)),
+			Err: withSaveOutcome(ErrNoEventsAppended, fmt.Errorf("cannot append %d events at version %d: aggregate versions end at %d",
+				len(unsavedEvents), v, int64(math.MaxInt64))),
 		}
 	}
 
@@ -255,14 +260,18 @@ func (s *EventSourcedStore[S]) Save(ctx context.Context, aggregate *Aggregate[S]
 				return SaveError{
 					AggregateID: aggregate.ID(),
 					Operation:   "validating event metadata",
-					Err:         fmt.Errorf("metadata key %q uses the reserved %q prefix", key, eventstore.ReservedMetadataPrefix),
+					Err: withSaveOutcome(ErrNoEventsAppended,
+						fmt.Errorf("metadata key %q uses the reserved %q prefix", key, eventstore.ReservedMetadataPrefix)),
 				}
 			}
 		}
 
 		data, err := s.domainEventCodec.MarshalDomainEvent(unsavedEvent.DomainEvent)
 		if err != nil {
-			return SaveError{AggregateID: aggregate.ID(), Operation: "marshaling event data", Err: err}
+			return SaveError{
+				AggregateID: aggregate.ID(), Operation: "marshaling event data",
+				Err: withSaveOutcome(ErrNoEventsAppended, err),
+			}
 		}
 
 		events[i] = &eventstore.WritableEvent{
@@ -280,6 +289,13 @@ func (s *EventSourcedStore[S]) Save(ctx context.Context, aggregate *Aggregate[S]
 		ExpectVersion: eventstore.VersionPtr(aggregate.Version()),
 	})
 	if err != nil {
+		// A version mismatch is a refusal — the write contract says nothing
+		// was appended — while any other append error vouches for neither
+		// outcome: a store can commit and lose its response.
+		if errors.Is(err, eventstore.StreamVersionMismatchError{}) {
+			err = withSaveOutcome(ErrNoEventsAppended, err)
+		}
+
 		return SaveError{AggregateID: aggregate.ID(), Operation: "saving events to stream", Err: err}
 	}
 

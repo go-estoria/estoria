@@ -467,3 +467,60 @@ func TestHookableStore_Save(t *testing.T) {
 		})
 	}
 }
+
+// TestHookableStore_Save_MarksHookErrorOutcomes pins the save-outcome
+// markers hook failures carry: a pre-save hook error refused a save that
+// appended nothing, and a post-save hook error follows a save that
+// succeeded, whose events are facts.
+func TestHookableStore_Save_MarksHookErrorOutcomes(t *testing.T) {
+	t.Parallel()
+
+	newStore := func(t *testing.T) *aggregatestore.HookableStore[mockEntity] {
+		t.Helper()
+
+		store, err := aggregatestore.NewHookableStore[mockEntity](&mockAggregateStore[mockEntity]{
+			SaveFn: func(context.Context, *aggregatestore.Aggregate[mockEntity], *aggregatestore.SaveOptions) error {
+				return nil
+			},
+		})
+		if err != nil {
+			t.Fatalf("creating hookable store: %v", err)
+		}
+
+		return store
+	}
+
+	t.Run("a pre-save hook error reports nothing appended", func(t *testing.T) {
+		t.Parallel()
+
+		store := newStore(t)
+		store.BeforeSave(func(context.Context, *aggregatestore.Aggregate[mockEntity]) error {
+			return errors.New("refused")
+		})
+
+		err := store.Save(t.Context(), newMockAggregate(uuid.Must(uuid.NewV4()), 1), nil)
+		if !errors.Is(err, aggregatestore.ErrNoEventsAppended) {
+			t.Errorf("want the pre-save hook error carrying ErrNoEventsAppended, got %v", err)
+		}
+		if errors.Is(err, aggregatestore.ErrEventsAppended) {
+			t.Errorf("want no ErrEventsAppended before the inner save ran, got %v", err)
+		}
+	})
+
+	t.Run("a post-save hook error reports the events appended", func(t *testing.T) {
+		t.Parallel()
+
+		store := newStore(t)
+		store.AfterSave(func(context.Context, *aggregatestore.Aggregate[mockEntity]) error {
+			return errors.New("side effect failed")
+		})
+
+		err := store.Save(t.Context(), newMockAggregate(uuid.Must(uuid.NewV4()), 1), nil)
+		if !errors.Is(err, aggregatestore.ErrEventsAppended) {
+			t.Errorf("want the post-save hook error carrying ErrEventsAppended, got %v", err)
+		}
+		if errors.Is(err, aggregatestore.ErrNoEventsAppended) {
+			t.Errorf("want no ErrNoEventsAppended after a successful inner save, got %v", err)
+		}
+	})
+}
