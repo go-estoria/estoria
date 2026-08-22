@@ -143,10 +143,13 @@ func (s *HookableStore[S]) Hydrate(ctx context.Context, aggregate *Aggregate[S],
 // Save saves an aggregate, executing any pre- and post-save hooks. Its
 // errors carry the save-outcome markers the Store contract requires: a
 // pre-save hook error refuses the save with nothing appended
-// (ErrNoEventsAppended), an inner save error passes through with whatever
-// markers the inner store attached, and a post-save hook error follows a
-// save that succeeded, so it carries ErrEventsAppended — the events are
-// facts regardless of what the hook failed to do with them.
+// (ErrNoEventsAppended) — though hooks that ran before the failing one may
+// already have mutated the aggregate — an inner save error passes through
+// with whatever markers the inner store attached, and a post-save hook error
+// follows a save that succeeded: it carries ErrEventsAppended when events
+// were queued for the append, whose facts stand regardless of what the hook
+// failed to do with them, and ErrNoEventsAppended when there were none,
+// because a save with nothing queued appends nothing.
 func (s *HookableStore[S]) Save(ctx context.Context, aggregate *Aggregate[S], opts *SaveOptions) error {
 	if aggregate == nil {
 		return SaveError{Err: withSaveOutcome(ErrNoEventsAppended, ErrNilAggregate)}
@@ -162,15 +165,24 @@ func (s *HookableStore[S]) Save(ctx context.Context, aggregate *Aggregate[S], op
 		}
 	}
 
+	// Measured after the pre-save hooks, which may queue events of their own:
+	// exactly what the inner store is about to append.
+	appending := len(aggregate.unsavedEvents) > 0
+
 	if err := s.inner.Save(ctx, aggregate, opts); err != nil {
 		return SaveError{AggregateID: aggregate.ID(), Operation: "saving aggregate using inner store", Err: err}
 	}
 
 	for _, hook := range s.hooks[AfterSave] {
 		if err := hook(ctx, aggregate); err != nil {
+			outcome := ErrEventsAppended
+			if !appending {
+				outcome = ErrNoEventsAppended
+			}
+
 			return SaveError{
 				AggregateID: aggregate.ID(), Operation: "post-save hook",
-				Err: withSaveOutcome(ErrEventsAppended, err),
+				Err: withSaveOutcome(outcome, err),
 			}
 		}
 	}

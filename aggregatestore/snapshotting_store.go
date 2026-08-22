@@ -279,7 +279,7 @@ func validateSnapshotState[S any](state *S) error {
 }
 
 // Save saves an aggregate, taking snapshots as needed.
-// An error that carries ErrEventsAppended means the events were appended but
+// An error resolving to ErrEventsAppended means the events were appended but
 // not applied to the in-memory aggregate.
 func (s *SnapshottingStore[S]) Save(ctx context.Context, aggregate *Aggregate[S], opts *SaveOptions) error {
 	if aggregate == nil {
@@ -315,7 +315,7 @@ func (s *SnapshottingStore[S]) Save(ctx context.Context, aggregate *Aggregate[S]
 			return SaveError{
 				AggregateID: aggregate.ID(),
 				Operation:   "applying next aggregate event",
-				Err:         fmt.Errorf("%w: %w", ErrEventsAppended, err),
+				Err:         withSaveOutcome(ErrEventsAppended, fmt.Errorf("events appended but not applied to the aggregate: %w", err)),
 			}
 		}
 

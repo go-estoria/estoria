@@ -6469,3 +6469,197 @@ func TestObservation_RefusesAForeignNamedStream(t *testing.T) {
 		t.Errorf("want Resume refused with ErrInvalidState, got %v", err)
 	}
 }
+
+// ambiguousPromotedWriter delegates appends and, once, loses the response of
+// the append recording Promoted: the event is durable, the caller sees an
+// unmarked error.
+type ambiguousPromotedWriter struct {
+	eventstore.Store
+	mu    sync.Mutex
+	fired bool
+}
+
+func (w *ambiguousPromotedWriter) AppendStream(ctx context.Context, streamID typeid.ID, events []*eventstore.WritableEvent, opts eventstore.AppendStreamOptions) ([]*eventstore.Event, error) {
+	written, err := w.Store.AppendStream(ctx, streamID, events, opts)
+	if err != nil {
+		return written, err
+	}
+
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	if w.fired {
+		return written, nil
+	}
+
+	for _, event := range events {
+		if event.Type == (lifecycle.Promoted{}).EventType() {
+			w.fired = true
+			return nil, errors.New("append response lost")
+		}
+	}
+
+	return written, nil
+}
+
+// droppingPromotedWriter swallows appends that record Promoted — nothing
+// lands, the caller sees an unmarked error — until the configured number of
+// drops is spent, and counts the attempts.
+type droppingPromotedWriter struct {
+	eventstore.Store
+	mu       sync.Mutex
+	drops    int
+	attempts int
+}
+
+func (w *droppingPromotedWriter) AppendStream(ctx context.Context, streamID typeid.ID, events []*eventstore.WritableEvent, opts eventstore.AppendStreamOptions) ([]*eventstore.Event, error) {
+	w.mu.Lock()
+	promoted := false
+	for _, event := range events {
+		if event.Type == (lifecycle.Promoted{}).EventType() {
+			promoted = true
+		}
+	}
+
+	if promoted {
+		w.attempts++
+		if w.drops != 0 {
+			w.drops--
+			w.mu.Unlock()
+
+			return nil, errors.New("append response lost")
+		}
+	}
+	w.mu.Unlock()
+
+	return w.Store.AppendStream(ctx, streamID, events, opts)
+}
+
+func (w *droppingPromotedWriter) attemptCount() int {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	return w.attempts
+}
+
+// TestRun_UnknownPromotionOutcomeKeepsTailing pins the reconciliation half
+// of auto-promotion: an append that is durable but loses its response
+// resolves to no outcome, and the run must not stop the live projection's
+// only processor over it — it keeps tailing, proves the promotion from the
+// lifecycle stream, and installs the observed history in the handle.
+func TestRun_UnknownPromotionOutcomeKeepsTailing(t *testing.T) {
+	t.Parallel()
+
+	events := newEventStore(t)
+	writer := &ambiguousPromotedWriter{Store: events}
+	h := buildHarnessWithLifecycleEvents(t, events, writer, lifecycle.WithAutoPromote(true))
+	h.appendDomain(3)
+
+	r := h.begin("ambiguous auto-promotion")
+	cancel, done := runAsync(t, r)
+
+	v1 := projection.ID{Name: "orders", Version: 1}
+
+	// The Promoted event is durable regardless of the lost response: reads
+	// flip to v1.
+	h.waitLive(v1)
+
+	// The handle reconciles the durable promotion from history.
+	waitPhase(t, r, lifecycle.PhasePromoted)
+
+	// The processor is still tailing: new domain events keep flowing into
+	// the live table.
+	h.appendDomain(2)
+	waitFor(t, func() bool { return len(h.model.table(v1)) == 5 })
+
+	if got := countEventsOfType(t, h.events, (lifecycle.Promoted{}).EventType()); got != 1 {
+		t.Errorf("want exactly one Promoted event recorded, got %d", got)
+	}
+
+	select {
+	case err := <-done:
+		t.Fatalf("want the run still tailing through the unknown promotion outcome, got exit: %v", err)
+	default:
+	}
+
+	cancel()
+
+	if err := waitDone(t, done); !errors.Is(err, context.Canceled) {
+		t.Errorf("want the tailing run to report cancellation, got %v", err)
+	}
+}
+
+// TestRun_UnknownPromotionOutcomeRetriesThePromotion pins the arbitration
+// half: while the contended slot stays empty, an empty fold proves nothing —
+// the lost append could still land — so reconciliation retries the promotion
+// at the certified version and lets the stream decide. Here the first append
+// vanished entirely, and the retry promotes.
+func TestRun_UnknownPromotionOutcomeRetriesThePromotion(t *testing.T) {
+	t.Parallel()
+
+	events := newEventStore(t)
+	writer := &droppingPromotedWriter{Store: events, drops: 1}
+	h := buildHarnessWithLifecycleEvents(t, events, writer, lifecycle.WithAutoPromote(true))
+	h.appendDomain(3)
+
+	r := h.begin("vanished auto-promotion")
+	cancel, done := runAsync(t, r)
+
+	v1 := projection.ID{Name: "orders", Version: 1}
+
+	// The retried promotion lands and reads flip.
+	h.waitLive(v1)
+	waitPhase(t, r, lifecycle.PhasePromoted)
+
+	if got := countEventsOfType(t, h.events, (lifecycle.Promoted{}).EventType()); got != 1 {
+		t.Errorf("want exactly one Promoted event recorded, got %d", got)
+	}
+
+	select {
+	case err := <-done:
+		t.Fatalf("want the run still tailing after the reconciled promotion, got exit: %v", err)
+	default:
+	}
+
+	cancel()
+
+	if err := waitDone(t, done); !errors.Is(err, context.Canceled) {
+		t.Errorf("want the tailing run to report cancellation, got %v", err)
+	}
+}
+
+// TestRun_AmbiguousPromotionCedesToAbandon pins reconciliation's exit: it
+// holds the run alive only while the promotion is unproven, and an Abandon
+// ending the attempt is proof — the run winds down deliberately, reporting
+// the recorded abandonment as a clean stop, with no Promoted ever recorded.
+func TestRun_AmbiguousPromotionCedesToAbandon(t *testing.T) {
+	t.Parallel()
+
+	events := newEventStore(t)
+	writer := &droppingPromotedWriter{Store: events, drops: -1}
+	h := buildHarnessWithLifecycleEvents(t, events, writer, lifecycle.WithAutoPromote(true))
+	h.appendDomain(3)
+
+	r := h.begin("promotion that never lands")
+	_, done := runAsync(t, r)
+
+	// Reconciliation is live: the promotion has been attempted more than
+	// once, every attempt swallowed without an outcome.
+	waitFor(t, func() bool { return writer.attemptCount() >= 2 })
+
+	if err := r.Abandon(t.Context(), "giving up on the ambiguous promotion"); err != nil {
+		t.Fatalf("abandoning during promotion reconciliation: %v", err)
+	}
+
+	if err := waitDone(t, done); err != nil {
+		t.Fatalf("want Run to wind down nil after the abandon, got %v", err)
+	}
+
+	if got := countEventsOfType(t, events, (lifecycle.Promoted{}).EventType()); got != 0 {
+		t.Errorf("want no Promoted event recorded, got %d", got)
+	}
+
+	if got := r.State().Attempt.Phase; got != lifecycle.PhaseNone {
+		t.Errorf("want the attempt slot vacant after the abandon, got %s", got)
+	}
+}

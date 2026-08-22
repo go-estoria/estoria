@@ -470,8 +470,10 @@ func TestHookableStore_Save(t *testing.T) {
 
 // TestHookableStore_Save_MarksHookErrorOutcomes pins the save-outcome
 // markers hook failures carry: a pre-save hook error refused a save that
-// appended nothing, and a post-save hook error follows a save that
-// succeeded, whose events are facts.
+// appended nothing, a post-save hook error following a save that appended
+// queued events reports their facts, and a post-save hook error following a
+// no-op save — nothing was queued, so nothing was appended — must not
+// report facts that do not exist.
 func TestHookableStore_Save_MarksHookErrorOutcomes(t *testing.T) {
 	t.Parallel()
 
@@ -507,7 +509,7 @@ func TestHookableStore_Save_MarksHookErrorOutcomes(t *testing.T) {
 		}
 	})
 
-	t.Run("a post-save hook error reports the events appended", func(t *testing.T) {
+	t.Run("a post-save hook error reports queued events appended", func(t *testing.T) {
 		t.Parallel()
 
 		store := newStore(t)
@@ -515,12 +517,47 @@ func TestHookableStore_Save_MarksHookErrorOutcomes(t *testing.T) {
 			return errors.New("side effect failed")
 		})
 
-		err := store.Save(t.Context(), newMockAggregate(uuid.Must(uuid.NewV4()), 1), nil)
-		if !errors.Is(err, aggregatestore.ErrEventsAppended) {
-			t.Errorf("want the post-save hook error carrying ErrEventsAppended, got %v", err)
+		aggregate := newMockAggregate(uuid.Must(uuid.NewV4()), 1)
+		aggregate.Append(mockEntityEventA{})
+
+		err := store.Save(t.Context(), aggregate, nil)
+		if got := aggregatestore.SaveOutcome(err); got != aggregatestore.AppendOutcomeAppended {
+			t.Errorf("want the post-save hook error resolving to ErrEventsAppended, got %v (error: %v)", got, err)
 		}
-		if errors.Is(err, aggregatestore.ErrNoEventsAppended) {
-			t.Errorf("want no ErrNoEventsAppended after a successful inner save, got %v", err)
+	})
+
+	t.Run("a post-save hook error after a no-op save reports nothing appended", func(t *testing.T) {
+		t.Parallel()
+
+		store := newStore(t)
+		store.AfterSave(func(context.Context, *aggregatestore.Aggregate[mockEntity]) error {
+			return errors.New("side effect failed")
+		})
+
+		// Version 1 with nothing queued: the save appends nothing.
+		err := store.Save(t.Context(), newMockAggregate(uuid.Must(uuid.NewV4()), 1), nil)
+		if got := aggregatestore.SaveOutcome(err); got != aggregatestore.AppendOutcomeNothingAppended {
+			t.Errorf("want the no-op save's post-hook error resolving to ErrNoEventsAppended, got %v (error: %v)", got, err)
+		}
+	})
+
+	t.Run("a post-save hook error after hooks queued the only events reports them appended", func(t *testing.T) {
+		t.Parallel()
+
+		store := newStore(t)
+		store.BeforeSave(func(_ context.Context, aggregate *aggregatestore.Aggregate[mockEntity]) error {
+			aggregate.Append(mockEntityEventA{})
+			return nil
+		})
+		store.AfterSave(func(context.Context, *aggregatestore.Aggregate[mockEntity]) error {
+			return errors.New("side effect failed")
+		})
+
+		// Nothing queued by the caller: what the inner store appends is
+		// exactly what the pre-save hooks queued.
+		err := store.Save(t.Context(), newMockAggregate(uuid.Must(uuid.NewV4()), 1), nil)
+		if got := aggregatestore.SaveOutcome(err); got != aggregatestore.AppendOutcomeAppended {
+			t.Errorf("want the hook-queued events' facts reported appended, got %v (error: %v)", got, err)
 		}
 	})
 }

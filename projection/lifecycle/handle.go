@@ -262,7 +262,7 @@ func (r *Rebuild) Run(ctx context.Context) error {
 	// claim is displacement, an ended attempt is a terminal state observed;
 	// a crash after the append is exactly what resume reconciliation handles.
 	if err := r.appendLocked(ctx, transitions...); err != nil {
-		if !errors.Is(err, aggregatestore.ErrEventsAppended) {
+		if aggregatestore.SaveOutcome(err) != aggregatestore.AppendOutcomeAppended {
 			result := r.claimDefeat(ctx, attempt, err)
 			r.mu.Unlock()
 
@@ -702,20 +702,34 @@ func (r *Rebuild) recordCatchUp(ctx context.Context, attemptID uuid.UUID, positi
 
 // promoteAfterCatchUp auto-promotes a rebuild directly after its catch-up
 // was certified, mapping the outcome to the shared contract: it reports
-// whether Run should keep tailing.
+// whether Run should keep tailing. Definite outcomes map directly — a
+// durable promotion keeps tailing, a refusal winds the run down — but an
+// append whose outcome is unknown must not stop the processor: the
+// promotion may be durable and the version live, so the run stays up while
+// reconciliation reads the lifecycle stream, and it winds down only once
+// the history proves the promotion did not land.
 func (r *Rebuild) promoteAfterCatchUp(ctx context.Context, attemptID, runnerID uuid.UUID, stop context.CancelFunc, done <-chan error, reconcileExited <-chan struct{}) (bool, error) {
 	err := r.Promote(ctx)
 	if err == nil {
 		return true, nil
 	}
 
-	// The promotion can be durable even when the save could not observe it;
-	// the version is live and must keep tailing. Only this handle is stale.
-	if errors.Is(err, aggregatestore.ErrEventsAppended) {
+	switch outcome := aggregatestore.SaveOutcome(err); {
+	case outcome == aggregatestore.AppendOutcomeAppended:
+		// The promotion can be durable even when the save could not observe
+		// it; the version is live and must keep tailing. Only this handle is
+		// stale.
 		r.orchestrator.log.Error("promotion recorded, but the rebuild handle is stale",
 			"projection", r.Name(), "error", err)
 
 		return true, nil
+	case outcome == aggregatestore.AppendOutcomeUnknown && isAppendFailure(err):
+		promoted, lost := r.reconcileUnknownPromotion(ctx, attemptID, err)
+		if promoted {
+			return true, nil
+		}
+
+		err = lost
 	}
 
 	wound := r.windDown(stop, done, err)
@@ -727,6 +741,113 @@ func (r *Rebuild) promoteAfterCatchUp(ctx context.Context, attemptID, runnerID u
 	r.recordLostAppend(ctx, attemptID, runnerID, err)
 
 	return false, r.classifyExit(reconcileExited, wound)
+}
+
+// reconcileUnknownPromotion resolves an auto-promotion whose append vouched
+// for neither outcome, without stopping the processor: a live projection
+// must not lose its only tail to an error that may be nothing but a lost
+// response. The stream slot the append contended for — one past the
+// certified version — is the authority: a fold reaching the slot shows its
+// winner, and the winner being this attempt's Promoted proves the promotion
+// landed, while any other winner proves it can never land. While the slot
+// is empty nothing is proven — the lost append may still be in flight — so
+// the promotion is retried at the same expected version and the stream
+// arbitrates. It reports promoted=true once the promotion is durably
+// resolved in its favor, installing the observed history in the handle; it
+// reports false only with the loss proven, the run halted by a competing
+// verdict, or the caller's context ended.
+func (r *Rebuild) reconcileUnknownPromotion(ctx context.Context, attemptID uuid.UUID, lost error) (bool, error) {
+	r.mu.Lock()
+	slot := r.aggregate.Version() + 1
+	r.mu.Unlock()
+
+	for {
+		if r.reconcileHalted() {
+			return false, lost
+		}
+
+		loaded, err := r.hydrateFresh(ctx, slot)
+		switch {
+		case err != nil || checkLifecycleAggregate(loaded, r.name) != nil:
+			// The authority is unreadable; nothing is proven either way.
+		case loaded.Version() < slot:
+			// The slot is empty, which proves nothing — the lost append may
+			// still be in flight — so retry at the same expected version and
+			// let the stream arbitrate.
+			switch retryErr := r.Promote(ctx); {
+			case retryErr == nil:
+				return true, nil
+			case aggregatestore.SaveOutcome(retryErr) == aggregatestore.AppendOutcomeAppended:
+				r.orchestrator.log.Error("promotion recorded, but the rebuild handle is stale",
+					"projection", r.Name(), "error", retryErr)
+
+				return true, nil
+			case aggregatestore.SaveOutcome(retryErr) == aggregatestore.AppendOutcomeNothingAppended,
+				isAppendFailure(retryErr):
+				// The slot was taken between the fold and the retry, or the
+				// retry's own outcome is unknown; the next fold classifies
+				// the slot's winner.
+				lost = retryErr
+			default:
+				// Refused before any append — a competing command moved the
+				// handle. The next fold, or the halt check, resolves it.
+			}
+		case loaded.State().Attempt.ID == attemptID && loaded.State().Attempt.Phase == PhasePromoted:
+			r.observeReconciledPromotion(ctx)
+
+			return true, nil
+		default:
+			// A foreign event won the slot the append was version-guarded
+			// to: the promotion can never land. Proven lost.
+			return false, lost
+		}
+
+		select {
+		case <-ctx.Done():
+			return false, lost
+		case <-time.After(r.orchestrator.reconcileInterval):
+		}
+	}
+}
+
+// reconcileHalted reports whether promotion reconciliation must cede:
+// the run was stopped or fail-closed by a competing verdict, or the
+// certifying processor exited — either way the wind-down path owns the
+// outcome, and reconciliation looping on refusals would keep a dead run
+// from reporting it.
+func (r *Rebuild) reconcileHalted() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if r.stopped || r.failure != nil {
+		return true
+	}
+
+	select {
+	case <-r.processorExited:
+		return true
+	default:
+		return false
+	}
+}
+
+// observeReconciledPromotion installs a fresh full fold after reconciliation
+// proved the promotion durable, so the handle observes the transition it
+// could not observe through the save. The certificate is consumed either
+// way — its slot is spent — and a failed fold leaves the handle stale, which
+// later commands repair by refolding at entry.
+func (r *Rebuild) observeReconciledPromotion(ctx context.Context) {
+	loaded, err := r.hydrateFresh(ctx, 0)
+
+	r.mu.Lock()
+	r.certificate = nil
+	if err == nil && checkLifecycleAggregate(loaded, r.name) == nil {
+		r.aggregate = loaded
+	}
+	r.mu.Unlock()
+
+	r.orchestrator.log.Warn("promotion reconciled from lifecycle history after an unknown append outcome",
+		"projection", r.Name())
 }
 
 // windDown ends a run's processor engagement on behalf of a failure or
@@ -842,7 +963,7 @@ func displacedError(claimant, attemptID uuid.UUID) error {
 // defeatSlot reports the exact stream slot a lost lifecycle append contended
 // for: the version the save expected, plus one. The slot is known only for a
 // loss that is genuinely a foreign win over the given stream: a loss
-// carrying ErrEventsAppended is never one — the events at the contended
+// resolving to ErrEventsAppended is never one — the events at the contended
 // slots are this run's own, durably recorded, even if a retried save's error
 // chain also carries a stale mismatch — and a mismatch naming a different
 // stream, a negative expectation, or one at the version ceiling identifies
@@ -853,7 +974,7 @@ func displacedError(claimant, attemptID uuid.UUID) error {
 // that cannot see the concurrent tip (PostgreSQL) reports the expectation
 // back as the actual.
 func defeatSlot(lost error, stream typeid.ID) (int64, bool) {
-	if errors.Is(lost, aggregatestore.ErrEventsAppended) {
+	if aggregatestore.SaveOutcome(lost) == aggregatestore.AppendOutcomeAppended {
 		return 0, false
 	}
 
@@ -932,7 +1053,7 @@ func (r *Rebuild) claimDefeat(ctx context.Context, base AttemptState, lost error
 // append contended for — so the verdict is deterministic no matter what
 // landed on the stream afterward: an ended attempt is a deliberate
 // wind-down, a competing claim is displacement, and any other winner leaves
-// the original error to surface. A loss carrying ErrEventsAppended is never
+// the original error to surface. A loss resolving to ErrEventsAppended is never
 // classified: the events at the contended slots are this run's own durable
 // append, and the raw error already reports exactly that. The verdict
 // records through the same fields the reconcile loop uses, so exit
@@ -1122,10 +1243,10 @@ func (r *Rebuild) Promote(ctx context.Context) error {
 	}
 	r.mu.Unlock()
 
-	// An error carrying ErrEventsAppended means the event is durable and the
+	// An error resolving to ErrEventsAppended means the event is durable and the
 	// aggregate could not observe it: the flip happened; only this handle is
 	// stale.
-	if appendErr != nil && errors.Is(appendErr, aggregatestore.ErrEventsAppended) {
+	if appendErr != nil && aggregatestore.SaveOutcome(appendErr) == aggregatestore.AppendOutcomeAppended {
 		return staleHandleError("promotion", appendErr)
 	}
 
@@ -1182,7 +1303,7 @@ func (r *Rebuild) Rollback(ctx context.Context) error {
 		Revision:   state.CutoverRevision + 1,
 		At:         time.Now(),
 	})
-	if appendErr != nil && !errors.Is(appendErr, aggregatestore.ErrEventsAppended) {
+	if appendErr != nil && aggregatestore.SaveOutcome(appendErr) != aggregatestore.AppendOutcomeAppended {
 		r.mu.Unlock()
 		return appendErr
 	}
@@ -1231,7 +1352,7 @@ func (r *Rebuild) Abandon(ctx context.Context, cause string) error {
 	}
 
 	appendErr := r.appendLocked(ctx, Abandoned{Cause: cause})
-	if appendErr != nil && !errors.Is(appendErr, aggregatestore.ErrEventsAppended) {
+	if appendErr != nil && aggregatestore.SaveOutcome(appendErr) != aggregatestore.AppendOutcomeAppended {
 		r.mu.Unlock()
 		return appendErr
 	}
@@ -1433,7 +1554,7 @@ func (r *Rebuild) Retire(ctx context.Context, opts ...RetireOption) error {
 			At:               time.Now(),
 		})
 		if err != nil {
-			if errors.Is(err, aggregatestore.ErrEventsAppended) {
+			if aggregatestore.SaveOutcome(err) == aggregatestore.AppendOutcomeAppended {
 				return staleHandleError("retirement start", err)
 			}
 
@@ -1568,7 +1689,7 @@ func attest(ctx context.Context, witnesses []RetirementWitness, ids []string, na
 // contract.
 func (r *Rebuild) recordRetirement(ctx context.Context, retired projection.ID, receipts []WitnessReceipt) error {
 	err := r.appendLocked(ctx, PreviousRetired{Retired: retired, Receipts: receipts})
-	if err != nil && errors.Is(err, aggregatestore.ErrEventsAppended) {
+	if err != nil && aggregatestore.SaveOutcome(err) == aggregatestore.AppendOutcomeAppended {
 		return staleHandleError("retirement", err)
 	}
 
@@ -1608,12 +1729,13 @@ func (r *Rebuild) appendLocked(ctx context.Context, events ...estoria.DomainEven
 	if err := r.orchestrator.authority.Save(ctx, r.aggregate, nil); err != nil {
 		// Discard the failed append: left queued, it would ride along with a
 		// later command's save and durably record both transitions. When the
-		// error carries ErrEventsAppended the events are durable regardless,
-		// and the next hydration observes them — but the aggregate can no
-		// longer vouch for the version a certificate was cut against.
+		// error resolves to ErrEventsAppended the events are durable
+		// regardless, and the next hydration observes them — but the
+		// aggregate can no longer vouch for the version a certificate was
+		// cut against.
 		r.aggregate.DiscardUnsavedEvents()
 
-		if errors.Is(err, aggregatestore.ErrEventsAppended) {
+		if aggregatestore.SaveOutcome(err) == aggregatestore.AppendOutcomeAppended {
 			r.certificate = nil
 		}
 
@@ -1622,10 +1744,30 @@ func (r *Rebuild) appendLocked(ctx context.Context, events ...estoria.DomainEven
 			types = append(types, event.EventType())
 		}
 
-		return fmt.Errorf("recording %s: %w", strings.Join(types, "+"), err)
+		return appendError{err: fmt.Errorf("recording %s: %w", strings.Join(types, "+"), err)}
 	}
 
 	return nil
+}
+
+// appendError wraps a failure from appendLocked, so callers can tell an
+// error from the recording save — whose append outcome the save markers
+// describe, unknown when they resolve to neither — from a refusal raised
+// before any append was attempted.
+type appendError struct {
+	err error
+}
+
+func (e appendError) Error() string { return e.err.Error() }
+
+func (e appendError) Unwrap() error { return e.err }
+
+// isAppendFailure reports whether err came from a lifecycle append's save,
+// as opposed to a refusal ahead of one.
+func isAppendFailure(err error) bool {
+	var failed appendError
+
+	return errors.As(err, &failed)
 }
 
 // staleHandleError describes a transition that is durably recorded even

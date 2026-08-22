@@ -24,15 +24,19 @@ import (
 // never invoke a codec; a nested GetAggregate or PutAggregate invokes the
 // codec again, so only a codec reentrant in its own right may make one.
 // State must round-trip its codec; what the codec drops, the cache forgets.
-// The cache is unbounded — entries and fences live until the process exits,
-// reservations until settled — so its ordering guarantee is never
-// retention-scoped.
+// The cache is unbounded — entries and fences live until the process exits —
+// so its ordering guarantee is never retention-scoped. Reservation records
+// live only above the committed fence: whenever the fence rises, every
+// record at or below it is dropped, pending reservations included, because
+// the fence already refuses everything they would refuse — so records left
+// by unknown-outcome saves accumulate only until durable progress supersedes
+// them.
 type MemoryAggregateCache[S any] struct {
 	codec        estoria.StateCodec[S]
 	mu           sync.Mutex
 	entries      map[string]memoryCachedState
 	fences       map[string]int64
-	reservations map[string]map[FenceToken]int64
+	reservations map[string]map[FenceToken]fenceReservation
 }
 
 // memoryCachedState is a stored entry: the state serialized at put time and
@@ -40,6 +44,16 @@ type MemoryAggregateCache[S any] struct {
 type memoryCachedState struct {
 	data    []byte
 	version int64
+}
+
+// fenceReservation is one token's reservation record: the version it names
+// and whether it has reached its terminal state. Settled records are
+// tombstones — a settled token can never return to pending, even when a
+// delayed reserve delivery lands after its own withdrawal — and only pending
+// records contribute to the floor.
+type fenceReservation struct {
+	version int64
+	settled bool
 }
 
 // A MemoryAggregateCacheOption configures a MemoryAggregateCache.
@@ -65,7 +79,7 @@ func NewMemoryAggregateCache[S any](opts ...MemoryAggregateCacheOption[S]) *Memo
 		codec:        estoria.JSONStateCodec[S]{},
 		entries:      map[string]memoryCachedState{},
 		fences:       map[string]int64{},
-		reservations: map[string]map[FenceToken]int64{},
+		reservations: map[string]map[FenceToken]fenceReservation{},
 	}
 
 	for _, opt := range opts {
@@ -137,10 +151,13 @@ func (c *MemoryAggregateCache[S]) PutAggregate(_ context.Context, aggregateID ty
 
 // ReserveFence places a provisional fence at the given version under the
 // caller's token: it evicts a stored entry below that version and, with the
-// committed fence and every other outstanding reservation, forms the floor
-// puts are judged against until the reservation is committed or released.
-// Re-reserving an outstanding token at its own version is a no-op; at a
-// different version it is refused — a token names exactly one reservation.
+// committed fence and every other pending reservation, forms the floor puts
+// are judged against until the reservation is committed or released.
+// Re-reserving a token pending at its own version is a no-op; a token
+// pending at a different version, or already settled, is refused — a token
+// names exactly one reservation, and a settled reservation never returns to
+// pending. A reservation at or below the committed fence places no record:
+// the fence already refuses everything it would refuse.
 func (c *MemoryAggregateCache[S]) ReserveFence(_ context.Context, aggregateID typeid.ID, version int64, token FenceToken) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -148,17 +165,24 @@ func (c *MemoryAggregateCache[S]) ReserveFence(_ context.Context, aggregateID ty
 	key := aggregateID.String()
 
 	if existing, ok := c.reservations[key][token]; ok {
-		if existing != version {
-			return fmt.Errorf("fence token %q already reserves version %d", token, existing)
+		switch {
+		case existing.settled:
+			return fmt.Errorf("%w: token %q is already settled", ErrFenceReservationRefused, token)
+		case existing.version != version:
+			return fmt.Errorf("%w: token %q already reserves version %d", ErrFenceReservationRefused, token, existing.version)
 		}
 
 		return nil
 	}
 
-	if c.reservations[key] == nil {
-		c.reservations[key] = map[FenceToken]int64{}
+	if version <= c.fences[key] {
+		return nil
 	}
-	c.reservations[key][token] = version
+
+	if c.reservations[key] == nil {
+		c.reservations[key] = map[FenceToken]fenceReservation{}
+	}
+	c.reservations[key][token] = fenceReservation{version: version}
 
 	if stored, ok := c.entries[key]; ok && stored.version < version {
 		delete(c.entries, key)
@@ -167,62 +191,108 @@ func (c *MemoryAggregateCache[S]) ReserveFence(_ context.Context, aggregateID ty
 	return nil
 }
 
-// CommitFence makes the identified reservation permanent, raising the
-// aggregate's committed fence to the reservation's version and consuming
-// the token. Committed fences only rise, and they are never evicted, so a
-// committed fence always outlives the entries it outranks. Settlement is
-// idempotent: a token with no outstanding reservation is already settled,
-// and the call succeeds without effect.
-func (c *MemoryAggregateCache[S]) CommitFence(_ context.Context, aggregateID typeid.ID, token FenceToken) error {
+// CommitFence makes the reservation identified by token and version
+// permanent, raising the aggregate's committed fence to that version and
+// dropping every record the risen fence supersedes. Committed fences only
+// rise, and they are never evicted, so a committed fence always outlives
+// the entries it outranks. Settlement is idempotent and terminal: an
+// already-settled or never-placed reservation is treated as settled and the
+// call succeeds without effect; a pending reservation the token holds at a
+// different version is not the identified one — it stands, and the call
+// errors.
+func (c *MemoryAggregateCache[S]) CommitFence(_ context.Context, aggregateID typeid.ID, version int64, token FenceToken) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
 	key := aggregateID.String()
-	version, ok := c.takeReservationLocked(key, token)
-	if !ok {
+
+	existing, ok := c.reservations[key][token]
+	switch {
+	case !ok:
+		c.settleAbsentLocked(key, version, token)
 		return nil
+	case existing.settled:
+		return nil
+	case existing.version != version:
+		return fmt.Errorf("fence token %q reserves version %d, not %d", token, existing.version, version)
 	}
 
 	if version > c.fences[key] {
 		c.fences[key] = version
 	}
 
+	c.sweepLocked(key)
+
 	return nil
 }
 
-// ReleaseFence withdraws exactly the identified reservation, consuming the
-// token: the committed fence and every other outstanding reservation stand,
+// ReleaseFence withdraws exactly the reservation identified by token and
+// version: the committed fence and every other pending reservation stand,
 // so releasing a failed save's reservation cannot lower a floor a
-// concurrent save established. Settlement is idempotent: a token with no
-// outstanding reservation is already settled, and the call succeeds
-// without effect.
-func (c *MemoryAggregateCache[S]) ReleaseFence(_ context.Context, aggregateID typeid.ID, token FenceToken) error {
+// concurrent save established. Settlement is idempotent and terminal: an
+// already-settled or never-placed reservation is treated as settled — the
+// never-placed is recorded settled, so a reserve delivery landing after its
+// own withdrawal cannot resurrect it — and a pending reservation the token
+// holds at a different version stands, erroring, because it is not the
+// identified one.
+func (c *MemoryAggregateCache[S]) ReleaseFence(_ context.Context, aggregateID typeid.ID, version int64, token FenceToken) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	c.takeReservationLocked(aggregateID.String(), token)
+	key := aggregateID.String()
+
+	existing, ok := c.reservations[key][token]
+	switch {
+	case !ok:
+		c.settleAbsentLocked(key, version, token)
+		return nil
+	case existing.settled:
+		return nil
+	case existing.version != version:
+		return fmt.Errorf("fence token %q reserves version %d, not %d", token, existing.version, version)
+	}
+
+	c.reservations[key][token] = fenceReservation{version: version, settled: true}
 
 	return nil
 }
 
-// takeReservationLocked removes and returns the identified reservation,
-// reporting whether it was outstanding. The caller must hold c.mu.
-func (c *MemoryAggregateCache[S]) takeReservationLocked(key string, token FenceToken) (int64, bool) {
-	version, ok := c.reservations[key][token]
-	if !ok {
-		return 0, false
+// settleAbsentLocked records the terminal state for a settlement that found
+// no record: the reserve it settles may still be in flight, and the
+// tombstone is what refuses that delivery. At or below the committed fence
+// no record is needed — a late reserve places nothing there. The caller
+// must hold c.mu.
+func (c *MemoryAggregateCache[S]) settleAbsentLocked(key string, version int64, token FenceToken) {
+	if version <= c.fences[key] {
+		return
 	}
 
-	delete(c.reservations[key], token)
+	if c.reservations[key] == nil {
+		c.reservations[key] = map[FenceToken]fenceReservation{}
+	}
+	c.reservations[key][token] = fenceReservation{version: version, settled: true}
+}
+
+// sweepLocked drops every reservation record the committed fence has
+// reached or passed: a pending record there is superseded — the fence
+// refuses everything it would refuse — and a tombstone there guards nothing,
+// because a late reserve at or below the fence places no record. The caller
+// must hold c.mu.
+func (c *MemoryAggregateCache[S]) sweepLocked(key string) {
+	fence := c.fences[key]
+	for token, record := range c.reservations[key] {
+		if record.version <= fence {
+			delete(c.reservations[key], token)
+		}
+	}
+
 	if len(c.reservations[key]) == 0 {
 		delete(c.reservations, key)
 	}
-
-	return version, true
 }
 
 // floorLocked is the lowest version a put may carry: the newest of the
-// stored entry, the committed fence, and every outstanding reservation. The
+// stored entry, the committed fence, and every pending reservation. The
 // caller must hold c.mu.
 func (c *MemoryAggregateCache[S]) floorLocked(key string) int64 {
 	floor := c.fences[key]
@@ -230,9 +300,9 @@ func (c *MemoryAggregateCache[S]) floorLocked(key string) int64 {
 		floor = stored.version
 	}
 
-	for _, version := range c.reservations[key] {
-		if version > floor {
-			floor = version
+	for _, record := range c.reservations[key] {
+		if !record.settled && record.version > floor {
+			floor = record.version
 		}
 	}
 

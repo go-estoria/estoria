@@ -204,14 +204,14 @@ func (s *EventSourcedStore[S]) Hydrate(ctx context.Context, aggregate *Aggregate
 }
 
 // Save saves an aggregate by appending its unsaved events to the event store.
-// The error reports what became of the append through two markers, checked
-// with errors.Is: one carrying ErrEventsAppended means the events are durable
-// facts; one carrying ErrNoEventsAppended means nothing was appended and the
-// events remain queued; one carrying neither leaves the outcome unknown — the
-// event store failed in a way that vouches for nothing, such as an append
-// whose response was lost. A save that would grow the stream
-// past the maximum representable aggregate version, or from a negative
-// version, is refused before anything is appended.
+// The error reports what became of the append through the save-outcome
+// markers, resolved with SaveOutcome: ErrEventsAppended means the events are
+// durable facts; ErrNoEventsAppended means nothing was appended and the
+// events remain queued; neither leaves the outcome unknown — the event store
+// failed in a way that vouches for nothing, such as an append whose response
+// was lost. A save that would grow the stream past the maximum representable
+// aggregate version, or from a negative version, is refused before anything
+// is appended.
 func (s *EventSourcedStore[S]) Save(ctx context.Context, aggregate *Aggregate[S], opts *SaveOptions) error {
 	if aggregate == nil {
 		return SaveError{Err: withSaveOutcome(ErrNoEventsAppended, ErrNilAggregate)}
@@ -307,8 +307,9 @@ func (s *EventSourcedStore[S]) Save(ctx context.Context, aggregate *Aggregate[S]
 		return SaveError{
 			AggregateID: aggregate.ID(),
 			Operation:   "confirming appended events",
-			Err: fmt.Errorf("%w: event store reported %d written events for %d appended",
-				ErrEventsAppended, len(written), len(unsavedEvents)),
+			Err: withSaveOutcome(ErrEventsAppended,
+				fmt.Errorf("events appended but not applied to the aggregate: event store reported %d written events for %d appended",
+					len(written), len(unsavedEvents))),
 		}
 	}
 
@@ -346,7 +347,7 @@ func (s *EventSourcedStore[S]) Save(ctx context.Context, aggregate *Aggregate[S]
 			return SaveError{
 				AggregateID: aggregate.ID(),
 				Operation:   "applying aggregate event",
-				Err:         fmt.Errorf("%w: %w", ErrEventsAppended, err),
+				Err:         withSaveOutcome(ErrEventsAppended, fmt.Errorf("events appended but not applied to the aggregate: %w", err)),
 			}
 		}
 	}

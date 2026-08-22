@@ -22,8 +22,8 @@ type mockCache[E any] struct {
 	GetAggregateFn func(context.Context, typeid.ID) (*aggregatestore.CachedAggregate[E], error)
 	PutAggregateFn func(context.Context, typeid.ID, aggregatestore.CachedAggregate[E]) error
 	ReserveFenceFn func(context.Context, typeid.ID, int64, aggregatestore.FenceToken) error
-	CommitFenceFn  func(context.Context, typeid.ID, aggregatestore.FenceToken) error
-	ReleaseFenceFn func(context.Context, typeid.ID, aggregatestore.FenceToken) error
+	CommitFenceFn  func(context.Context, typeid.ID, int64, aggregatestore.FenceToken) error
+	ReleaseFenceFn func(context.Context, typeid.ID, int64, aggregatestore.FenceToken) error
 }
 
 var _ aggregatestore.AggregateCache[mockEntity] = (*mockCache[mockEntity])(nil)
@@ -52,17 +52,17 @@ func (c *mockCache[E]) ReserveFence(ctx context.Context, id typeid.ID, version i
 	return fmt.Errorf("unexpected call: ReserveFence(id=%s, version=%d)", id, version)
 }
 
-func (c *mockCache[E]) CommitFence(ctx context.Context, id typeid.ID, token aggregatestore.FenceToken) error {
+func (c *mockCache[E]) CommitFence(ctx context.Context, id typeid.ID, version int64, token aggregatestore.FenceToken) error {
 	if c.CommitFenceFn != nil {
-		return c.CommitFenceFn(ctx, id, token)
+		return c.CommitFenceFn(ctx, id, version, token)
 	}
 
 	return fmt.Errorf("unexpected call: CommitFence(id=%s, token=%s)", id, token)
 }
 
-func (c *mockCache[E]) ReleaseFence(ctx context.Context, id typeid.ID, token aggregatestore.FenceToken) error {
+func (c *mockCache[E]) ReleaseFence(ctx context.Context, id typeid.ID, version int64, token aggregatestore.FenceToken) error {
 	if c.ReleaseFenceFn != nil {
-		return c.ReleaseFenceFn(ctx, id, token)
+		return c.ReleaseFenceFn(ctx, id, version, token)
 	}
 
 	return fmt.Errorf("unexpected call: ReleaseFence(id=%s, token=%s)", id, token)
@@ -363,7 +363,7 @@ func TestCachedStore_Save(t *testing.T) {
 					ReserveFenceFn: func(context.Context, typeid.ID, int64, aggregatestore.FenceToken) error {
 						return nil
 					},
-					CommitFenceFn: func(context.Context, typeid.ID, aggregatestore.FenceToken) error {
+					CommitFenceFn: func(context.Context, typeid.ID, int64, aggregatestore.FenceToken) error {
 						return nil
 					},
 					PutAggregateFn: func(context.Context, typeid.ID, aggregatestore.CachedAggregate[mockEntity]) error {
@@ -442,7 +442,7 @@ func TestCachedStore_Save(t *testing.T) {
 					ReserveFenceFn: func(context.Context, typeid.ID, int64, aggregatestore.FenceToken) error {
 						return nil
 					},
-					ReleaseFenceFn: func(context.Context, typeid.ID, aggregatestore.FenceToken) error {
+					ReleaseFenceFn: func(context.Context, typeid.ID, int64, aggregatestore.FenceToken) error {
 						return nil
 					},
 				}
@@ -518,7 +518,7 @@ func TestCachedStore_Save(t *testing.T) {
 					ReserveFenceFn: func(context.Context, typeid.ID, int64, aggregatestore.FenceToken) error {
 						return nil
 					},
-					CommitFenceFn: func(context.Context, typeid.ID, aggregatestore.FenceToken) error {
+					CommitFenceFn: func(context.Context, typeid.ID, int64, aggregatestore.FenceToken) error {
 						return nil
 					},
 					PutAggregateFn: func(context.Context, typeid.ID, aggregatestore.CachedAggregate[mockEntity]) error {
@@ -707,12 +707,12 @@ func (c *gatedPutCache[S]) ReserveFence(ctx context.Context, id typeid.ID, versi
 	return c.inner.ReserveFence(ctx, id, version, token)
 }
 
-func (c *gatedPutCache[S]) CommitFence(ctx context.Context, id typeid.ID, token aggregatestore.FenceToken) error {
-	return c.inner.CommitFence(ctx, id, token)
+func (c *gatedPutCache[S]) CommitFence(ctx context.Context, id typeid.ID, version int64, token aggregatestore.FenceToken) error {
+	return c.inner.CommitFence(ctx, id, version, token)
 }
 
-func (c *gatedPutCache[S]) ReleaseFence(ctx context.Context, id typeid.ID, token aggregatestore.FenceToken) error {
-	return c.inner.ReleaseFence(ctx, id, token)
+func (c *gatedPutCache[S]) ReleaseFence(ctx context.Context, id typeid.ID, version int64, token aggregatestore.FenceToken) error {
+	return c.inner.ReleaseFence(ctx, id, version, token)
 }
 
 // TestCachedStore_ConcurrentSavesCannotRegressTheCache pins cache publication
@@ -1828,12 +1828,12 @@ type ctxBoundReleaseCache[S any] struct {
 	aggregatestore.AggregateCache[S]
 }
 
-func (c *ctxBoundReleaseCache[S]) ReleaseFence(ctx context.Context, id typeid.ID, token aggregatestore.FenceToken) error {
+func (c *ctxBoundReleaseCache[S]) ReleaseFence(ctx context.Context, id typeid.ID, version int64, token aggregatestore.FenceToken) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
 
-	return c.AggregateCache.ReleaseFence(ctx, id, token)
+	return c.AggregateCache.ReleaseFence(ctx, id, version, token)
 }
 
 // TestCachedStore_CanceledCallerCannotLeakTheReservation pins fence
@@ -1932,7 +1932,7 @@ func TestCachedStore_FenceSettlementIsDetachedAndBounded(t *testing.T) {
 		ReserveFenceFn: func(context.Context, typeid.ID, int64, aggregatestore.FenceToken) error {
 			return nil
 		},
-		CommitFenceFn: func(ctx context.Context, _ typeid.ID, _ aggregatestore.FenceToken) error {
+		CommitFenceFn: func(ctx context.Context, _ typeid.ID, _ int64, _ aggregatestore.FenceToken) error {
 			commitCalled = true
 			commitCtxErr = ctx.Err()
 			_, commitBounded = ctx.Deadline()
@@ -1999,7 +1999,7 @@ func TestCachedStore_MintsAUniqueFenceTokenPerSave(t *testing.T) {
 			tokens = append(tokens, token)
 			return nil
 		},
-		CommitFenceFn: func(context.Context, typeid.ID, aggregatestore.FenceToken) error {
+		CommitFenceFn: func(context.Context, typeid.ID, int64, aggregatestore.FenceToken) error {
 			return nil
 		},
 		PutAggregateFn: func(context.Context, typeid.ID, aggregatestore.CachedAggregate[mockEntity]) error {
@@ -2646,5 +2646,310 @@ func TestCachedStore_LoadIsNotStrandedByTheCache(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("load stranded in its miss publication after the caller canceled")
+	}
+}
+
+// errForeignMarkerHook is a pre-save hook failure that happens to contain
+// ErrEventsAppended — a hook propagating a foreign save's post-append error.
+var errForeignMarkerHook = fmt.Errorf("recording audit trail: %w", aggregatestore.ErrEventsAppended)
+
+// TestCachedStore_ForeignMarkerCannotCommitTheFence pins outcome resolution
+// against contradictory marker trees: a pre-save hook error containing
+// ErrEventsAppended matches both sentinels under errors.Is once HookableStore
+// marks it ErrNoEventsAppended, but it must resolve to the outermost marker —
+// nothing was appended — so the fence is released, not committed for an
+// append that never ran.
+func TestCachedStore_ForeignMarkerCannotCommitTheFence(t *testing.T) {
+	t.Parallel()
+
+	eventStore, err := memory.NewEventStore()
+	if err != nil {
+		t.Fatalf("creating event store: %v", err)
+	}
+
+	base, err := aggregatestore.New(eventStore, "account", newAccount,
+		aggregatestore.WithEventTypes[account](fundsDeposited{}, fundsWithdrawn{}))
+	if err != nil {
+		t.Fatalf("creating event sourced store: %v", err)
+	}
+
+	hookable, err := aggregatestore.NewHookableStore[account](base)
+	if err != nil {
+		t.Fatalf("creating hookable store: %v", err)
+	}
+
+	armed := false
+	hookable.BeforeSave(func(context.Context, *aggregatestore.Aggregate[account]) error {
+		if !armed {
+			return nil
+		}
+		armed = false
+		return errForeignMarkerHook
+	})
+
+	mem := aggregatestore.NewMemoryAggregateCache[account]()
+	cached, err := aggregatestore.NewCachedStore[account](hookable, mem)
+	if err != nil {
+		t.Fatalf("creating cached store: %v", err)
+	}
+
+	id := uuid.Must(uuid.NewV4())
+	seedOne(t, cached, id)
+
+	aggregate, err := base.Load(t.Context(), id, nil)
+	if err != nil {
+		t.Fatalf("loading: %v", err)
+	}
+	aggregate.Append(fundsDeposited{Amount: 5})
+	armed = true
+
+	saveErr := cached.Save(t.Context(), aggregate, nil)
+	if saveErr == nil {
+		t.Fatal("want the pre-save hook failure surfacing an error, got nil")
+	}
+
+	// The tree is contradictory under errors.Is — exactly why deciders must
+	// resolve instead.
+	if !errors.Is(saveErr, aggregatestore.ErrEventsAppended) || !errors.Is(saveErr, aggregatestore.ErrNoEventsAppended) {
+		t.Fatalf("want the contradictory tree this test exists for, got %v", saveErr)
+	}
+	if got := aggregatestore.SaveOutcome(saveErr); got != aggregatestore.AppendOutcomeNothingAppended {
+		t.Fatalf("want the outermost marker resolved (nothing appended), got %v", got)
+	}
+
+	// Nothing was appended: durable truth is version 1, and its
+	// republication must be admitted after the released reservation.
+	loaded, err := cached.Load(t.Context(), id, nil)
+	if err != nil {
+		t.Fatalf("loading through the cache: %v", err)
+	}
+	if loaded.Version() != 1 {
+		t.Fatalf("want durable version 1 served, got %d", loaded.Version())
+	}
+
+	entry, err := mem.GetAggregate(t.Context(), loaded.ID())
+	if err != nil {
+		t.Fatalf("reading the backing cache entry: %v", err)
+	}
+	if entry == nil || entry.Version != 1 {
+		t.Errorf("want the version-1 republication admitted after the refused save, got %+v (a fence was committed for an append that never ran)", entry)
+	}
+}
+
+// delayedReserveCache swallows a reservation: the caller sees an error, the
+// backend sees nothing — yet. The request is still in flight and can land
+// after the caller has already withdrawn.
+type delayedReserveCache[S any] struct {
+	aggregatestore.AggregateCache[S]
+	reservedID      typeid.ID
+	reservedVersion int64
+	reservedToken   aggregatestore.FenceToken
+}
+
+func (c *delayedReserveCache[S]) ReserveFence(_ context.Context, id typeid.ID, version int64, token aggregatestore.FenceToken) error {
+	c.reservedID, c.reservedVersion, c.reservedToken = id, version, token
+	return errors.New("reserve response lost")
+}
+
+// TestCachedStore_WithdrawnReservationCannotBeResurrected pins the terminal
+// half of settlement: the withdrawal of an ambiguously-failed reserve records
+// the token settled, so the reserve request landing afterward — a delayed
+// delivery — is refused instead of placing a reservation nobody will ever
+// settle.
+func TestCachedStore_WithdrawnReservationCannotBeResurrected(t *testing.T) {
+	t.Parallel()
+
+	eventStore, err := memory.NewEventStore()
+	if err != nil {
+		t.Fatalf("creating event store: %v", err)
+	}
+
+	base, err := aggregatestore.New(eventStore, "account", newAccount,
+		aggregatestore.WithEventTypes[account](fundsDeposited{}, fundsWithdrawn{}))
+	if err != nil {
+		t.Fatalf("creating event sourced store: %v", err)
+	}
+
+	mem := aggregatestore.NewMemoryAggregateCache[account]()
+	wrapper := &delayedReserveCache[account]{AggregateCache: mem}
+
+	cached, err := aggregatestore.NewCachedStore[account](base, wrapper)
+	if err != nil {
+		t.Fatalf("creating cached store: %v", err)
+	}
+
+	// Seed durable version 1 without touching the cache.
+	id := uuid.Must(uuid.NewV4())
+	seed := base.New(id)
+	seed.Append(fundsDeposited{Amount: 10})
+	if err := base.Save(t.Context(), seed, nil); err != nil {
+		t.Fatalf("seeding: %v", err)
+	}
+
+	aggregate, err := base.Load(t.Context(), id, nil)
+	if err != nil {
+		t.Fatalf("loading: %v", err)
+	}
+	aggregate.Append(fundsDeposited{Amount: 5})
+
+	if saveErr := cached.Save(t.Context(), aggregate, nil); !errors.Is(saveErr, aggregatestore.ErrNoEventsAppended) {
+		t.Fatalf("want the save refused with nothing appended, got %v", saveErr)
+	}
+
+	// The delayed reserve request lands after the withdrawal completed: the
+	// settled reservation must not return to pending.
+	lateErr := mem.ReserveFence(t.Context(), wrapper.reservedID, wrapper.reservedVersion, wrapper.reservedToken)
+	if !errors.Is(lateErr, aggregatestore.ErrFenceReservationRefused) {
+		t.Errorf("want the delayed reserve delivery refused, got %v", lateErr)
+	}
+
+	loaded, err := cached.Load(t.Context(), id, nil)
+	if err != nil {
+		t.Fatalf("loading through the cache: %v", err)
+	}
+	if loaded.Version() != 1 {
+		t.Fatalf("want durable version 1 served, got %d", loaded.Version())
+	}
+
+	entry, err := mem.GetAggregate(t.Context(), loaded.ID())
+	if err != nil {
+		t.Fatalf("reading the backing cache entry: %v", err)
+	}
+	if entry == nil || entry.Version != 1 {
+		t.Errorf("want the version-1 republication admitted, got %+v (the settled reservation returned to pending)", entry)
+	}
+}
+
+// collidingTokenCache rewrites every fence token to one fixed token before
+// delegating, forcing the documented token/version conflict at the backend.
+type collidingTokenCache[S any] struct {
+	aggregatestore.AggregateCache[S]
+}
+
+const collidingToken = aggregatestore.FenceToken("collision")
+
+func (c *collidingTokenCache[S]) ReserveFence(ctx context.Context, id typeid.ID, version int64, _ aggregatestore.FenceToken) error {
+	return c.AggregateCache.ReserveFence(ctx, id, version, collidingToken)
+}
+
+func (c *collidingTokenCache[S]) CommitFence(ctx context.Context, id typeid.ID, version int64, _ aggregatestore.FenceToken) error {
+	return c.AggregateCache.CommitFence(ctx, id, version, collidingToken)
+}
+
+func (c *collidingTokenCache[S]) ReleaseFence(ctx context.Context, id typeid.ID, version int64, _ aggregatestore.FenceToken) error {
+	return c.AggregateCache.ReleaseFence(ctx, id, version, collidingToken)
+}
+
+// TestCachedStore_ConflictRefusalLeavesForeignReservationStanding pins the
+// refusal contract: a reserve refused for a token/version conflict placed
+// nothing, so the save's withdrawal must not run — releasing by token there
+// would settle the conflicting pre-existing reservation, another save's
+// floor, and re-admit publications beneath it.
+func TestCachedStore_ConflictRefusalLeavesForeignReservationStanding(t *testing.T) {
+	t.Parallel()
+
+	eventStore, err := memory.NewEventStore()
+	if err != nil {
+		t.Fatalf("creating event store: %v", err)
+	}
+
+	base, err := aggregatestore.New(eventStore, "account", newAccount,
+		aggregatestore.WithEventTypes[account](fundsDeposited{}, fundsWithdrawn{}))
+	if err != nil {
+		t.Fatalf("creating event sourced store: %v", err)
+	}
+
+	mem := aggregatestore.NewMemoryAggregateCache[account]()
+	wrapper := &collidingTokenCache[account]{AggregateCache: mem}
+
+	cached, err := aggregatestore.NewCachedStore[account](base, wrapper)
+	if err != nil {
+		t.Fatalf("creating cached store: %v", err)
+	}
+
+	// Seed durable version 1 without touching the cache.
+	id := uuid.Must(uuid.NewV4())
+	seed := base.New(id)
+	seed.Append(fundsDeposited{Amount: 10})
+	if err := base.Save(t.Context(), seed, nil); err != nil {
+		t.Fatalf("seeding: %v", err)
+	}
+	aggregateID := typeid.New("account", id)
+
+	// An outstanding reservation at version 10 — another in-flight save's
+	// floor — held under the very token the wrapper collides with.
+	if err := mem.ReserveFence(t.Context(), aggregateID, 10, collidingToken); err != nil {
+		t.Fatalf("placing the pre-existing reservation: %v", err)
+	}
+
+	aggregate, err := base.Load(t.Context(), id, nil)
+	if err != nil {
+		t.Fatalf("loading: %v", err)
+	}
+	aggregate.Append(fundsDeposited{Amount: 5})
+
+	saveErr := cached.Save(t.Context(), aggregate, nil)
+	if !errors.Is(saveErr, aggregatestore.ErrNoEventsAppended) || !errors.Is(saveErr, aggregatestore.ErrFenceReservationRefused) {
+		t.Fatalf("want the save refused on the reservation conflict, got %v", saveErr)
+	}
+
+	// The version-10 floor still stands: a publication below it stays
+	// refused.
+	if err := mem.PutAggregate(t.Context(), aggregateID, aggregatestore.CachedAggregate[account]{
+		State:   account{Balance: 99},
+		Version: 5,
+	}); err != nil {
+		t.Fatalf("publication below the reservation: %v", err)
+	}
+
+	entry, err := mem.GetAggregate(t.Context(), aggregateID)
+	if err != nil {
+		t.Fatalf("reading the backing cache entry: %v", err)
+	}
+	if entry != nil {
+		t.Errorf("want the version-5 publication refused by the standing version-10 reservation, got %+v (the conflict withdrawal released a foreign reservation)", entry)
+	}
+}
+
+// TestCachedStore_RefusedReservationWithdrawsNothing pins the first layer of
+// the refusal contract: a reserve error wrapping ErrFenceReservationRefused
+// guarantees nothing was placed, so the save is refused without any
+// settlement call — there is nothing to withdraw, and a release aimed at the
+// refusing backend could only be aimed at someone else's reservation. (The
+// second layer, version-addressed settlement, independently protects the
+// conflicting reservation even from a caller that withdraws anyway.)
+func TestCachedStore_RefusedReservationWithdrawsNothing(t *testing.T) {
+	t.Parallel()
+
+	settlements := 0
+	cache := &mockCache[mockEntity]{
+		ReserveFenceFn: func(context.Context, typeid.ID, int64, aggregatestore.FenceToken) error {
+			return fmt.Errorf("%w: token collides", aggregatestore.ErrFenceReservationRefused)
+		},
+		ReleaseFenceFn: func(context.Context, typeid.ID, int64, aggregatestore.FenceToken) error {
+			settlements++
+			return nil
+		},
+		CommitFenceFn: func(context.Context, typeid.ID, int64, aggregatestore.FenceToken) error {
+			settlements++
+			return nil
+		},
+	}
+
+	store, err := aggregatestore.NewCachedStore[mockEntity](&mockAggregateStore[mockEntity]{}, cache)
+	if err != nil {
+		t.Fatalf("creating cached store: %v", err)
+	}
+
+	aggregate := newMockAggregate(uuid.Must(uuid.NewV4()), 1)
+	aggregate.Append(mockEntityEventA{})
+
+	saveErr := store.Save(t.Context(), aggregate, nil)
+	if !errors.Is(saveErr, aggregatestore.ErrNoEventsAppended) || !errors.Is(saveErr, aggregatestore.ErrFenceReservationRefused) {
+		t.Fatalf("want the save refused with nothing appended on the refusal, got %v", saveErr)
+	}
+
+	if settlements != 0 {
+		t.Errorf("want no settlement after a refused reservation, got %d calls", settlements)
 	}
 }

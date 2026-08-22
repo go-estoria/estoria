@@ -137,7 +137,8 @@ func NewOrchestrator(config Config, opts ...OrchestratorOption) (*Orchestrator, 
 // flight; two concurrent Begins conflict on the stream, and the loser's
 // save reports a version mismatch.
 //
-// An error carrying aggregatestore.ErrEventsAppended means the admission was
+// An error resolving to aggregatestore.ErrEventsAppended (see
+// aggregatestore.SaveOutcome) means the admission was
 // durably recorded even though the save could not observe it; Resume the
 // projection by name to obtain a usable handle.
 func (o *Orchestrator) Begin(ctx context.Context, name, reason string) (*Rebuild, error) {
@@ -173,7 +174,7 @@ func (o *Orchestrator) Begin(ctx context.Context, name, reason string) (*Rebuild
 
 	if err := o.authority.Save(ctx, aggregate, nil); err != nil {
 		// Discard the failed admission so it cannot ride along with a later
-		// save. When the error carries ErrEventsAppended the admission is
+		// save. When the error resolves to ErrEventsAppended the admission is
 		// durable regardless, and resuming by name observes it.
 		aggregate.DiscardUnsavedEvents()
 
@@ -263,7 +264,7 @@ func (o *Orchestrator) SetRetirementPolicy(ctx context.Context, name string, cha
 	})
 
 	if err := o.authority.Save(ctx, aggregate, nil); err != nil {
-		if errors.Is(err, aggregatestore.ErrEventsAppended) {
+		if aggregatestore.SaveOutcome(err) == aggregatestore.AppendOutcomeAppended {
 			return fmt.Errorf("retirement policy recorded, but this view is stale; reload before issuing further commands: %w", err)
 		}
 

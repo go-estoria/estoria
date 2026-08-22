@@ -2,7 +2,9 @@ package aggregatestore_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"testing"
 
 	"github.com/go-estoria/estoria/aggregatestore"
 	"github.com/go-estoria/estoria/typeid"
@@ -79,4 +81,65 @@ func (e mockEntity) EntityID() typeid.ID {
 // from the aggregate type name and the UUID, the state from the factory, at a version.
 func newMockAggregate(id uuid.UUID, version int64) *aggregatestore.Aggregate[mockEntity] {
 	return aggregatestore.NewAggregateForTest(typeid.New("mockentity", id), newMockEntity(id), version)
+}
+
+// TestSaveOutcome pins outcome resolution: one answer per error, outermost
+// marker first, contradictions to unknown.
+func TestSaveOutcome(t *testing.T) {
+	t.Parallel()
+
+	for _, tt := range []struct {
+		name string
+		err  error
+		want aggregatestore.AppendOutcome
+	}{
+		{name: "nil vouches for nothing", err: nil, want: aggregatestore.AppendOutcomeUnknown},
+		{name: "an unmarked error vouches for nothing", err: errors.New("connection reset"), want: aggregatestore.AppendOutcomeUnknown},
+		{name: "the bare appended sentinel", err: aggregatestore.ErrEventsAppended, want: aggregatestore.AppendOutcomeAppended},
+		{name: "the bare nothing-appended sentinel", err: aggregatestore.ErrNoEventsAppended, want: aggregatestore.AppendOutcomeNothingAppended},
+		{
+			name: "a wrapped marker resolves through any depth",
+			err:  fmt.Errorf("outer: %w", fmt.Errorf("inner: %w", aggregatestore.ErrEventsAppended)),
+			want: aggregatestore.AppendOutcomeAppended,
+		},
+		{
+			name: "agreeing branches resolve to their shared outcome",
+			err:  errors.Join(fmt.Errorf("a: %w", aggregatestore.ErrNoEventsAppended), errors.New("b")),
+			want: aggregatestore.AppendOutcomeNothingAppended,
+		},
+		{
+			name: "contradicting branches at the same depth resolve to unknown",
+			err:  errors.Join(fmt.Errorf("a: %w", aggregatestore.ErrEventsAppended), fmt.Errorf("b: %w", aggregatestore.ErrNoEventsAppended)),
+			want: aggregatestore.AppendOutcomeUnknown,
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			if got := aggregatestore.SaveOutcome(tt.err); got != tt.want {
+				t.Errorf("want %v, got %v", tt.want, got)
+			}
+		})
+	}
+
+	t.Run("a store's own marker shadows a marker inside the cause", func(t *testing.T) {
+		t.Parallel()
+
+		store, err := aggregatestore.NewHookableStore[mockEntity](&mockAggregateStore[mockEntity]{})
+		if err != nil {
+			t.Fatalf("creating hookable store: %v", err)
+		}
+
+		store.BeforeSave(func(context.Context, *aggregatestore.Aggregate[mockEntity]) error {
+			return fmt.Errorf("propagating a foreign failure: %w", aggregatestore.ErrEventsAppended)
+		})
+
+		saveErr := store.Save(t.Context(), newMockAggregate(uuid.Must(uuid.NewV4()), 1), nil)
+		if !errors.Is(saveErr, aggregatestore.ErrEventsAppended) {
+			t.Fatalf("want the buried foreign marker still visible to errors.Is, got %v", saveErr)
+		}
+		if got := aggregatestore.SaveOutcome(saveErr); got != aggregatestore.AppendOutcomeNothingAppended {
+			t.Errorf("want the refusal's own marker to win, got %v", got)
+		}
+	})
 }
