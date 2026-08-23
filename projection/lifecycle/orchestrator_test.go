@@ -6,8 +6,10 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -6661,5 +6663,579 @@ func TestRun_AmbiguousPromotionCedesToAbandon(t *testing.T) {
 
 	if got := r.State().Attempt.Phase; got != lifecycle.PhaseNone {
 		t.Errorf("want the attempt slot vacant after the abandon, got %s", got)
+	}
+}
+
+// pausingOutcomeError blocks its Nth Unwrap call until released, so a test
+// can interleave work into the window where a save error's outcome is being
+// resolved outside the handle lock.
+type pausingOutcomeError struct {
+	err     error
+	calls   *atomic.Int32
+	pauseAt int32
+	paused  chan struct{}
+	resume  chan struct{}
+}
+
+func (e *pausingOutcomeError) Error() string { return e.err.Error() }
+
+func (e *pausingOutcomeError) Unwrap() error {
+	if e.calls.Add(1) == e.pauseAt {
+		close(e.paused)
+		<-e.resume
+	}
+
+	return e.err
+}
+
+// pausingPromotedWriter lands the append recording Promoted, once, then
+// returns the configured lost-response error in place of the result.
+type pausingPromotedWriter struct {
+	eventstore.Store
+	mu    sync.Mutex
+	fired bool
+	errFn func() error
+}
+
+func (w *pausingPromotedWriter) AppendStream(ctx context.Context, streamID typeid.ID, events []*eventstore.WritableEvent, opts eventstore.AppendStreamOptions) ([]*eventstore.Event, error) {
+	written, err := w.Store.AppendStream(ctx, streamID, events, opts)
+	if err != nil {
+		return written, err
+	}
+
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	if w.fired {
+		return written, nil
+	}
+
+	for _, event := range events {
+		if event.Type == (lifecycle.Promoted{}).EventType() {
+			w.fired = true
+			return nil, w.errFn()
+		}
+	}
+
+	return written, nil
+}
+
+// countingVersionedStore records the Count bound of every versioned read of
+// the lifecycle stream — exactly the slots reconciliation folds to.
+type countingVersionedStore struct {
+	eventstore.Store
+	mu     sync.Mutex
+	counts []int64
+}
+
+func (s *countingVersionedStore) ReadStream(ctx context.Context, streamID typeid.ID, opts eventstore.ReadStreamOptions) (eventstore.StreamIterator, error) {
+	if streamID == ordersLifecycleStreamID() && opts.Count > 0 {
+		s.mu.Lock()
+		s.counts = append(s.counts, opts.Count)
+		s.mu.Unlock()
+	}
+
+	return s.Store.ReadStream(ctx, streamID, opts)
+}
+
+func (s *countingVersionedStore) versionedReads() []int64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return slices.Clone(s.counts)
+}
+
+// streamVersionOfType returns the stream version of the first lifecycle
+// event of the given type.
+func streamVersionOfType(t *testing.T, events *esmemory.EventStore, eventType string) int64 {
+	t.Helper()
+
+	iter, err := events.ReadStream(t.Context(), ordersLifecycleStreamID(), eventstore.ReadStreamOptions{})
+	if err != nil {
+		t.Fatalf("reading lifecycle stream: %v", err)
+	}
+	defer iter.Close(t.Context())
+
+	for {
+		event, err := iter.Next(t.Context())
+		if err != nil {
+			t.Fatalf("no %s event recorded", eventType)
+		}
+
+		if event.ID.Type == eventType {
+			return event.StreamVersion
+		}
+	}
+}
+
+// TestRun_ReconcileFoldsTheContendedSlot pins where promotion reconciliation
+// gets its slot: from the append itself, not from handle state that may have
+// moved since. While the lost append's outcome is being resolved, a policy
+// transition advances the stream and the head reconcile loop installs the
+// newer view — and the reconcile fold must still be bounded at the Promoted
+// event's own version, prove the promotion, and keep the run tailing.
+func TestRun_ReconcileFoldsTheContendedSlot(t *testing.T) {
+	t.Parallel()
+
+	events := newEventStore(t)
+
+	paused := make(chan struct{})
+	resume := make(chan struct{})
+	calls := &atomic.Int32{}
+
+	writer := &pausingPromotedWriter{Store: events, errFn: func() error {
+		return &pausingOutcomeError{
+			err:     errors.New("append response lost"),
+			calls:   calls,
+			pauseAt: 4,
+			paused:  paused,
+			resume:  resume,
+		}
+	}}
+	reader := &countingVersionedStore{Store: writer}
+	h := buildHarnessWithLifecycleEvents(t, events, reader, lifecycle.WithAutoPromote(true))
+	h.appendDomain(3)
+
+	r := h.begin("promotion slot arbitration")
+	cancel, done := runAsync(t, r)
+
+	// The promotion lands durably, its response is lost, and resolution of
+	// the save's outcome pauses outside the handle lock.
+	select {
+	case <-paused:
+	case <-time.After(waitTimeout):
+		t.Fatal("timed out waiting for outcome resolution to pause")
+	}
+
+	// While resolution is paused, an audited policy transition advances the
+	// lifecycle stream, and the head reconcile loop installs the newer view
+	// into the handle.
+	if err := h.orchestrator.SetRetirementPolicy(t.Context(), "orders", lifecycle.RetirementPolicyChange{
+		Unwitnessed: true, Actor: "test", Reason: "advance the stream",
+	}); err != nil {
+		t.Fatalf("setting retirement policy: %v", err)
+	}
+
+	waitFor(t, func() bool { return r.State().RetirementPolicy.Generation == 1 })
+
+	close(resume)
+
+	// The reconcile fold is bounded at the slot the promotion contended for
+	// — the Promoted event's own version — and proves the promotion.
+	waitFor(t, func() bool { return len(reader.versionedReads()) > 0 })
+
+	promotedAt := streamVersionOfType(t, events, (lifecycle.Promoted{}).EventType())
+	if got := reader.versionedReads()[0]; got != promotedAt {
+		t.Errorf("want the reconcile fold bounded at the promotion's slot %d, got %d", promotedAt, got)
+	}
+
+	waitPhase(t, r, lifecycle.PhasePromoted)
+
+	if got := countEventsOfType(t, events, (lifecycle.Promoted{}).EventType()); got != 1 {
+		t.Errorf("want exactly one Promoted event recorded, got %d", got)
+	}
+
+	select {
+	case err := <-done:
+		t.Fatalf("want the run still tailing after the reconciled promotion, got exit: %v", err)
+	default:
+	}
+
+	cancel()
+
+	if err := waitDone(t, done); !errors.Is(err, context.Canceled) {
+		t.Errorf("want the tailing run to report cancellation, got %v", err)
+	}
+}
+
+// parkAfterVersionedStore parks the first unversioned lifecycle read that
+// begins after a versioned lifecycle read has been served, holding the
+// stream's state as of park time and serving exactly that snapshot once
+// released.
+type parkAfterVersionedStore struct {
+	eventstore.Store
+	mu        sync.Mutex
+	versioned bool
+	done      bool
+	parked    chan struct{}
+	release   chan struct{}
+}
+
+func (s *parkAfterVersionedStore) ReadStream(ctx context.Context, streamID typeid.ID, opts eventstore.ReadStreamOptions) (eventstore.StreamIterator, error) {
+	if streamID != ordersLifecycleStreamID() {
+		return s.Store.ReadStream(ctx, streamID, opts)
+	}
+
+	s.mu.Lock()
+	if opts.Count > 0 {
+		s.versioned = true
+		s.mu.Unlock()
+
+		return s.Store.ReadStream(ctx, streamID, opts)
+	}
+
+	park := s.versioned && !s.done
+	if park {
+		s.done = true
+	}
+	s.mu.Unlock()
+
+	if !park {
+		return s.Store.ReadStream(ctx, streamID, opts)
+	}
+
+	// Snapshot the stream as of now, then hold the fold until released.
+	iter, err := s.Store.ReadStream(ctx, streamID, opts)
+	if err != nil {
+		return nil, err
+	}
+
+	var snapshot []*eventstore.Event
+
+	for {
+		event, err := iter.Next(ctx)
+		if errors.Is(err, eventstore.ErrEndOfEventStream) {
+			break
+		}
+
+		if err != nil {
+			return nil, err
+		}
+
+		snapshot = append(snapshot, event)
+	}
+
+	_ = iter.Close(ctx)
+
+	close(s.parked)
+	select {
+	case <-s.release:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+
+	return &sliceIterator{events: snapshot}, nil
+}
+
+type sliceIterator struct {
+	events []*eventstore.Event
+}
+
+func (i *sliceIterator) Next(context.Context) (*eventstore.Event, error) {
+	if len(i.events) == 0 {
+		return nil, eventstore.ErrEndOfEventStream
+	}
+
+	event := i.events[0]
+	i.events = i.events[1:]
+
+	return event, nil
+}
+
+func (i *sliceIterator) Close(context.Context) error { return nil }
+
+// TestRun_ReconciledObservationNeverRegressesTheHandle pins the install
+// guard on observing a reconciled promotion: the full fold runs outside the
+// lock, and a retirement completing while it is parked leaves the handle
+// holding newer state than the fold — the stale observation must not
+// overwrite it.
+func TestRun_ReconciledObservationNeverRegressesTheHandle(t *testing.T) {
+	t.Parallel()
+
+	events := newEventStore(t)
+	writer := &ambiguousPromotedWriter{Store: events}
+	parker := &parkAfterVersionedStore{Store: writer, parked: make(chan struct{}), release: make(chan struct{})}
+	h := buildHarnessWithLifecycleEvents(t, events, parker,
+		lifecycle.WithAutoPromote(true),
+		lifecycle.WithReconcileInterval(time.Hour),
+	)
+	h.appendDomain(3)
+
+	r := h.begin("observation racing a retirement")
+	cancel, done := runAsync(t, r)
+
+	// The slot fold proves the durable promotion; the observation fold that
+	// follows parks with the stream as of the promotion.
+	select {
+	case <-parker.parked:
+	case <-time.After(waitTimeout):
+		t.Fatal("timed out waiting for the observation fold to park")
+	}
+
+	// Retirement completes durably while the observation is parked: the
+	// attempt slot is vacated, and the handle observes it.
+	if err := r.Retire(t.Context()); err != nil {
+		t.Fatalf("retiring while the observation fold is parked: %v", err)
+	}
+
+	if got := r.State().Attempt.Phase; got != lifecycle.PhaseNone {
+		t.Fatalf("want the attempt vacated after retirement, got %s", got)
+	}
+
+	close(parker.release)
+
+	// The released observation reflects only the promotion; installing it
+	// would regress the handle behind durable history.
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if got := r.State().Attempt.Phase; got == lifecycle.PhasePromoted {
+			t.Fatal("handle state regressed to PhasePromoted after durable retirement")
+		}
+
+		time.Sleep(2 * time.Millisecond)
+	}
+
+	cancel()
+
+	if err := waitDone(t, done); !errors.Is(err, context.Canceled) {
+		t.Errorf("want the tailing run to report cancellation, got %v", err)
+	}
+}
+
+// TestRun_AbandonWakesParkedReconciliation pins promotion reconciliation's
+// wake condition: every stop that must end the run stops and joins the
+// processor, and the exit wakes a reconciliation parked on its interval —
+// Run winds down promptly no matter how long the interval is.
+func TestRun_AbandonWakesParkedReconciliation(t *testing.T) {
+	t.Parallel()
+
+	events := newEventStore(t)
+	writer := &droppingPromotedWriter{Store: events, drops: -1}
+	h := buildHarnessWithLifecycleEvents(t, events, writer,
+		lifecycle.WithAutoPromote(true),
+		lifecycle.WithReconcileInterval(time.Hour),
+	)
+	h.appendDomain(3)
+
+	r := h.begin("abandon during parked reconciliation")
+	_, done := runAsync(t, r)
+
+	// Reconciliation is live — the entry append and the first retry both
+	// swallowed — and now waits out its interval.
+	waitFor(t, func() bool { return writer.attemptCount() >= 2 })
+
+	if err := r.Abandon(t.Context(), "give up on the ambiguous promotion"); err != nil {
+		t.Fatalf("abandoning: %v", err)
+	}
+
+	if err := waitDone(t, done); err != nil {
+		t.Errorf("want a prompt clean wind-down after the abandon, got %v", err)
+	}
+}
+
+// TestRun_ParkedReconciliationReportsCancellation pins what a canceled run
+// reports from inside promotion reconciliation: the context's error, on
+// every schedule — never the stale lost-append error, whichever side of the
+// exit-order race the cancellation lands on.
+func TestRun_ParkedReconciliationReportsCancellation(t *testing.T) {
+	t.Parallel()
+
+	events := newEventStore(t)
+	writer := &droppingPromotedWriter{Store: events, drops: -1}
+	h := buildHarnessWithLifecycleEvents(t, events, writer,
+		lifecycle.WithAutoPromote(true),
+		lifecycle.WithReconcileInterval(time.Hour),
+	)
+	h.appendDomain(3)
+
+	r := h.begin("cancellation during parked reconciliation")
+	cancel, done := runAsync(t, r)
+
+	waitFor(t, func() bool { return writer.attemptCount() >= 2 })
+
+	cancel()
+
+	err := waitDone(t, done)
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("want cancellation to surface the context's error, got %v", err)
+	}
+
+	if err != nil && strings.Contains(err.Error(), "append response lost") {
+		t.Errorf("want the canceled run not to surface the stale lost-append error, got %v", err)
+	}
+}
+
+// headBlockingStore, once armed, blocks unversioned reads of the lifecycle
+// stream until their context ends, and counts the reads it blocked.
+type headBlockingStore struct {
+	eventstore.Store
+	mu      sync.Mutex
+	armed   bool
+	blocked int
+}
+
+func (s *headBlockingStore) arm() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.armed = true
+}
+
+func (s *headBlockingStore) blockedCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return s.blocked
+}
+
+func (s *headBlockingStore) ReadStream(ctx context.Context, streamID typeid.ID, opts eventstore.ReadStreamOptions) (eventstore.StreamIterator, error) {
+	s.mu.Lock()
+	block := s.armed && streamID == ordersLifecycleStreamID() && opts.Count == 0
+	if block {
+		s.blocked++
+	}
+	s.mu.Unlock()
+
+	if block {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+
+	return s.Store.ReadStream(ctx, streamID, opts)
+}
+
+// TestRun_ForeignSlotWinnerWindsDownClean pins the verdict a foreign winner
+// in the contested slot renders: an abandonment ending the attempt is a
+// terminal state observed — the run winds down clean, through the same
+// slot-defeat classification as any other lost append, even with ordinary
+// head reconciliation unable to observe it.
+func TestRun_ForeignSlotWinnerWindsDownClean(t *testing.T) {
+	t.Parallel()
+
+	events := newEventStore(t)
+	writer := &droppingPromotedWriter{Store: events, drops: -1}
+	blocker := &headBlockingStore{Store: writer}
+	h := buildHarnessWithLifecycleEvents(t, events, blocker, lifecycle.WithAutoPromote(true))
+	h.appendDomain(3)
+
+	r := h.begin("foreign abandonment in the contested slot")
+	_, done := runAsync(t, r)
+
+	// Promotion reconciliation is live; ordinary head reconciliation is then
+	// blocked, so only the slot fold can observe what follows.
+	waitFor(t, func() bool { return writer.attemptCount() >= 1 })
+	blocker.arm()
+	waitFor(t, func() bool { return blocker.blockedCount() >= 1 })
+
+	// A foreign abandonment durably wins the contested slot.
+	abandoned, err := json.Marshal(lifecycle.Abandoned{Cause: "operator gave up elsewhere"})
+	if err != nil {
+		t.Fatalf("marshaling the abandonment: %v", err)
+	}
+
+	if _, err := events.AppendStream(t.Context(), ordersLifecycleStreamID(), []*eventstore.WritableEvent{{
+		Type: lifecycle.Abandoned{}.EventType(), Data: abandoned, DataContentType: "application/json",
+	}}, eventstore.AppendStreamOptions{}); err != nil {
+		t.Fatalf("appending the foreign abandonment: %v", err)
+	}
+
+	// The attempt ended in the exact slot the promotion contended for: the
+	// run classifies the terminal state and winds down clean.
+	if err := waitDone(t, done); err != nil {
+		t.Errorf("want a clean wind-down after the foreign abandonment won the slot, got %v", err)
+	}
+
+	if got := r.State().Attempt.Phase; got != lifecycle.PhaseNone {
+		t.Errorf("want the attempt slot vacant in the handle's view, got %s", got)
+	}
+}
+
+// TestRun_ForeignClaimInSlotIsDisplacement pins the other verdict a foreign
+// slot winner can render: a competing runner's claim over the same attempt
+// is displacement, surfaced as ErrRunnerDisplaced — not the stale
+// lost-append error.
+func TestRun_ForeignClaimInSlotIsDisplacement(t *testing.T) {
+	t.Parallel()
+
+	events := newEventStore(t)
+	writer := &droppingPromotedWriter{Store: events, drops: -1}
+	blocker := &headBlockingStore{Store: writer}
+	h := buildHarnessWithLifecycleEvents(t, events, blocker, lifecycle.WithAutoPromote(true))
+	h.appendDomain(3)
+
+	r := h.begin("foreign claim in the contested slot")
+	_, done := runAsync(t, r)
+
+	waitFor(t, func() bool { return writer.attemptCount() >= 1 })
+	blocker.arm()
+	waitFor(t, func() bool { return blocker.blockedCount() >= 1 })
+
+	// A competing runner's claim over the same attempt durably wins the
+	// contested slot.
+	claim, err := json.Marshal(lifecycle.RunnerClaimed{
+		Attempt: r.State().Attempt.ID,
+		Runner:  uuid.Must(uuid.NewV4()),
+		At:      time.Date(2026, 8, 22, 9, 0, 0, 0, time.UTC),
+	})
+	if err != nil {
+		t.Fatalf("marshaling the competing claim: %v", err)
+	}
+
+	if _, err := events.AppendStream(t.Context(), ordersLifecycleStreamID(), []*eventstore.WritableEvent{{
+		Type: lifecycle.RunnerClaimed{}.EventType(), Data: claim, DataContentType: "application/json",
+	}}, eventstore.AppendStreamOptions{}); err != nil {
+		t.Fatalf("appending the competing claim: %v", err)
+	}
+
+	if err := waitDone(t, done); !errors.Is(err, lifecycle.ErrRunnerDisplaced) {
+		t.Errorf("want the foreign claim surfaced as displacement, got %v", err)
+	}
+}
+
+// versionedBlockingStore blocks versioned reads of the lifecycle stream
+// until their context ends, and counts the reads it blocked: the slot fold
+// hangs exactly as a stalled authority would leave it.
+type versionedBlockingStore struct {
+	eventstore.Store
+	mu      sync.Mutex
+	blocked int
+}
+
+func (s *versionedBlockingStore) blockedCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return s.blocked
+}
+
+func (s *versionedBlockingStore) ReadStream(ctx context.Context, streamID typeid.ID, opts eventstore.ReadStreamOptions) (eventstore.StreamIterator, error) {
+	if streamID == ordersLifecycleStreamID() && opts.Count > 0 {
+		s.mu.Lock()
+		s.blocked++
+		s.mu.Unlock()
+
+		<-ctx.Done()
+
+		return nil, ctx.Err()
+	}
+
+	return s.Store.ReadStream(ctx, streamID, opts)
+}
+
+// TestRun_ProcessorExitUnblocksAParkedSlotFold pins the other half of
+// promotion reconciliation's wake condition: its folds run on the same
+// processor-exit-canceled context as its waits, so a fold hung on a stalled
+// authority cannot outlive the processor the reconciliation serves.
+func TestRun_ProcessorExitUnblocksAParkedSlotFold(t *testing.T) {
+	t.Parallel()
+
+	events := newEventStore(t)
+	writer := &droppingPromotedWriter{Store: events, drops: -1}
+	blocker := &versionedBlockingStore{Store: writer}
+	h := buildHarnessWithLifecycleEvents(t, events, blocker, lifecycle.WithAutoPromote(true))
+	h.appendDomain(3)
+
+	r := h.begin("slot fold hung on a stalled authority")
+	_, done := runAsync(t, r)
+
+	// The first reconcile fold is parked on the stalled authority.
+	waitFor(t, func() bool { return blocker.blockedCount() >= 1 })
+
+	if err := r.Abandon(t.Context(), "give up while the fold hangs"); err != nil {
+		t.Fatalf("abandoning: %v", err)
+	}
+
+	if err := waitDone(t, done); err != nil {
+		t.Errorf("want a prompt clean wind-down after the abandon, got %v", err)
 	}
 }

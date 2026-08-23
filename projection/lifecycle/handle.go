@@ -714,6 +714,8 @@ func (r *Rebuild) promoteAfterCatchUp(ctx context.Context, attemptID, runnerID u
 		return true, nil
 	}
 
+	var failed appendError
+
 	switch outcome := aggregatestore.SaveOutcome(err); {
 	case outcome == aggregatestore.AppendOutcomeAppended:
 		// The promotion can be durable even when the save could not observe
@@ -723,8 +725,8 @@ func (r *Rebuild) promoteAfterCatchUp(ctx context.Context, attemptID, runnerID u
 			"projection", r.Name(), "error", err)
 
 		return true, nil
-	case outcome == aggregatestore.AppendOutcomeUnknown && isAppendFailure(err):
-		promoted, lost := r.reconcileUnknownPromotion(ctx, attemptID, err)
+	case outcome == aggregatestore.AppendOutcomeUnknown && errors.As(err, &failed):
+		promoted, lost := r.reconcileUnknownPromotion(ctx, attemptID, runnerID, failed.slot, err)
 		if promoted {
 			return true, nil
 		}
@@ -746,27 +748,47 @@ func (r *Rebuild) promoteAfterCatchUp(ctx context.Context, attemptID, runnerID u
 // reconcileUnknownPromotion resolves an auto-promotion whose append vouched
 // for neither outcome, without stopping the processor: a live projection
 // must not lose its only tail to an error that may be nothing but a lost
-// response. The stream slot the append contended for — one past the
-// certified version — is the authority: a fold reaching the slot shows its
-// winner, and the winner being this attempt's Promoted proves the promotion
-// landed, while any other winner proves it can never land. While the slot
-// is empty nothing is proven — the lost append may still be in flight — so
-// the promotion is retried at the same expected version and the stream
-// arbitrates. It reports promoted=true once the promotion is durably
-// resolved in its favor, installing the observed history in the handle; it
-// reports false only with the loss proven, the run halted by a competing
-// verdict, or the caller's context ended.
-func (r *Rebuild) reconcileUnknownPromotion(ctx context.Context, attemptID uuid.UUID, lost error) (bool, error) {
+// response. The stream slot the append contended for — captured by the
+// append itself, under the lock, because the handle's state can move before
+// reconciliation reads it — is the authority: a fold reaching the slot
+// shows its winner. The winner being this attempt's Promoted proves the
+// promotion landed; any other winner proves it can never land, and renders
+// its verdict through the same slot-defeat logic as any other lost append —
+// an ended attempt is a deliberate wind-down, a competing claim is
+// displacement. While the slot is empty nothing is proven — the lost append
+// may still be in flight — so the promotion is retried at the same expected
+// version and the stream arbitrates.
+//
+// The loop runs on a context canceled when the certifying processor exits:
+// every stop that must end the run stops and joins the processor, so the
+// exit wakes a parked interval wait and unblocks a hung fold, and the
+// wind-down path owns the outcome. The caller's own cancellation reports
+// the context's error — the lost append is stale news by then, and which
+// error surfaces must not depend on scheduling. It reports promoted=true
+// once the promotion is durably resolved in its favor, installing the
+// observed history in the handle.
+func (r *Rebuild) reconcileUnknownPromotion(ctx context.Context, attemptID, runnerID uuid.UUID, slot int64, lost error) (bool, error) {
 	r.mu.Lock()
-	slot := r.aggregate.Version() + 1
+	exited := r.processorExited
 	r.mu.Unlock()
+
+	rctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	go func() {
+		select {
+		case <-exited:
+			cancel()
+		case <-rctx.Done():
+		}
+	}()
 
 	for {
 		if r.reconcileHalted() {
 			return false, lost
 		}
 
-		loaded, err := r.hydrateFresh(ctx, slot)
+		loaded, err := r.hydrateFresh(rctx, slot)
 		switch {
 		case err != nil || checkLifecycleAggregate(loaded, r.name) != nil:
 			// The authority is unreadable; nothing is proven either way.
@@ -774,7 +796,7 @@ func (r *Rebuild) reconcileUnknownPromotion(ctx context.Context, attemptID uuid.
 			// The slot is empty, which proves nothing — the lost append may
 			// still be in flight — so retry at the same expected version and
 			// let the stream arbitrate.
-			switch retryErr := r.Promote(ctx); {
+			switch retryErr := r.Promote(rctx); {
 			case retryErr == nil:
 				return true, nil
 			case aggregatestore.SaveOutcome(retryErr) == aggregatestore.AppendOutcomeAppended:
@@ -793,17 +815,24 @@ func (r *Rebuild) reconcileUnknownPromotion(ctx context.Context, attemptID uuid.
 				// handle. The next fold, or the halt check, resolves it.
 			}
 		case loaded.State().Attempt.ID == attemptID && loaded.State().Attempt.Phase == PhasePromoted:
-			r.observeReconciledPromotion(ctx)
+			r.observeReconciledPromotion(rctx)
 
 			return true, nil
 		default:
 			// A foreign event won the slot the append was version-guarded
-			// to: the promotion can never land. Proven lost.
+			// to: the promotion can never land, and the exact winner renders
+			// the verdict the loss surfaces through.
+			r.recordSlotDefeat(loaded, attemptID, runnerID)
+
 			return false, lost
 		}
 
 		select {
-		case <-ctx.Done():
+		case <-rctx.Done():
+			if ctx.Err() != nil {
+				return false, ctx.Err()
+			}
+
 			return false, lost
 		case <-time.After(r.orchestrator.reconcileInterval):
 		}
@@ -834,14 +863,18 @@ func (r *Rebuild) reconcileHalted() bool {
 // observeReconciledPromotion installs a fresh full fold after reconciliation
 // proved the promotion durable, so the handle observes the transition it
 // could not observe through the save. The certificate is consumed either
-// way — its slot is spent — and a failed fold leaves the handle stale, which
-// later commands repair by refolding at entry.
+// way — its slot is spent. The fold runs outside the lock, so durable
+// history the handle has already observed — a completed retirement, a
+// competing transition — can advance past it while it runs: it installs
+// only when it is at least as new as the handle's view, never regressing
+// the handle behind state it holds. A failed or superseded fold leaves the
+// handle stale, which later commands repair by refolding at entry.
 func (r *Rebuild) observeReconciledPromotion(ctx context.Context) {
 	loaded, err := r.hydrateFresh(ctx, 0)
 
 	r.mu.Lock()
 	r.certificate = nil
-	if err == nil && checkLifecycleAggregate(loaded, r.name) == nil {
+	if err == nil && checkLifecycleAggregate(loaded, r.name) == nil && loaded.Version() >= r.aggregate.Version() {
 		r.aggregate = loaded
 	}
 	r.mu.Unlock()
@@ -1051,21 +1084,12 @@ func (r *Rebuild) claimDefeat(ctx context.Context, base AttemptState, lost error
 // recordLostAppend classifies a lifecycle append this run lost to a version
 // conflict, from the exact event that defeated it — the fold at the slot the
 // append contended for — so the verdict is deterministic no matter what
-// landed on the stream afterward: an ended attempt is a deliberate
-// wind-down, a competing claim is displacement, and any other winner leaves
-// the original error to surface. A loss resolving to ErrEventsAppended is never
+// landed on the stream afterward. A loss resolving to ErrEventsAppended is never
 // classified: the events at the contended slots are this run's own durable
-// append, and the raw error already reports exactly that. The verdict
-// records through the same fields the reconcile loop uses, so exit
-// classification surfaces it uniformly — with explicit precedence between
-// the two observers: a displacement read at the defeated slot upgrades a
-// clean terminal stop the reconcile loop recorded from the head, because the
-// head can already show the end that FOLLOWED the defeating claim, and the
-// verdict belongs to the exact defeat; a stop that carries a cause is never
-// overwritten. The slot fold installs only when it is at least as new as the
-// handle's current view. A load failure — or a fold that never reaches the
-// slot — leaves the verdict unclassified rather than masking the original
-// loss; a slot fold that fails validation is terminal.
+// append, and the raw error already reports exactly that. A load failure —
+// or a fold that never reaches the slot — leaves the verdict unclassified
+// rather than masking the original loss; a fold at the slot renders its
+// verdict through recordSlotDefeat.
 func (r *Rebuild) recordLostAppend(ctx context.Context, attemptID, runnerID uuid.UUID, lost error) {
 	slot, ok := defeatSlot(lost, r.lifecycleStream())
 	if !ok {
@@ -1081,6 +1105,22 @@ func (r *Rebuild) recordLostAppend(ctx context.Context, attemptID, runnerID uuid
 		return
 	}
 
+	r.recordSlotDefeat(loaded, attemptID, runnerID)
+}
+
+// recordSlotDefeat renders the verdict from the exact fold at a slot this
+// run's append lost: an ended attempt is a deliberate wind-down, a
+// competing claim is displacement, and any other winner records nothing,
+// leaving the original error to surface. The verdict records through the
+// same fields the reconcile loop uses, so exit classification surfaces it
+// uniformly — with explicit precedence between the two observers: a
+// displacement read at the defeated slot upgrades a clean terminal stop the
+// reconcile loop recorded from the head, because the head can already show
+// the end that FOLLOWED the defeating claim, and the verdict belongs to the
+// exact defeat; a stop that carries a cause is never overwritten. The slot
+// fold installs only when it is at least as new as the handle's current
+// view; a fold that fails validation is terminal.
+func (r *Rebuild) recordSlotDefeat(loaded *aggregatestore.Aggregate[State], attemptID, runnerID uuid.UUID) {
 	if err := checkLifecycleAggregate(loaded, r.name); err != nil {
 		r.recordTerminalStop(err)
 		return
@@ -1724,6 +1764,7 @@ func (r *Rebuild) awaitProcessorStop(ctx context.Context) error {
 // mismatch, and the handle should be discarded and the projection resumed to
 // observe what won. The caller must hold r.mu.
 func (r *Rebuild) appendLocked(ctx context.Context, events ...estoria.DomainEvent[State]) error {
+	slot := r.aggregate.Version() + 1
 	r.aggregate.Append(events...)
 
 	if err := r.orchestrator.authority.Save(ctx, r.aggregate, nil); err != nil {
@@ -1744,7 +1785,7 @@ func (r *Rebuild) appendLocked(ctx context.Context, events ...estoria.DomainEven
 			types = append(types, event.EventType())
 		}
 
-		return appendError{err: fmt.Errorf("recording %s: %w", strings.Join(types, "+"), err)}
+		return appendError{slot: slot, err: fmt.Errorf("recording %s: %w", strings.Join(types, "+"), err)}
 	}
 
 	return nil
@@ -1753,9 +1794,13 @@ func (r *Rebuild) appendLocked(ctx context.Context, events ...estoria.DomainEven
 // appendError wraps a failure from appendLocked, so callers can tell an
 // error from the recording save — whose append outcome the save markers
 // describe, unknown when they resolve to neither — from a refusal raised
-// before any append was attempted.
+// before any append was attempted. It carries the stream slot the append
+// contended for — the expected version plus one, captured under the lock at
+// the append itself — because the handle's state can move before a
+// reconciliation that needs the slot gets to read it.
 type appendError struct {
-	err error
+	slot int64
+	err  error
 }
 
 func (e appendError) Error() string { return e.err.Error() }

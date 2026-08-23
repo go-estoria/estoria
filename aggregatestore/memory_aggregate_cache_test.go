@@ -747,10 +747,10 @@ func TestMemoryAggregateCache_CodecFailuresSurface(t *testing.T) {
 }
 
 // TestMemoryAggregateCache_SettledTokenCannotReturnToPending pins the
-// terminal state machine: settlement is forever. A release that found no
-// reservation records the terminal state, so the reserve it settled landing
-// late is refused; a released reservation refuses re-reservation the same
-// way; and neither terminal record contributes to the floor.
+// terminal state machine where settlement can be outrun: a release that
+// found no reservation records a tombstone, so the reserve delivery it
+// settled ahead of is refused when it lands, and refused again on any
+// redelivery. The tombstone contributes nothing to the floor.
 func TestMemoryAggregateCache_SettledTokenCannotReturnToPending(t *testing.T) {
 	t.Parallel()
 
@@ -767,25 +767,80 @@ func TestMemoryAggregateCache_SettledTokenCannotReturnToPending(t *testing.T) {
 		t.Errorf("want the delayed reserve delivery refused, got %v", err)
 	}
 
-	// A placed reservation, released: the token stays settled.
-	released := newFenceToken()
-	if err := cache.ReserveFence(t.Context(), id, 3, released); err != nil {
-		t.Fatalf("reserving at 3: %v", err)
-	}
-	if err := cache.ReleaseFence(t.Context(), id, 3, released); err != nil {
-		t.Fatalf("releasing: %v", err)
-	}
-	if err := cache.ReserveFence(t.Context(), id, 3, released); !errors.Is(err, aggregatestore.ErrFenceReservationRefused) {
-		t.Errorf("want re-reserving a settled token refused, got %v", err)
+	// Refused again on a redelivery: settlement is terminal.
+	if err := cache.ReserveFence(t.Context(), id, 5, orphan); !errors.Is(err, aggregatestore.ErrFenceReservationRefused) {
+		t.Errorf("want the redelivered reserve refused, got %v", err)
 	}
 
-	// Terminal records hold no floor: a publication below both is admitted.
+	// The tombstone holds no floor: a publication below it is admitted.
 	if err := cache.PutAggregate(t.Context(), id, cacheEntry(1)); err != nil {
 		t.Fatalf("putting version 1: %v", err)
 	}
 
 	if entry, _ := cache.GetAggregate(t.Context(), id); entry == nil || entry.Version != 1 {
-		t.Errorf("want the version-1 put admitted past the settled records, got %+v", entry)
+		t.Errorf("want the version-1 put admitted past the tombstone, got %+v", entry)
+	}
+}
+
+// TestMemoryAggregateCache_RefusesADoneContext pins the context half of the
+// AggregateCache contract: an operation whose context is already done is
+// refused with the context's error before it takes effect.
+func TestMemoryAggregateCache_RefusesADoneContext(t *testing.T) {
+	t.Parallel()
+
+	cache := aggregatestore.NewMemoryAggregateCache[account]()
+	id := typeid.New("account", uuid.Must(uuid.NewV4()))
+
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	if err := cache.ReserveFence(canceled, id, 5, newFenceToken()); !errors.Is(err, context.Canceled) {
+		t.Errorf("want the canceled reserve refused with the context's error, got %v", err)
+	}
+
+	if err := cache.PutAggregate(canceled, id, cacheEntry(9)); !errors.Is(err, context.Canceled) {
+		t.Errorf("want the canceled put refused with the context's error, got %v", err)
+	}
+
+	if _, err := cache.GetAggregate(canceled, id); !errors.Is(err, context.Canceled) {
+		t.Errorf("want the canceled get refused with the context's error, got %v", err)
+	}
+
+	// A real reservation, then canceled settlements: the reservation stands.
+	staying := newFenceToken()
+	if err := cache.ReserveFence(t.Context(), id, 5, staying); err != nil {
+		t.Fatalf("reserving: %v", err)
+	}
+
+	if err := cache.CommitFence(canceled, id, 5, staying); !errors.Is(err, context.Canceled) {
+		t.Errorf("want the canceled commit refused with the context's error, got %v", err)
+	}
+
+	if err := cache.ReleaseFence(canceled, id, 5, staying); !errors.Is(err, context.Canceled) {
+		t.Errorf("want the canceled release refused with the context's error, got %v", err)
+	}
+
+	// None of the refused operations took effect: the canceled reserve
+	// placed no fence, the canceled put stored nothing, and the reservation
+	// the canceled settlements named still blocks publications below it.
+	if err := cache.PutAggregate(t.Context(), id, cacheEntry(4)); err != nil {
+		t.Fatalf("putting version 4: %v", err)
+	}
+
+	if entry, err := cache.GetAggregate(t.Context(), id); err != nil || entry != nil {
+		t.Errorf("want the put below the standing reservation dropped, got %+v, %v", entry, err)
+	}
+
+	if err := cache.ReleaseFence(t.Context(), id, 5, staying); err != nil {
+		t.Fatalf("releasing: %v", err)
+	}
+
+	if err := cache.PutAggregate(t.Context(), id, cacheEntry(4)); err != nil {
+		t.Fatalf("putting version 4 after the release: %v", err)
+	}
+
+	if entry, _ := cache.GetAggregate(t.Context(), id); entry == nil || entry.Version != 4 {
+		t.Errorf("want the version-4 put admitted after the release, got %+v", entry)
 	}
 }
 

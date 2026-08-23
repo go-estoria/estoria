@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/go-estoria/estoria/aggregatestore"
+	"github.com/go-estoria/estoria/eventstore/memory"
 	"github.com/go-estoria/estoria/typeid"
 	"github.com/gofrs/uuid/v5"
 )
@@ -470,21 +471,18 @@ func TestHookableStore_Save(t *testing.T) {
 
 // TestHookableStore_Save_MarksHookErrorOutcomes pins the save-outcome
 // markers hook failures carry: a pre-save hook error refused a save that
-// appended nothing, a post-save hook error following a save that appended
-// queued events reports their facts, and a post-save hook error following a
-// no-op save — nothing was queued, so nothing was appended — must not
-// report facts that do not exist.
+// appended nothing, and a post-save hook error follows a completed save —
+// it reports appended exactly when the save advanced the aggregate's
+// durable tip. The tip is observed on the aggregate itself, never inferred
+// from one decorator's queue, so events an inner decorator queued count and
+// events an inner decorator dropped do not.
 func TestHookableStore_Save_MarksHookErrorOutcomes(t *testing.T) {
 	t.Parallel()
 
-	newStore := func(t *testing.T) *aggregatestore.HookableStore[mockEntity] {
+	hookable := func(t *testing.T, inner aggregatestore.Store[account]) *aggregatestore.HookableStore[account] {
 		t.Helper()
 
-		store, err := aggregatestore.NewHookableStore[mockEntity](&mockAggregateStore[mockEntity]{
-			SaveFn: func(context.Context, *aggregatestore.Aggregate[mockEntity], *aggregatestore.SaveOptions) error {
-				return nil
-			},
-		})
+		store, err := aggregatestore.NewHookableStore[account](inner)
 		if err != nil {
 			t.Fatalf("creating hookable store: %v", err)
 		}
@@ -492,15 +490,33 @@ func TestHookableStore_Save_MarksHookErrorOutcomes(t *testing.T) {
 		return store
 	}
 
+	failingHook := func(context.Context, *aggregatestore.Aggregate[account]) error {
+		return errors.New("side effect failed")
+	}
+
+	newEventStore := func(t *testing.T) *memory.EventStore {
+		t.Helper()
+
+		eventStore, err := memory.NewEventStore()
+		if err != nil {
+			t.Fatalf("creating event store: %v", err)
+		}
+
+		return eventStore
+	}
+
 	t.Run("a pre-save hook error reports nothing appended", func(t *testing.T) {
 		t.Parallel()
 
-		store := newStore(t)
-		store.BeforeSave(func(context.Context, *aggregatestore.Aggregate[mockEntity]) error {
+		store := hookable(t, newAccountStore(t, newEventStore(t)))
+		store.BeforeSave(func(context.Context, *aggregatestore.Aggregate[account]) error {
 			return errors.New("refused")
 		})
 
-		err := store.Save(t.Context(), newMockAggregate(uuid.Must(uuid.NewV4()), 1), nil)
+		aggregate := store.New(uuid.Must(uuid.NewV4()))
+		aggregate.Append(fundsDeposited{Amount: 1})
+
+		err := store.Save(t.Context(), aggregate, nil)
 		if !errors.Is(err, aggregatestore.ErrNoEventsAppended) {
 			t.Errorf("want the pre-save hook error carrying ErrNoEventsAppended, got %v", err)
 		}
@@ -509,55 +525,119 @@ func TestHookableStore_Save_MarksHookErrorOutcomes(t *testing.T) {
 		}
 	})
 
-	t.Run("a post-save hook error reports queued events appended", func(t *testing.T) {
+	t.Run("a post-save hook error reports appended events appended", func(t *testing.T) {
 		t.Parallel()
 
-		store := newStore(t)
-		store.AfterSave(func(context.Context, *aggregatestore.Aggregate[mockEntity]) error {
-			return errors.New("side effect failed")
-		})
+		store := hookable(t, newAccountStore(t, newEventStore(t)))
+		store.AfterSave(failingHook)
 
-		aggregate := newMockAggregate(uuid.Must(uuid.NewV4()), 1)
-		aggregate.Append(mockEntityEventA{})
+		aggregate := store.New(uuid.Must(uuid.NewV4()))
+		aggregate.Append(fundsDeposited{Amount: 1})
 
 		err := store.Save(t.Context(), aggregate, nil)
 		if got := aggregatestore.SaveOutcome(err); got != aggregatestore.AppendOutcomeAppended {
-			t.Errorf("want the post-save hook error resolving to ErrEventsAppended, got %v (error: %v)", got, err)
+			t.Errorf("want the post-save hook error resolving to appended, got %v (error: %v)", got, err)
 		}
 	})
 
 	t.Run("a post-save hook error after a no-op save reports nothing appended", func(t *testing.T) {
 		t.Parallel()
 
-		store := newStore(t)
-		store.AfterSave(func(context.Context, *aggregatestore.Aggregate[mockEntity]) error {
-			return errors.New("side effect failed")
-		})
+		store := hookable(t, newAccountStore(t, newEventStore(t)))
 
-		// Version 1 with nothing queued: the save appends nothing.
-		err := store.Save(t.Context(), newMockAggregate(uuid.Must(uuid.NewV4()), 1), nil)
+		aggregate := store.New(uuid.Must(uuid.NewV4()))
+		aggregate.Append(fundsDeposited{Amount: 1})
+
+		if err := store.Save(t.Context(), aggregate, nil); err != nil {
+			t.Fatalf("saving the aggregate: %v", err)
+		}
+
+		store.AfterSave(failingHook)
+
+		// Nothing queued: the save appends nothing.
+		err := store.Save(t.Context(), aggregate, nil)
 		if got := aggregatestore.SaveOutcome(err); got != aggregatestore.AppendOutcomeNothingAppended {
-			t.Errorf("want the no-op save's post-hook error resolving to ErrNoEventsAppended, got %v (error: %v)", got, err)
+			t.Errorf("want the no-op save's post-hook error resolving to nothing appended, got %v (error: %v)", got, err)
 		}
 	})
 
 	t.Run("a post-save hook error after hooks queued the only events reports them appended", func(t *testing.T) {
 		t.Parallel()
 
-		store := newStore(t)
-		store.BeforeSave(func(_ context.Context, aggregate *aggregatestore.Aggregate[mockEntity]) error {
-			aggregate.Append(mockEntityEventA{})
+		store := hookable(t, newAccountStore(t, newEventStore(t)))
+		store.BeforeSave(func(_ context.Context, aggregate *aggregatestore.Aggregate[account]) error {
+			aggregate.Append(fundsDeposited{Amount: 5})
 			return nil
 		})
-		store.AfterSave(func(context.Context, *aggregatestore.Aggregate[mockEntity]) error {
-			return errors.New("side effect failed")
-		})
+		store.AfterSave(failingHook)
 
 		// Nothing queued by the caller: what the inner store appends is
 		// exactly what the pre-save hooks queued.
-		err := store.Save(t.Context(), newMockAggregate(uuid.Must(uuid.NewV4()), 1), nil)
+		err := store.Save(t.Context(), store.New(uuid.Must(uuid.NewV4())), nil)
 		if got := aggregatestore.SaveOutcome(err); got != aggregatestore.AppendOutcomeAppended {
 			t.Errorf("want the hook-queued events' facts reported appended, got %v (error: %v)", got, err)
+		}
+	})
+
+	t.Run("a post-save hook error after a skip-apply save reports the append", func(t *testing.T) {
+		t.Parallel()
+
+		store := hookable(t, newAccountStore(t, newEventStore(t)))
+		store.AfterSave(failingHook)
+
+		aggregate := store.New(uuid.Must(uuid.NewV4()))
+		aggregate.Append(fundsDeposited{Amount: 1})
+
+		// SkipApply leaves the appended events unapplied: the version does
+		// not move, but the durable tip does.
+		err := store.Save(t.Context(), aggregate, &aggregatestore.SaveOptions{SkipApply: true})
+		if got := aggregatestore.SaveOutcome(err); got != aggregatestore.AppendOutcomeAppended {
+			t.Errorf("want the skip-apply save's append reported appended, got %v (error: %v)", got, err)
+		}
+	})
+
+	t.Run("a post-save hook error reports events an inner decorator queued and appended", func(t *testing.T) {
+		t.Parallel()
+
+		inner := hookable(t, newAccountStore(t, newEventStore(t)))
+		inner.BeforeSave(func(_ context.Context, aggregate *aggregatestore.Aggregate[account]) error {
+			aggregate.Append(fundsDeposited{Amount: 5})
+			return nil
+		})
+
+		outer := hookable(t, inner)
+		outer.AfterSave(failingHook)
+
+		// The caller and this layer queue nothing: the only appended event is
+		// the inner decorator's, invisible to any queue inspection here.
+		err := outer.Save(t.Context(), outer.New(uuid.Must(uuid.NewV4())), nil)
+		if got := aggregatestore.SaveOutcome(err); got != aggregatestore.AppendOutcomeAppended {
+			t.Errorf("want the inner decorator's durable append reported appended, got %v (error: %v)", got, err)
+		}
+	})
+
+	t.Run("a post-save hook error reports nothing appended when an inner decorator drops the queue", func(t *testing.T) {
+		t.Parallel()
+
+		minting := newAccountStore(t, newEventStore(t))
+		draining := &mockAggregateStore[account]{
+			SaveFn: func(_ context.Context, aggregate *aggregatestore.Aggregate[account], _ *aggregatestore.SaveOptions) error {
+				aggregate.DiscardUnsavedEvents()
+				return nil
+			},
+		}
+
+		outer := hookable(t, draining)
+		outer.AfterSave(failingHook)
+
+		// This layer saw a queued event, but the inner decorator dropped it:
+		// nothing reached the stream.
+		aggregate := minting.New(uuid.Must(uuid.NewV4()))
+		aggregate.Append(fundsDeposited{Amount: 1})
+
+		err := outer.Save(t.Context(), aggregate, nil)
+		if got := aggregatestore.SaveOutcome(err); got != aggregatestore.AppendOutcomeNothingAppended {
+			t.Errorf("want the dropped queue's save resolving to nothing appended, got %v (error: %v)", got, err)
 		}
 	})
 }

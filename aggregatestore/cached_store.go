@@ -51,18 +51,28 @@ type CachedAggregate[S any] struct {
 // error wrapping ErrFenceReservationRefused, which is a refusal: the backend
 // guarantees the reservation was not placed and never takes effect. Because
 // any OTHER errored reservation may still have taken effect, settlement is
-// idempotent, addressed by token and version together, and terminal: the
+// idempotent, addressed by token and version together, and terminal — the
 // caller mints the token before reserving and can settle what it cannot
-// confirm was placed, a settled reservation can never return to pending —
-// even when a delayed reserve delivery lands after its own withdrawal — and
-// a pending reservation the token holds at a different version is not the
-// identified one and stands. A failed commit or release merely leaves the
-// reservation outstanding, which over-blocks — misses, never staleness.
+// confirm was placed — with two shapes. Settling a reservation the backend
+// observes removes it: the record is the delivery, so nothing of that
+// token's remains in flight and nothing need be retained. Settling one the
+// backend cannot observe must leave a tombstone refusing the token's
+// still-in-flight delivery when it lands, retained until the aggregate's
+// committed fence reaches the reserved version — past that, the fence
+// itself refuses the delivery, so the retention horizon is defined and
+// bounded. Within that horizon a settled reservation can never return to
+// pending; tokens are minted unique per reservation, so the guarantee is
+// never asked to outlive it. A pending reservation the token holds at a
+// different version is not the identified one and stands. A failed commit
+// or release merely leaves the reservation outstanding, which over-blocks —
+// misses, never staleness.
 //
-// Operations must honor context cancellation and deadlines promptly.
-// CachedStore bounds fence settlement with a deadline precisely so a hung
-// backend cannot strand a completed save, and that bound is only as real as
-// the backend's cooperation.
+// Operations must honor context cancellation and deadlines promptly: a
+// context already done is refused, with its error, before the operation
+// takes effect, and waits inside the backend — locks included — end when
+// the context does. CachedStore bounds fence settlement with a deadline
+// precisely so a hung backend cannot strand a completed save, and that
+// bound is only as real as the backend's cooperation.
 //
 // Entries pass by value in both directions: a backend must not retain state
 // it was handed, or hand out state it retains, in a way that leaves two
@@ -113,9 +123,11 @@ type AggregateCache[S any] interface {
 	// version: the committed fence and every other outstanding reservation
 	// stand, so releasing one save's reservation can never lower a floor a
 	// concurrent save established. Settlement is idempotent and terminal on
-	// the same terms as CommitFence — releasing the never-placed records the
-	// terminal state, which is what makes withdrawing an ambiguously-failed
-	// reserve safe even when its delivery is still in flight.
+	// the same terms as CommitFence: releasing an observed reservation
+	// removes it — the record is the delivery, so nothing remains in flight
+	// — while releasing the never-placed records the terminal state, which
+	// is what makes withdrawing an ambiguously-failed reserve safe even when
+	// its delivery is still in flight.
 	ReleaseFence(ctx context.Context, aggregateID typeid.ID, version int64, token FenceToken) error
 }
 

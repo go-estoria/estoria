@@ -146,10 +146,14 @@ func (s *HookableStore[S]) Hydrate(ctx context.Context, aggregate *Aggregate[S],
 // (ErrNoEventsAppended) — though hooks that ran before the failing one may
 // already have mutated the aggregate — an inner save error passes through
 // with whatever markers the inner store attached, and a post-save hook error
-// follows a save that succeeded: it carries ErrEventsAppended when events
-// were queued for the append, whose facts stand regardless of what the hook
-// failed to do with them, and ErrNoEventsAppended when there were none,
-// because a save with nothing queued appends nothing.
+// follows a save that succeeded: it carries ErrEventsAppended when the save
+// advanced the aggregate's durable tip, facts that stand regardless of what
+// the hook failed to do with them, and ErrNoEventsAppended when it did not.
+// The outcome is observed on the aggregate, never inferred from this
+// decorator's own queue: in an arbitrary composition, an inner decorator's
+// hooks can queue events this layer never saw, or drop ones it did see, and
+// only the aggregate's version accounting reflects what the composed save
+// durably appended.
 func (s *HookableStore[S]) Save(ctx context.Context, aggregate *Aggregate[S], opts *SaveOptions) error {
 	if aggregate == nil {
 		return SaveError{Err: withSaveOutcome(ErrNoEventsAppended, ErrNilAggregate)}
@@ -165,9 +169,7 @@ func (s *HookableStore[S]) Save(ctx context.Context, aggregate *Aggregate[S], op
 		}
 	}
 
-	// Measured after the pre-save hooks, which may queue events of their own:
-	// exactly what the inner store is about to append.
-	appending := len(aggregate.unsavedEvents) > 0
+	tipBefore := durableTip(aggregate)
 
 	if err := s.inner.Save(ctx, aggregate, opts); err != nil {
 		return SaveError{AggregateID: aggregate.ID(), Operation: "saving aggregate using inner store", Err: err}
@@ -176,7 +178,7 @@ func (s *HookableStore[S]) Save(ctx context.Context, aggregate *Aggregate[S], op
 	for _, hook := range s.hooks[AfterSave] {
 		if err := hook(ctx, aggregate); err != nil {
 			outcome := ErrEventsAppended
-			if !appending {
+			if durableTip(aggregate) == tipBefore {
 				outcome = ErrNoEventsAppended
 			}
 
@@ -188,4 +190,12 @@ func (s *HookableStore[S]) Save(ctx context.Context, aggregate *Aggregate[S], op
 	}
 
 	return nil
+}
+
+// durableTip is the aggregate's view of the stream's durable end: its
+// applied version plus the appended events a save has not yet applied
+// (SkipApply). A successful save advances it by exactly the events it
+// appended, wherever in the composition they were queued.
+func durableTip[S any](aggregate *Aggregate[S]) int64 {
+	return aggregate.Version() + int64(len(aggregate.unappliedEvents))
 }

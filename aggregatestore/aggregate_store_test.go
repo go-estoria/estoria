@@ -112,6 +112,30 @@ func TestSaveOutcome(t *testing.T) {
 			err:  errors.Join(fmt.Errorf("a: %w", aggregatestore.ErrEventsAppended), fmt.Errorf("b: %w", aggregatestore.ErrNoEventsAppended)),
 			want: aggregatestore.AppendOutcomeUnknown,
 		},
+		{
+			name: "the shallower marker wins across branches",
+			err: errors.Join(
+				aggregatestore.ErrNoEventsAppended,
+				fmt.Errorf("outer: %w", fmt.Errorf("inner: %w", aggregatestore.ErrEventsAppended)),
+			),
+			want: aggregatestore.AppendOutcomeNothingAppended,
+		},
+		{
+			name: "a contradiction at the marker depth poisons an agreeing sibling branch",
+			err: errors.Join(
+				errors.Join(aggregatestore.ErrEventsAppended, aggregatestore.ErrNoEventsAppended),
+				errors.Join(aggregatestore.ErrNoEventsAppended),
+			),
+			want: aggregatestore.AppendOutcomeUnknown,
+		},
+		{
+			name: "a shallower marker shadows a deeper contradiction",
+			err: errors.Join(
+				aggregatestore.ErrNoEventsAppended,
+				fmt.Errorf("outer: %w", errors.Join(aggregatestore.ErrEventsAppended, aggregatestore.ErrNoEventsAppended)),
+			),
+			want: aggregatestore.AppendOutcomeNothingAppended,
+		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()

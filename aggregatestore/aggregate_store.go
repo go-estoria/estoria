@@ -205,11 +205,13 @@ var ErrAggregateNotFound = errors.New("aggregate not found")
 var ErrEventsAppended = errors.New("events were appended")
 
 // ErrNoEventsAppended reports a save that failed with nothing appended to the
-// event store: the stream is exactly as it was. It vouches for the stream
-// only — decorators are not transactional, so a hook or decorator that ran
-// before the failure may have mutated the aggregate or queued events of its
-// own, and a retried save persists whatever is queued at retry time, not
-// necessarily the original command.
+// event store: this save contributed no events to the stream. It says nothing
+// about the stream itself — an optimistic-concurrency refusal fails precisely
+// because another writer may have moved it — and decorators are not
+// transactional, so a hook or decorator that ran before the failure may have
+// mutated the aggregate or queued events of its own, and a retried save
+// persists whatever is queued at retry time, not necessarily the original
+// command.
 //
 // Resolve a save error's outcome with SaveOutcome. A save error resolving to
 // neither marker reports an unknown outcome: the append may or may not have
@@ -238,7 +240,8 @@ const (
 	// stream.
 	AppendOutcomeAppended
 
-	// AppendOutcomeNothingAppended reports the stream exactly as it was.
+	// AppendOutcomeNothingAppended reports that this save appended nothing:
+	// the stream holds no events from it.
 	AppendOutcomeNothingAppended
 )
 
@@ -257,60 +260,73 @@ func (o AppendOutcome) String() string {
 }
 
 // SaveOutcome resolves the single append outcome a save error vouches for.
-// Resolution is outermost-first — the marker nearest the caller speaks for
-// the save as a whole and shadows anything deeper, because a decorator's
-// error may wrap a cause that carries the opposite marker from some other
-// save — and markers that first appear at the same depth and disagree
-// resolve to unknown: a contradictory error vouches for nothing. Outcome
-// decisions must use this resolver; errors.Is searches the entire chain and
-// can confirm both sentinels on the same error.
+// Resolution is outermost-first across the whole error tree: the shallowest
+// markers — nearest the caller, whichever joined branches hold them — speak
+// for the save as a whole and shadow everything deeper, because a
+// decorator's error may wrap a cause that carries the opposite marker from
+// some other save. Markers at that shallowest depth that disagree resolve to
+// unknown — a contradictory error vouches for nothing, no matter how cleanly
+// a deeper or sibling branch would resolve. Outcome decisions must use this
+// resolver; errors.Is searches the entire tree and can confirm both
+// sentinels on the same error.
 //
 // The resolver is the traversal: it matches sentinel and marker identities
-// node by node, outermost first, exactly where errors.Is would search the
-// whole chain and defeat the shadowing it exists for.
+// level by level, outermost first, exactly where errors.Is would search the
+// whole tree and defeat the shadowing it exists for.
 //
 //nolint:errorlint // identity matching per node is the resolver's design
 func SaveOutcome(err error) AppendOutcome {
-	switch err {
-	case nil:
-		return AppendOutcomeUnknown
-	case ErrEventsAppended:
-		return AppendOutcomeAppended
-	case ErrNoEventsAppended:
-		return AppendOutcomeNothingAppended
-	}
+	for level := []error{err}; len(level) > 0; {
+		var next []error
 
-	if marked, ok := err.(saveOutcomeError); ok {
-		return marked.resolved()
-	}
+		outcome, voted, contradicted := AppendOutcomeUnknown, false, false
+		vote := func(resolved AppendOutcome) {
+			if voted && outcome != resolved {
+				contradicted = true
+				return
+			}
 
-	var children []error
-
-	switch wrapped := err.(type) {
-	case interface{ Unwrap() error }:
-		if child := wrapped.Unwrap(); child != nil {
-			children = []error{child}
-		}
-	case interface{ Unwrap() []error }:
-		children = wrapped.Unwrap()
-	}
-
-	outcome := AppendOutcomeUnknown
-
-	for _, child := range children {
-		resolved := SaveOutcome(child)
-		if resolved == AppendOutcomeUnknown {
-			continue
+			outcome, voted = resolved, true
 		}
 
-		if outcome != AppendOutcomeUnknown && outcome != resolved {
+		for _, node := range level {
+			switch node {
+			case nil:
+				continue
+			case ErrEventsAppended:
+				vote(AppendOutcomeAppended)
+				continue
+			case ErrNoEventsAppended:
+				vote(AppendOutcomeNothingAppended)
+				continue
+			}
+
+			if marked, ok := node.(saveOutcomeError); ok {
+				vote(marked.resolved())
+				continue
+			}
+
+			switch wrapped := node.(type) {
+			case interface{ Unwrap() error }:
+				if child := wrapped.Unwrap(); child != nil {
+					next = append(next, child)
+				}
+			case interface{ Unwrap() []error }:
+				next = append(next, wrapped.Unwrap()...)
+			}
+		}
+
+		switch {
+		case contradicted:
 			return AppendOutcomeUnknown
+		case voted:
+			return outcome
 		}
 
-		outcome = resolved
+		level = next
 	}
 
-	return outcome
+	return AppendOutcomeUnknown
 }
 
 // withSaveOutcome attaches outcome — ErrEventsAppended or ErrNoEventsAppended —
