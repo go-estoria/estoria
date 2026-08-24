@@ -3,6 +3,7 @@ package aggregatestore_test
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 
 	"github.com/go-estoria/estoria"
@@ -53,6 +54,40 @@ func (e fundsWithdrawn) ApplyTo(a account) account {
 	a.Balance -= e.Amount
 	return a
 }
+
+// mapAggregateCache stores entries the way the contrib caches do: state and version,
+// keyed by typed ID. Identity must survive the round trip through the cache.
+type mapAggregateCache[S any] struct {
+	mu      sync.RWMutex
+	entries map[string]aggregatestore.CachedAggregate[S]
+}
+
+func newMapAggregateCache[S any]() *mapAggregateCache[S] {
+	return &mapAggregateCache[S]{entries: make(map[string]aggregatestore.CachedAggregate[S])}
+}
+
+func (c *mapAggregateCache[S]) GetAggregate(_ context.Context, aggregateID typeid.ID) (*aggregatestore.CachedAggregate[S], error) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	entry, ok := c.entries[aggregateID.String()]
+	if !ok {
+		return nil, nil //nolint:nilnil // a nil entry with a nil error is the cache-miss contract
+	}
+
+	return &entry, nil
+}
+
+func (c *mapAggregateCache[S]) PutAggregate(_ context.Context, aggregateID typeid.ID, entry aggregatestore.CachedAggregate[S]) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	c.entries[aggregateID.String()] = entry
+
+	return nil
+}
+
+var _ aggregatestore.AggregateCache[account] = (*mapAggregateCache[account])(nil)
 
 // hookCounts records which lifecycle hooks fired so the test can assert the
 // composition actually routed operations through the hookable layer.
@@ -122,7 +157,7 @@ func TestEndToEnd_FullComposition(t *testing.T) {
 	}
 
 	snapshotStore := snapshotmemory.NewSnapshotStore()
-	cache := aggregatestore.NewMemoryAggregateCache[account]()
+	cache := newMapAggregateCache[account]()
 	counts := &hookCounts{}
 	store := newComposedStore(t, eventStore, snapshotStore, cache, counts)
 
@@ -192,7 +227,7 @@ func TestEndToEnd_FullComposition(t *testing.T) {
 	// A load with a cold cache hydrates from the snapshot plus the events past
 	// it and must converge on the same state.
 	coldCounts := &hookCounts{}
-	coldStore := newComposedStore(t, eventStore, snapshotStore, aggregatestore.NewMemoryAggregateCache[account](), coldCounts)
+	coldStore := newComposedStore(t, eventStore, snapshotStore, newMapAggregateCache[account](), coldCounts)
 
 	reloaded, err := coldStore.Load(ctx, accountUUID, nil)
 	if err != nil {

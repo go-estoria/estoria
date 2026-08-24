@@ -31,7 +31,7 @@ func TestSaveAtomicity_SentinelSurvivesComposition(t *testing.T) {
 		t.Fatalf("creating event store: %v", err)
 	}
 
-	store := newComposedStore(t, eventStore, snapshotmemory.NewSnapshotStore(), aggregatestore.NewMemoryAggregateCache[account](), &hookCounts{})
+	store := newComposedStore(t, eventStore, snapshotmemory.NewSnapshotStore(), newMapAggregateCache[account](), &hookCounts{})
 
 	aggregate := store.New(uuid.Must(uuid.NewV4()))
 	aggregate.Append(fundsDeposited{Amount: 100})
@@ -66,7 +66,7 @@ func TestSaveAtomicity_PreAppendFailureCarriesNoSentinel(t *testing.T) {
 		t.Fatalf("creating event store: %v", err)
 	}
 
-	store := newComposedStore(t, eventStore, snapshotmemory.NewSnapshotStore(), aggregatestore.NewMemoryAggregateCache[account](), &hookCounts{})
+	store := newComposedStore(t, eventStore, snapshotmemory.NewSnapshotStore(), newMapAggregateCache[account](), &hookCounts{})
 	accountUUID := uuid.Must(uuid.NewV4())
 
 	aggregate := store.New(accountUUID)
