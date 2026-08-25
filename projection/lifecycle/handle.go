@@ -45,6 +45,14 @@ type Rebuild struct {
 	// the reconcile loop against the runner the stream last recorded.
 	runner uuid.UUID
 
+	// runAttempt is the attempt this handle's Run bound itself to at entry,
+	// immutable once set. Commands compare the attempt they durably end
+	// against it: a retained handle can command a replacement attempt while
+	// its Run is still settling, and the run-scoped state — the stop flags,
+	// the command record, the classification cancel — belongs to the run's
+	// attempt alone.
+	runAttempt uuid.UUID
+
 	// certificate is the current catch-up certification, nil when none
 	// exists. It is set when this run's drain records CaughtUp and cleared
 	// when it can no longer vouch — processor exit, displacement by another
@@ -91,13 +99,15 @@ type Rebuild struct {
 	// rather than the cancellation.
 	stopped bool
 
-	// commandEnded records the attempt this handle's own terminal command
-	// (Abandon, Rollback) durably ended, nil when none has. Loss
-	// classification for that attempt is moot from then on: the operator's
-	// own terminal command is the run's story, and no defeat read from a
-	// contended slot changes what this handle already did deliberately — so
-	// the command cancels an in-flight classification read at commit, and a
-	// verdict is refused against this field, under mu, before it installs.
+	// commandEnded records that this handle's own terminal command (Abandon,
+	// Rollback) durably ended the run's attempt: it is only ever nil or
+	// runAttempt — a command ending a replacement attempt records nothing
+	// here, so the record is sticky once set. Loss classification for the
+	// run's attempt is moot from then on: the operator's own terminal
+	// command is the run's story, and no defeat read from a contended slot
+	// changes what this handle already did deliberately — so the command
+	// cancels an in-flight classification read at commit, and a verdict is
+	// refused against this field, under mu, before it installs.
 	commandEnded uuid.UUID
 
 	// classifyCancel, when non-nil, cancels the in-flight loss-classification
@@ -375,6 +385,11 @@ func (r *Rebuild) Run(ctx context.Context, opts ...RunOption) error {
 		r.mu.Unlock()
 		return fmt.Errorf("cannot run a rebuild in unknown phase %s", attempt.Phase)
 	}
+
+	// The run binds to its attempt before the claim: from here, commands
+	// judge the attempt they end against this identity, and only ending
+	// this attempt touches the run's own state.
+	r.runAttempt = attempt.ID
 
 	// Claim-then-act: ownership is recorded before the processor exists. A
 	// pre-append failure starts nothing, and losing the stream to a version
@@ -1583,9 +1598,12 @@ func (r *Rebuild) Promote(ctx context.Context) error {
 	return appendErr
 }
 
-// Rollback reverts reads to the previous version by recording RolledBack.
-// Terminal for the attempt: its processor is stopped, and a subsequent
-// rebuild is a new attempt targeting a new version number. The rolled-back
+// Rollback reverts reads to the previous version by recording RolledBack
+// against whichever attempt a fresh fold shows in flight. Terminal for the
+// attempt: this handle's processor is stopped when the attempt is the one
+// its Run claimed — a replacement attempt's builder observes the rollback
+// through its own reconcile loop — and a subsequent rebuild is a new
+// attempt targeting a new version number. The rolled-back
 // version's storage and checkpoint are deliberately left in place for
 // inspection; its version number is never reused, so the residue is inert
 // until explicitly collected. Rolling back is illegal once retirement of the
@@ -1640,15 +1658,25 @@ func (r *Rebuild) Rollback(ctx context.Context) error {
 		return appendErr
 	}
 
-	r.stopped = true
-	r.commandEnded = state.Attempt.ID
+	// Run-scoped bookkeeping only when the ended attempt is the run's own:
+	// ending a replacement attempt says nothing about the run, whose story
+	// — including a still-classifying loss — settles on its own terms.
+	endedRun := state.Attempt.ID == r.runAttempt
 
-	if r.classifyCancel != nil {
-		r.classifyCancel()
+	if endedRun {
+		r.stopped = true
+		r.commandEnded = state.Attempt.ID
+
+		if r.classifyCancel != nil {
+			r.classifyCancel()
+		}
 	}
 	r.mu.Unlock()
 
-	stopErr := r.awaitProcessorStop(ctx)
+	var stopErr error
+	if endedRun {
+		stopErr = r.awaitProcessorStop(ctx)
+	}
 
 	if appendErr != nil {
 		return errors.Join(staleHandleError("rollback", appendErr), stopErr)
@@ -1657,8 +1685,12 @@ func (r *Rebuild) Rollback(ctx context.Context) error {
 	return stopErr
 }
 
-// Abandon gives up on the rebuild before promotion: it records Abandoned and
-// stops this handle's processor. The target version's storage and checkpoint
+// Abandon gives up on the rebuild before promotion: it records Abandoned
+// against whichever attempt a fresh fold shows in flight, and stops this
+// handle's processor when that attempt is the one its Run claimed. Ending a
+// replacement attempt leaves the run untouched — the run observes its own
+// attempt's end through its reconcile loop, exactly as any concurrent
+// builder does. The target version's storage and checkpoint
 // are deliberately left in place — no handle can prove it owns the only
 // processor writing to the target, so no automatic cleanup runs beneath a
 // possible concurrent builder. The residue is inert: the version number is
@@ -1696,16 +1728,27 @@ func (r *Rebuild) Abandon(ctx context.Context, cause string) error {
 		return appendErr
 	}
 
-	r.stopped = true
-	r.commandEnded = state.Attempt.ID
+	// Run-scoped bookkeeping only when the ended attempt is the run's own:
+	// ending a replacement attempt says nothing about the run, whose story
+	// — including a still-classifying loss — settles on its own terms.
+	endedRun := state.Attempt.ID == r.runAttempt
 
-	if r.classifyCancel != nil {
-		r.classifyCancel()
+	if endedRun {
+		r.stopped = true
+		r.commandEnded = state.Attempt.ID
+
+		if r.classifyCancel != nil {
+			r.classifyCancel()
+		}
 	}
 	r.mu.Unlock()
 
 	if appendErr != nil {
 		appendErr = staleHandleError("abandonment", appendErr)
+	}
+
+	if !endedRun {
+		return appendErr
 	}
 
 	return errors.Join(appendErr, r.awaitProcessorStop(ctx))

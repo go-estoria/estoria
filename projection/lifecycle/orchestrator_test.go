@@ -8110,3 +8110,141 @@ func TestRun_InterruptedRetryKeepsTheOriginalLoss(t *testing.T) {
 		t.Errorf("want no cancellation the caller never issued in the result, got %v", err)
 	}
 }
+
+// releasableVersionedBlockingStore parks versioned reads of the lifecycle
+// stream — honoring the read's context — until released, counting the parked
+// reads.
+type releasableVersionedBlockingStore struct {
+	eventstore.Store
+	mu      sync.Mutex
+	blocked int
+	release chan struct{}
+}
+
+func (s *releasableVersionedBlockingStore) blockedCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return s.blocked
+}
+
+func (s *releasableVersionedBlockingStore) ReadStream(ctx context.Context, streamID typeid.ID, opts eventstore.ReadStreamOptions) (eventstore.StreamIterator, error) {
+	s.mu.Lock()
+	block := streamID == ordersLifecycleStreamID() && opts.Count > 0
+	if block {
+		s.blocked++
+	}
+	s.mu.Unlock()
+
+	if !block {
+		return s.Store.ReadStream(ctx, streamID, opts)
+	}
+
+	select {
+	case <-s.release:
+		return s.Store.ReadStream(ctx, streamID, opts)
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+// TestAbandon_EndingAReplacementAttemptPreservesTheRunsDisplacement pins the
+// command bookkeeping's attempt scope: a retained handle's Abandon acts on
+// whatever attempt a fresh fold shows in flight, which can be a replacement
+// for the one its Run claimed — and ending the replacement must neither
+// cancel the run's loss classification nor mark the run deliberately
+// stopped. The run's own attempt lost its slot to a competing claim, and
+// that displacement is the run's story regardless of what became of the
+// replacement.
+func TestAbandon_EndingAReplacementAttemptPreservesTheRunsDisplacement(t *testing.T) {
+	t.Parallel()
+
+	events := newEventStore(t)
+	blocker := &releasableVersionedBlockingStore{Store: events, release: make(chan struct{})}
+	h := buildHarnessWithLifecycleEvents(t, events, blocker, lifecycle.WithReconcileInterval(time.Minute))
+	h.model.armGate()
+	h.appendDomain(3)
+
+	r := h.begin("run attempt displaced while a replacement is commanded")
+	attemptID := r.State().Attempt.ID
+	_, done := runAsync(t, r)
+
+	// The competing claim takes the slot the CaughtUp append will expect;
+	// the gate holds the build mid-replay so the claim is durable first.
+	waitFor(t, func() bool { return countEventsOfType(t, events, lifecycle.BuildStarted{}.EventType()) >= 1 })
+	appendRawLifecycleEvent(t, events, lifecycle.RunnerClaimed{
+		Attempt:  attemptID,
+		Runner:   uuid.Must(uuid.NewV4()),
+		Takeover: lifecycle.RunnerTakeover{Actor: "op", Reason: "competing takeover"},
+		At:       time.Date(2026, 8, 24, 9, 0, 0, 0, time.UTC),
+	})
+	h.model.releaseGate()
+
+	// With the lost append's classification read parked, the run's attempt
+	// ends durably and a replacement attempt begins.
+	waitFor(t, func() bool { return blocker.blockedCount() >= 1 })
+	appendRawLifecycleEvent(t, events, lifecycle.Abandoned{Cause: "the winning claimant gave up"})
+	h.begin("replacement attempt")
+
+	if err := r.Abandon(t.Context(), "ending the replacement"); err != nil {
+		t.Fatalf("want the replacement's abandon to commit, got %v", err)
+	}
+
+	// The classification read completes only after the replacement was
+	// ended: the verdict it renders belongs to the run's own attempt.
+	close(blocker.release)
+
+	if err := waitDone(t, done); !errors.Is(err, lifecycle.ErrRunnerDisplaced) {
+		t.Errorf("want the run to keep its own attempt's displacement, got %v", err)
+	}
+}
+
+// TestAbandon_RunsCommandOutcomeSurvivesEndingAReplacementAttempt pins the
+// stickiness of the run attempt's command record: after the handle's own
+// abandon ended the run's attempt, a later command ending a replacement
+// attempt must not displace that record — a slot fold completing after both
+// commands still finds the run's attempt deliberately ended, and installs
+// no verdict over that outcome.
+func TestAbandon_RunsCommandOutcomeSurvivesEndingAReplacementAttempt(t *testing.T) {
+	t.Parallel()
+
+	events := newEventStore(t)
+	writer := &droppingPromotedWriter{Store: events, drops: -1}
+	stubborn := &stubbornVersionedBlockingStore{Store: writer, release: make(chan struct{})}
+	h := buildHarnessWithLifecycleEvents(t, events, stubborn,
+		lifecycle.WithAutoPromote(true), lifecycle.WithReconcileInterval(time.Minute))
+	h.appendDomain(3)
+
+	r := h.begin("sticky command record across a replacement attempt")
+	attemptID := r.State().Attempt.ID
+	_, done := runAsync(t, r)
+
+	// The auto-promotion's outcome is unknown, its slot fold is parked in a
+	// store that ignores cancellation, and a competing claim wins the slot.
+	waitFor(t, func() bool { return writer.attemptCount() >= 1 })
+	waitFor(t, func() bool { return stubborn.blockedCount() >= 1 })
+	appendRawLifecycleEvent(t, events, lifecycle.RunnerClaimed{
+		Attempt:  attemptID,
+		Runner:   uuid.Must(uuid.NewV4()),
+		Takeover: lifecycle.RunnerTakeover{Actor: "op", Reason: "competing takeover"},
+		At:       time.Date(2026, 8, 24, 9, 0, 0, 0, time.UTC),
+	})
+
+	if err := r.Abandon(t.Context(), "operator gave up on the uncertain promotion"); err != nil {
+		t.Fatalf("want the run attempt's abandon to commit, got %v", err)
+	}
+
+	// A replacement attempt begins and is ended through the same handle.
+	h.begin("replacement attempt")
+
+	if err := r.Abandon(t.Context(), "ending the replacement"); err != nil {
+		t.Fatalf("want the replacement's abandon to commit, got %v", err)
+	}
+
+	// The parked fold completes only after both commands committed.
+	close(stubborn.release)
+
+	if err := waitDone(t, done); err != nil {
+		t.Errorf("want the run attempt's deliberate abandon to own the outcome, got %v", err)
+	}
+}
