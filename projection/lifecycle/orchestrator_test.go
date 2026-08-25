@@ -8248,3 +8248,91 @@ func TestAbandon_RunsCommandOutcomeSurvivesEndingAReplacementAttempt(t *testing.
 		t.Errorf("want the run attempt's deliberate abandon to own the outcome, got %v", err)
 	}
 }
+
+// TestRollback_EndingAReplacementAttemptPreservesTheRunsDisplacement pins
+// the same attempt scope for Rollback that the abandon probes pin for
+// Abandon: rolling back a promoted replacement attempt through a retained
+// handle must neither cancel the displaced run's loss classification nor
+// mark that run deliberately stopped — the run's own attempt lost its slot
+// to a competing claim, and the displacement is its story.
+func TestRollback_EndingAReplacementAttemptPreservesTheRunsDisplacement(t *testing.T) {
+	t.Parallel()
+
+	events := newEventStore(t)
+	blocker := &releasableVersionedBlockingStore{Store: events, release: make(chan struct{})}
+	h := buildHarnessWithLifecycleEvents(t, events, blocker, lifecycle.WithReconcileInterval(time.Minute))
+	h.appendDomain(3)
+
+	// A completed v1 gives the replacement attempt a rollback target. The
+	// run is wound down before retiring: with reconciliation quiet, nothing
+	// else would end it.
+	r1 := h.begin("v1")
+	cancel1, done1 := runAsync(t, r1)
+	waitPhase(t, r1, lifecycle.PhaseCaughtUp)
+
+	if err := r1.Promote(t.Context()); err != nil {
+		t.Fatalf("promoting v1: %v", err)
+	}
+
+	cancel1()
+
+	if err := waitDone(t, done1); !errors.Is(err, context.Canceled) {
+		t.Fatalf("want v1's run to report cancellation, got %v", err)
+	}
+
+	if err := r1.Retire(t.Context()); err != nil {
+		t.Fatalf("completing the first rebuild: %v", err)
+	}
+
+	// The run whose attempt will be displaced, held mid-replay by the gate.
+	h.model.armGate()
+
+	r := h.begin("run attempt displaced while a replacement is rolled back")
+	attemptID := r.State().Attempt.ID
+	_, done := runAsync(t, r)
+
+	// The competing claim takes the slot the CaughtUp append will expect.
+	waitFor(t, func() bool { return countEventsOfType(t, events, lifecycle.BuildStarted{}.EventType()) >= 2 })
+	appendRawLifecycleEvent(t, events, lifecycle.RunnerClaimed{
+		Attempt:  attemptID,
+		Runner:   uuid.Must(uuid.NewV4()),
+		Takeover: lifecycle.RunnerTakeover{Actor: "op", Reason: "competing takeover"},
+		At:       time.Date(2026, 8, 25, 9, 0, 0, 0, time.UTC),
+	})
+	h.model.releaseGate()
+
+	// With the lost append's classification read parked, the run's attempt
+	// ends durably and a replacement attempt is built and promoted.
+	waitFor(t, func() bool { return blocker.blockedCount() >= 1 })
+	appendRawLifecycleEvent(t, events, lifecycle.Abandoned{Cause: "the winning claimant gave up"})
+
+	b := h.begin("replacement attempt")
+	bCancel, bDone := runAsync(t, b)
+	waitPhase(t, b, lifecycle.PhaseCaughtUp)
+
+	if err := b.Promote(t.Context()); err != nil {
+		t.Fatalf("promoting the replacement: %v", err)
+	}
+
+	if err := r.Rollback(t.Context()); err != nil {
+		t.Fatalf("want the replacement's rollback to commit, got %v", err)
+	}
+
+	if got := countEventsOfType(t, events, lifecycle.RolledBack{}.EventType()); got != 1 {
+		t.Errorf("want the rollback durable, got %d", got)
+	}
+
+	// The classification read completes only after the replacement was
+	// rolled back: the verdict it renders belongs to the run's own attempt.
+	close(blocker.release)
+
+	if err := waitDone(t, done); !errors.Is(err, lifecycle.ErrRunnerDisplaced) {
+		t.Errorf("want the run to keep its own attempt's displacement, got %v", err)
+	}
+
+	bCancel()
+
+	if err := waitDone(t, bDone); !errors.Is(err, context.Canceled) {
+		t.Errorf("want the replacement's run to report its cancellation, got %v", err)
+	}
+}
