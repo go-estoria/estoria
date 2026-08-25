@@ -91,13 +91,40 @@ type Rebuild struct {
 	// rather than the cancellation.
 	stopped bool
 
-	// commandStopped records that this handle's own command (Abandon,
-	// Rollback) durably ended the attempt. Lost-append classification is
-	// moot from then on: the operator's own terminal command is the run's
-	// story, and no defeat read from a contended slot changes what this
-	// handle already did deliberately — so classification, and the reads it
-	// would issue on behalf of a run that is already wound down, is skipped.
-	commandStopped bool
+	// commandEnded records the attempt this handle's own terminal command
+	// (Abandon, Rollback) durably ended, nil when none has. Loss
+	// classification for that attempt is moot from then on: the operator's
+	// own terminal command is the run's story, and no defeat read from a
+	// contended slot changes what this handle already did deliberately — so
+	// the command cancels an in-flight classification read at commit, and a
+	// verdict is refused against this field, under mu, before it installs.
+	commandEnded uuid.UUID
+
+	// classifyCancel, when non-nil, cancels the in-flight loss-classification
+	// read. A terminal command invokes it at commit, under mu, so a read
+	// issued for a verdict the command just made moot cannot outlive the
+	// wound-down run on a stalled authority.
+	classifyCancel context.CancelFunc
+
+	// retryMu guards the promotion retry's command arbitration, independent
+	// of mu: a terminal command announces itself here before acquiring mu,
+	// and the retry loop registers here before each attempt, so neither side
+	// may request it while holding mu.
+	retryMu sync.Mutex
+
+	// pendingCommands counts terminal commands announced and not yet
+	// finished; while nonzero, promotion retries hold off rather than take
+	// the handle lock an announced command is about to need.
+	pendingCommands int
+
+	// commandsClear, when non-nil, is closed as pendingCommands returns to
+	// zero, waking a retry held behind announced commands.
+	commandsClear chan struct{}
+
+	// retryCancel, when non-nil, cancels the in-flight promotion retry, so a
+	// command announced while the retry's append is parked inside the store
+	// can free the handle lock the retry holds.
+	retryCancel context.CancelFunc
 
 	// failure records why the reconcile loop stopped the processor when the
 	// stop carries a cause Run must surface rather than report as a benign
@@ -814,6 +841,8 @@ func (r *Rebuild) promoteAfterCatchUp(ctx context.Context, attemptID, runnerID u
 		return true, nil
 	}
 
+	resolved := false
+
 	var failed appendError
 
 	switch outcome := aggregatestore.SaveOutcome(err); {
@@ -826,12 +855,12 @@ func (r *Rebuild) promoteAfterCatchUp(ctx context.Context, attemptID, runnerID u
 
 		return true, nil
 	case outcome == aggregatestore.AppendOutcomeUnknown && errors.As(err, &failed):
-		promoted, lost := r.reconcileUnknownPromotion(ctx, attemptID, runnerID, failed.slot, err)
+		var promoted bool
+
+		promoted, resolved, err = r.reconcileUnknownPromotion(ctx, attemptID, runnerID, failed.slot, err)
 		if promoted {
 			return true, nil
 		}
-
-		err = lost
 	}
 
 	wound := r.windDown(stop, done, err)
@@ -839,8 +868,13 @@ func (r *Rebuild) promoteAfterCatchUp(ctx context.Context, attemptID, runnerID u
 	// An Abandon can win the race against auto-promotion; the abandonment is
 	// recorded, so the refused promotion is not an error, and a loss to a
 	// competing claim is typed as displacement. A fail-closed stop surfaces
-	// its cause instead.
-	r.recordLostAppend(ctx, attemptID, runnerID, err)
+	// its cause instead. A slot reconciliation already resolved renders no
+	// second read: its verdict is recorded, and the immutable slot cannot
+	// answer differently — while a re-read could outlive the wound-down run
+	// on a stalled authority and keep the verdict from ever surfacing.
+	if !resolved {
+		r.recordLostAppend(ctx, attemptID, runnerID, err)
+	}
 
 	return false, r.classifyExit(reconcileExited, wound)
 }
@@ -866,12 +900,19 @@ func (r *Rebuild) promoteAfterCatchUp(ctx context.Context, attemptID, runnerID u
 // published exit — is the cancellation source, because it is lock-free: a
 // retrying Promote holds the handle lock while its append honors this
 // context, and exit publication needs that same lock, so waiting on the
-// published exit would deadlock the retry against the publication. The
-// caller's own cancellation reports the context's error — the lost append
-// is stale news by then, and which error surfaces must not depend on
-// scheduling. It reports promoted=true once the promotion is durably
-// resolved in its favor, installing the observed history in the handle.
-func (r *Rebuild) reconcileUnknownPromotion(ctx context.Context, attemptID, runnerID uuid.UUID, slot int64, lost error) (bool, error) {
+// published exit would deadlock the retry against the publication. Each
+// retry additionally runs under the terminal-command arbitration (see
+// retryPromotion): with a healthy processor, only a command's stop causes
+// the cancellation a parked retry waits on, and the command needs the lock
+// the retry holds — so an announced command interrupts the retry, and an
+// interrupted retry renders no verdict. The caller's own cancellation
+// reports the context's error — the lost append is stale news by then, and
+// which error surfaces must not depend on scheduling. It reports
+// promoted=true once the promotion is durably resolved in its favor,
+// installing the observed history in the handle, and resolved=true once a
+// slot fold has rendered the loss's verdict — recorded terminal stop or
+// slot defeat — so the caller does not read the immutable slot again.
+func (r *Rebuild) reconcileUnknownPromotion(ctx context.Context, attemptID, runnerID uuid.UUID, slot int64, lost error) (promoted, resolved bool, result error) {
 	r.mu.Lock()
 	returned := r.processorReturned
 	r.mu.Unlock()
@@ -889,7 +930,7 @@ func (r *Rebuild) reconcileUnknownPromotion(ctx context.Context, attemptID, runn
 
 	for {
 		if r.reconcileHalted() {
-			return false, lost
+			return false, false, lost
 		}
 
 		loaded, err := r.hydrateFresh(rctx, slot)
@@ -909,19 +950,23 @@ func (r *Rebuild) reconcileUnknownPromotion(ctx context.Context, attemptID, runn
 			// validation verdict; the wind-down path surfaces it.
 			r.recordTerminalStop(checkErr)
 
-			return false, lost
+			return false, true, lost
 		case loaded.Version() < slot:
 			// The slot is empty, which proves nothing — the lost append may
 			// still be in flight — so retry at the same expected version and
 			// let the stream arbitrate.
-			switch retryErr := r.Promote(rctx); {
+			switch interrupted, retryErr := r.retryPromotion(rctx); {
+			case interrupted:
+				// The retry died to the run's own arbitration — a pending
+				// command or the loop's cancellation — not to the stream: it
+				// renders no verdict, and the original loss keeps the story.
 			case retryErr == nil:
-				return true, nil
+				return true, true, nil
 			case aggregatestore.SaveOutcome(retryErr) == aggregatestore.AppendOutcomeAppended:
 				r.orchestrator.log.Error("promotion recorded, but the rebuild handle is stale",
 					"projection", r.Name(), "error", retryErr)
 
-				return true, nil
+				return true, true, nil
 			case aggregatestore.SaveOutcome(retryErr) == aggregatestore.AppendOutcomeNothingAppended,
 				isAppendFailure(retryErr):
 				// The slot was taken between the fold and the retry, or the
@@ -935,25 +980,109 @@ func (r *Rebuild) reconcileUnknownPromotion(ctx context.Context, attemptID, runn
 		case loaded.State().Attempt.ID == attemptID && loaded.State().Attempt.Phase == PhasePromoted:
 			r.observeReconciledPromotion(rctx)
 
-			return true, nil
+			return true, true, nil
 		default:
 			// A foreign event won the slot the append was version-guarded
 			// to: the promotion can never land, and the exact winner renders
 			// the verdict the loss surfaces through.
 			r.recordSlotDefeat(loaded, attemptID, runnerID)
 
-			return false, lost
+			return false, true, lost
 		}
 
 		select {
 		case <-rctx.Done():
 			if ctx.Err() != nil {
-				return false, ctx.Err()
+				return false, false, ctx.Err()
 			}
 
-			return false, lost
+			return false, false, lost
 		case <-time.After(r.orchestrator.reconcileInterval):
 		}
+	}
+}
+
+// retryPromotion runs one promotion retry under the terminal-command
+// arbitration: it holds the retry while any announced command is pending —
+// the retrying Promote holds the handle lock through an append whose
+// cancellation, with a healthy processor, only that command's stop can
+// cause, and the command blocks on the lock — and registers the retry's
+// cancellation so a command announced mid-attempt interrupts it. It reports
+// interrupted=true when the retry failed by nothing but its own private
+// cancellation: an interrupted retry renders no verdict on the slot, and the
+// arbitration must not leak into the run's public result as a cancellation
+// the caller never issued.
+func (r *Rebuild) retryPromotion(rctx context.Context) (interrupted bool, retryErr error) {
+	r.retryMu.Lock()
+
+	for r.pendingCommands > 0 {
+		if r.commandsClear == nil {
+			r.commandsClear = make(chan struct{})
+		}
+
+		cleared := r.commandsClear
+		r.retryMu.Unlock()
+
+		select {
+		case <-cleared:
+		case <-rctx.Done():
+			return true, rctx.Err()
+		}
+
+		r.retryMu.Lock()
+	}
+
+	attemptCtx, cancel := context.WithCancel(rctx)
+	r.retryCancel = cancel
+	r.retryMu.Unlock()
+
+	defer func() {
+		r.retryMu.Lock()
+		r.retryCancel = nil
+		r.retryMu.Unlock()
+
+		cancel()
+	}()
+
+	retryErr = r.Promote(attemptCtx)
+	if retryErr != nil && attemptCtx.Err() != nil && cancellationOnly(retryErr, attemptCtx.Err()) {
+		return true, retryErr
+	}
+
+	return false, retryErr
+}
+
+// pauseRetries announces a terminal command ahead of the handle lock and
+// interrupts an in-flight promotion retry, returning the resume that
+// withdraws the announcement. The retrying Promote holds the handle lock
+// while its parked append waits on a cancellation that — for a healthy
+// processor — only a terminal command's stop can cause, and the command
+// waits on that same lock: the announcement breaks the cycle from outside
+// it. Resuming is unconditional — a refused command must leave the retry
+// running, and a committed one flips the halt the retry observes before its
+// next attempt.
+func (r *Rebuild) pauseRetries() (resume func()) {
+	r.retryMu.Lock()
+
+	r.pendingCommands++
+
+	if r.retryCancel != nil {
+		r.retryCancel()
+	}
+
+	r.retryMu.Unlock()
+
+	return func() {
+		r.retryMu.Lock()
+
+		r.pendingCommands--
+
+		if r.pendingCommands == 0 && r.commandsClear != nil {
+			close(r.commandsClear)
+			r.commandsClear = nil
+		}
+
+		r.retryMu.Unlock()
 	}
 }
 
@@ -1216,16 +1345,10 @@ func (r *Rebuild) claimDefeat(ctx context.Context, base AttemptState, lost error
 // renders its verdict through recordSlotDefeat. An attempt this handle's
 // own command ended is never classified: the deliberate local stop is the
 // run's story, and reading the slot on its behalf could outlive the run on
-// a stalled authority.
+// a stalled authority — so the read's cancellation is registered in the same
+// critical section that checks for the command, and a command committing at
+// any point after cancels the read.
 func (r *Rebuild) recordLostAppend(ctx context.Context, attemptID, runnerID uuid.UUID, lost error) {
-	r.mu.Lock()
-	commandStopped := r.commandStopped
-	r.mu.Unlock()
-
-	if commandStopped {
-		return
-	}
-
 	slot, ok := defeatSlot(lost, r.lifecycleStream())
 	if !ok {
 		var failed appendError
@@ -1236,7 +1359,26 @@ func (r *Rebuild) recordLostAppend(ctx context.Context, attemptID, runnerID uuid
 		slot = failed.slot
 	}
 
-	loaded, err := r.hydrateFresh(ctx, slot)
+	r.mu.Lock()
+
+	if r.commandEnded == attemptID {
+		r.mu.Unlock()
+		return
+	}
+
+	readCtx, cancel := context.WithCancel(ctx)
+	r.classifyCancel = cancel
+	r.mu.Unlock()
+
+	defer func() {
+		r.mu.Lock()
+		r.classifyCancel = nil
+		r.mu.Unlock()
+
+		cancel()
+	}()
+
+	loaded, err := r.hydrateFresh(readCtx, slot)
 	if err != nil {
 		return
 	}
@@ -1259,7 +1401,11 @@ func (r *Rebuild) recordLostAppend(ctx context.Context, attemptID, runnerID uuid
 // the end that FOLLOWED the defeating claim, and the verdict belongs to the
 // exact defeat; a stop that carries a cause is never overwritten. The slot
 // fold installs only when it is at least as new as the handle's current
-// view; a fold that fails validation is terminal.
+// view; a fold that fails validation is terminal. An attempt this handle's
+// own command durably ended — rechecked under the lock, because the command
+// can commit while the slot fold is in flight — takes no verdict at all:
+// the deliberate command is the run's story, and a defeat read from the
+// slot must not rewrite it after the fact.
 func (r *Rebuild) recordSlotDefeat(loaded *aggregatestore.Aggregate[State], attemptID, runnerID uuid.UUID) {
 	if err := checkLifecycleAggregate(loaded, r.name); err != nil {
 		r.recordTerminalStop(err)
@@ -1272,6 +1418,10 @@ func (r *Rebuild) recordSlotDefeat(loaded *aggregatestore.Aggregate[State], atte
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
+
+	if r.commandEnded == attemptID {
+		return
+	}
 
 	if r.stopped {
 		if displaced && r.failure == nil {
@@ -1442,6 +1592,8 @@ func (r *Rebuild) Promote(ctx context.Context) error {
 // previous version has started — the reservation forfeits the rollback
 // target.
 func (r *Rebuild) Rollback(ctx context.Context) error {
+	defer r.pauseRetries()()
+
 	r.mu.Lock()
 
 	if err := r.refoldLocked(ctx); err != nil {
@@ -1489,7 +1641,11 @@ func (r *Rebuild) Rollback(ctx context.Context) error {
 	}
 
 	r.stopped = true
-	r.commandStopped = true
+	r.commandEnded = state.Attempt.ID
+
+	if r.classifyCancel != nil {
+		r.classifyCancel()
+	}
 	r.mu.Unlock()
 
 	stopErr := r.awaitProcessorStop(ctx)
@@ -1510,6 +1666,8 @@ func (r *Rebuild) Rollback(ctx context.Context) error {
 // until it is explicitly collected. A concurrent builder observes the
 // abandonment through its reconcile loop and stops itself.
 func (r *Rebuild) Abandon(ctx context.Context, cause string) error {
+	defer r.pauseRetries()()
+
 	r.mu.Lock()
 
 	if err := r.refoldLocked(ctx); err != nil {
@@ -1539,7 +1697,11 @@ func (r *Rebuild) Abandon(ctx context.Context, cause string) error {
 	}
 
 	r.stopped = true
-	r.commandStopped = true
+	r.commandEnded = state.Attempt.ID
+
+	if r.classifyCancel != nil {
+		r.classifyCancel()
+	}
 	r.mu.Unlock()
 
 	if appendErr != nil {

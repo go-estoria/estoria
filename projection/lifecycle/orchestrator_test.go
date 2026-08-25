@@ -6546,7 +6546,7 @@ func (w *droppingPromotedWriter) AppendStream(ctx context.Context, streamID type
 			w.drops--
 			w.mu.Unlock()
 
-			return nil, errors.New("append response lost")
+			return nil, errAppendResponseLost
 		}
 	}
 	w.mu.Unlock()
@@ -7258,16 +7258,24 @@ func TestRun_ProcessorExitUnblocksAParkedSlotFold(t *testing.T) {
 	}
 }
 
+// errAppendResponseLost is the unmarked error the parking and dropping
+// writers swallow Promoted appends with: the outcome resolves to neither
+// appended nor refused.
+var errAppendResponseLost = errors.New("append response lost")
+
 // retryParkingPromotedWriter swallows the first append recording Promoted —
 // the caller sees an unmarked error, nothing lands — and parks every later
 // Promoted append on its context, honoring cancellation the way a real store
-// does. parked signals once the first retry is parked.
+// does. parked signals once the first retry is parked. When release is
+// non-nil, closing it heals the store: parked and later Promoted appends
+// pass through.
 type retryParkingPromotedWriter struct {
 	eventstore.Store
-	mu     sync.Mutex
-	fired  bool
-	once   sync.Once
-	parked chan struct{}
+	mu      sync.Mutex
+	fired   bool
+	once    sync.Once
+	parked  chan struct{}
+	release chan struct{}
 }
 
 func (w *retryParkingPromotedWriter) AppendStream(ctx context.Context, streamID typeid.ID, events []*eventstore.WritableEvent, opts eventstore.AppendStreamOptions) ([]*eventstore.Event, error) {
@@ -7288,13 +7296,23 @@ func (w *retryParkingPromotedWriter) AppendStream(ctx context.Context, streamID 
 	w.mu.Unlock()
 
 	if first {
-		return nil, errors.New("append response lost")
+		return nil, errAppendResponseLost
+	}
+
+	select {
+	case <-w.release:
+		return w.Store.AppendStream(ctx, streamID, events, opts)
+	default:
 	}
 
 	w.once.Do(func() { close(w.parked) })
-	<-ctx.Done()
 
-	return nil, ctx.Err()
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-w.release:
+		return w.Store.AppendStream(ctx, streamID, events, opts)
+	}
 }
 
 // TestRun_ParkedPromotionRetryUnblocksOnProcessorReturn pins the retry
@@ -7732,5 +7750,363 @@ func TestRun_TakeoverAppliesOnlyToAStandingClaim(t *testing.T) {
 
 	if err := waitDone(t, done); !errors.Is(err, context.Canceled) {
 		t.Errorf("want the run to report cancellation, got %v", err)
+	}
+}
+
+// TestAbandon_UnblocksAParkedPromotionRetry pins the terminal-command
+// arbitration against a parked promotion retry: the retrying Promote holds
+// the handle lock while its append waits on a cancellation that — with a
+// healthy processor — only a terminal command's stop can cause, and the
+// command needs that same lock. The command's announcement must interrupt
+// the retry from outside the lock, or both wait on each other until the run
+// context dies.
+func TestAbandon_UnblocksAParkedPromotionRetry(t *testing.T) {
+	t.Parallel()
+
+	events := newEventStore(t)
+	writer := &retryParkingPromotedWriter{Store: events, parked: make(chan struct{})}
+	h := buildHarnessWithLifecycleEvents(t, events, writer, lifecycle.WithAutoPromote(true))
+	h.appendDomain(3)
+
+	r := h.begin("terminal command against a parked promotion retry")
+	_, done := runAsync(t, r)
+
+	select {
+	case <-writer.parked:
+	case <-time.After(waitTimeout):
+		t.Fatal("timed out waiting for the promotion retry to park")
+	}
+
+	abandoned := make(chan error, 1)
+
+	go func() { abandoned <- r.Abandon(t.Context(), "operator stop against a parked retry") }()
+
+	select {
+	case err := <-abandoned:
+		if err != nil {
+			t.Fatalf("want the abandon to commit, got %v", err)
+		}
+	case <-time.After(waitTimeout):
+		t.Fatal("timed out waiting for Abandon to return")
+	}
+
+	if err := waitDone(t, done); err != nil {
+		t.Errorf("want a clean wind-down after the abandon, got %v", err)
+	}
+
+	if got := countEventsOfType(t, events, lifecycle.Abandoned{}.EventType()); got != 1 {
+		t.Errorf("want the abandonment durable, got %d", got)
+	}
+}
+
+// TestRollback_RefusalResumesAParkedPromotionRetry pins the arbitration's
+// other half: a command that pauses the retry and is then refused must
+// leave the reconciliation running — the retry resumes, and with the store
+// healed, the promotion completes.
+func TestRollback_RefusalResumesAParkedPromotionRetry(t *testing.T) {
+	t.Parallel()
+
+	events := newEventStore(t)
+	writer := &retryParkingPromotedWriter{Store: events, parked: make(chan struct{}), release: make(chan struct{})}
+	h := buildHarnessWithLifecycleEvents(t, events, writer, lifecycle.WithAutoPromote(true))
+	h.appendDomain(3)
+
+	r := h.begin("refused command resumes the parked retry")
+	cancel, done := runAsync(t, r)
+
+	select {
+	case <-writer.parked:
+	case <-time.After(waitTimeout):
+		t.Fatal("timed out waiting for the promotion retry to park")
+	}
+
+	rolledBack := make(chan error, 1)
+
+	go func() { rolledBack <- r.Rollback(t.Context()) }()
+
+	select {
+	case err := <-rolledBack:
+		if err == nil || !strings.Contains(err.Error(), "cannot roll back") {
+			t.Fatalf("want a prompt phase refusal, got %v", err)
+		}
+	case <-time.After(waitTimeout):
+		t.Fatal("timed out waiting for Rollback to return")
+	}
+
+	close(writer.release)
+	waitPhase(t, r, lifecycle.PhasePromoted)
+
+	cancel()
+
+	if err := waitDone(t, done); !errors.Is(err, context.Canceled) {
+		t.Errorf("want the tailing run to report its cancellation, got %v", err)
+	}
+
+	if got := countEventsOfType(t, events, lifecycle.Promoted{}.EventType()); got != 1 {
+		t.Errorf("want exactly one durable promotion, got %d", got)
+	}
+}
+
+// TestAbandon_CancelsAParkedLossClassificationRead pins the classification
+// read's lifetime against the handle's own terminal command: the read runs
+// on the still-live run context, so an abandon that commits while it is
+// parked must cancel it — the deliberate command is the run's whole story,
+// and a run left hanging on a read issued for a verdict that no longer
+// matters never reports that story.
+func TestAbandon_CancelsAParkedLossClassificationRead(t *testing.T) {
+	t.Parallel()
+
+	events := newEventStore(t)
+	blocker := &gatedVersionedBlockingStore{Store: events}
+	blocker.arm()
+	h := buildHarnessWithLifecycleEvents(t, events, blocker, lifecycle.WithReconcileInterval(time.Minute))
+	h.model.armGate()
+	h.appendDomain(3)
+
+	r := h.begin("catch-up loss classified while the operator abandons")
+	attemptID := r.State().Attempt.ID
+	_, done := runAsync(t, r)
+
+	// The competing claim takes the slot the CaughtUp append will expect;
+	// the gate holds the build mid-replay so the claim is durable first.
+	waitFor(t, func() bool { return countEventsOfType(t, events, lifecycle.BuildStarted{}.EventType()) >= 1 })
+	appendRawLifecycleEvent(t, events, lifecycle.RunnerClaimed{
+		Attempt:  attemptID,
+		Runner:   uuid.Must(uuid.NewV4()),
+		Takeover: lifecycle.RunnerTakeover{Actor: "op", Reason: "competing takeover"},
+		At:       time.Date(2026, 8, 24, 9, 0, 0, 0, time.UTC),
+	})
+	h.model.releaseGate()
+
+	// The lost append's classification read is parked on the run context.
+	waitFor(t, func() bool { return blocker.blockedCount() >= 1 })
+
+	abandoned := make(chan error, 1)
+
+	go func() { abandoned <- r.Abandon(t.Context(), "operator gave up mid-classification") }()
+
+	select {
+	case err := <-abandoned:
+		if err != nil {
+			t.Fatalf("want the abandon to commit, got %v", err)
+		}
+	case <-time.After(waitTimeout):
+		t.Fatal("timed out waiting for Abandon to return")
+	}
+
+	if err := waitDone(t, done); err != nil {
+		t.Errorf("want the deliberate abandon to own the run's outcome, got %v", err)
+	}
+}
+
+// stubbornVersionedBlockingStore parks versioned reads of the lifecycle
+// stream until released, ignoring the read's context the way a store with
+// no cancellation support does.
+type stubbornVersionedBlockingStore struct {
+	eventstore.Store
+	mu      sync.Mutex
+	blocked int
+	release chan struct{}
+}
+
+func (s *stubbornVersionedBlockingStore) blockedCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return s.blocked
+}
+
+func (s *stubbornVersionedBlockingStore) ReadStream(ctx context.Context, streamID typeid.ID, opts eventstore.ReadStreamOptions) (eventstore.StreamIterator, error) {
+	s.mu.Lock()
+	block := streamID == ordersLifecycleStreamID() && opts.Count > 0
+	if block {
+		s.blocked++
+	}
+	s.mu.Unlock()
+
+	if block {
+		<-s.release
+	}
+
+	return s.Store.ReadStream(ctx, streamID, opts)
+}
+
+// TestAbandon_OutcomeSurvivesALateSlotDefeatRead pins the verdict recheck: a
+// slot fold parked in a store that ignores cancellation can complete after
+// the handle's own abandon durably ended the attempt, and the displacement
+// it reads must not rewrite the deliberate outcome after the fact.
+func TestAbandon_OutcomeSurvivesALateSlotDefeatRead(t *testing.T) {
+	t.Parallel()
+
+	events := newEventStore(t)
+	writer := &droppingPromotedWriter{Store: events, drops: -1}
+	stubborn := &stubbornVersionedBlockingStore{Store: writer, release: make(chan struct{})}
+	h := buildHarnessWithLifecycleEvents(t, events, stubborn,
+		lifecycle.WithAutoPromote(true), lifecycle.WithReconcileInterval(time.Minute))
+	h.appendDomain(3)
+
+	r := h.begin("slot defeat read outlives the operator's abandon")
+	attemptID := r.State().Attempt.ID
+	_, done := runAsync(t, r)
+
+	// The auto-promotion's outcome is unknown and its slot fold is parked.
+	waitFor(t, func() bool { return writer.attemptCount() >= 1 })
+	waitFor(t, func() bool { return stubborn.blockedCount() >= 1 })
+
+	// A competing claim wins the contested slot while the fold is parked.
+	appendRawLifecycleEvent(t, events, lifecycle.RunnerClaimed{
+		Attempt:  attemptID,
+		Runner:   uuid.Must(uuid.NewV4()),
+		Takeover: lifecycle.RunnerTakeover{Actor: "op", Reason: "competing takeover"},
+		At:       time.Date(2026, 8, 24, 9, 0, 0, 0, time.UTC),
+	})
+
+	if err := r.Abandon(t.Context(), "operator gave up on the uncertain promotion"); err != nil {
+		t.Fatalf("want the abandon to commit, got %v", err)
+	}
+
+	// The parked fold completes only after the abandon committed.
+	close(stubborn.release)
+
+	if err := waitDone(t, done); err != nil {
+		t.Errorf("want the deliberate abandon to own the run's outcome, got %v", err)
+	}
+}
+
+// versionedReadValve admits versioned reads of the lifecycle stream one per
+// admit token and parks every other on its context, counting the parked
+// reads, so a test can hand exactly one read through and hold the rest.
+type versionedReadValve struct {
+	eventstore.Store
+	mu      sync.Mutex
+	tokens  chan struct{}
+	blocked int
+}
+
+func (s *versionedReadValve) admit() { s.tokens <- struct{}{} }
+
+func (s *versionedReadValve) blockedCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return s.blocked
+}
+
+func (s *versionedReadValve) ReadStream(ctx context.Context, streamID typeid.ID, opts eventstore.ReadStreamOptions) (eventstore.StreamIterator, error) {
+	if streamID != ordersLifecycleStreamID() || opts.Count == 0 {
+		return s.Store.ReadStream(ctx, streamID, opts)
+	}
+
+	s.mu.Lock()
+	s.blocked++
+	s.mu.Unlock()
+
+	select {
+	case <-s.tokens:
+		return s.Store.ReadStream(ctx, streamID, opts)
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+// TestRun_ResolvedPoisonedSlotIsNotReadAgain pins single-read resolution for
+// the poisoned-slot verdict: once promotion reconciliation has read the slot
+// and failed the run closed, the wind-down must not read the immutable slot
+// a second time — a second read can outlive the run on a stalled authority
+// and keep the recorded verdict from ever surfacing.
+func TestRun_ResolvedPoisonedSlotIsNotReadAgain(t *testing.T) {
+	t.Parallel()
+
+	events := newEventStore(t)
+	writer := &droppingPromotedWriter{Store: events, drops: -1}
+	valve := &versionedReadValve{Store: writer, tokens: make(chan struct{}, 1)}
+	h := buildHarnessWithLifecycleEvents(t, events, valve,
+		lifecycle.WithAutoPromote(true), lifecycle.WithReconcileInterval(time.Minute))
+	h.appendDomain(3)
+
+	r := h.begin("poisoned slot resolved by its only read")
+	_, done := runAsync(t, r)
+
+	// The slot fold parks at the valve until the poison holds the slot, so
+	// the one admitted read renders the terminal verdict.
+	waitFor(t, func() bool { return valve.blockedCount() >= 1 })
+	appendRawLifecycleEvent(t, events, lifecycle.BuildStarted{})
+	valve.admit()
+
+	if err := waitDone(t, done); !errors.Is(err, lifecycle.ErrInvalidState) {
+		t.Errorf("want the poisoned slot's verdict surfaced without a second slot read, got %v", err)
+	}
+}
+
+// TestRun_ResolvedDisplacementSlotIsNotReadAgain pins single-read resolution
+// for the displacement verdict: a foreign claim read at the slot renders it,
+// and the wind-down must surface it without reading the slot again.
+func TestRun_ResolvedDisplacementSlotIsNotReadAgain(t *testing.T) {
+	t.Parallel()
+
+	events := newEventStore(t)
+	writer := &droppingPromotedWriter{Store: events, drops: -1}
+	valve := &versionedReadValve{Store: writer, tokens: make(chan struct{}, 1)}
+	h := buildHarnessWithLifecycleEvents(t, events, valve,
+		lifecycle.WithAutoPromote(true), lifecycle.WithReconcileInterval(time.Minute))
+	h.appendDomain(3)
+
+	r := h.begin("displacement resolved by its only slot read")
+	attemptID := r.State().Attempt.ID
+	_, done := runAsync(t, r)
+
+	waitFor(t, func() bool { return valve.blockedCount() >= 1 })
+	appendRawLifecycleEvent(t, events, lifecycle.RunnerClaimed{
+		Attempt:  attemptID,
+		Runner:   uuid.Must(uuid.NewV4()),
+		Takeover: lifecycle.RunnerTakeover{Actor: "op", Reason: "competing takeover"},
+		At:       time.Date(2026, 8, 24, 9, 0, 0, 0, time.UTC),
+	})
+	valve.admit()
+
+	if err := waitDone(t, done); !errors.Is(err, lifecycle.ErrRunnerDisplaced) {
+		t.Errorf("want the displacement surfaced without a second slot read, got %v", err)
+	}
+}
+
+// TestRun_InterruptedRetryKeepsTheOriginalLoss pins what an interrupted
+// promotion retry contributes to the run's result: the retry's cancellation
+// is the run's own arbitration, not a store verdict, so the original lost
+// append keeps the story — the result carries the processor's independent
+// failure and the original loss, and never a cancellation the caller did
+// not issue.
+func TestRun_InterruptedRetryKeepsTheOriginalLoss(t *testing.T) {
+	t.Parallel()
+
+	events := newEventStore(t)
+	writer := &retryParkingPromotedWriter{Store: events, parked: make(chan struct{})}
+	h := buildHarnessWithLifecycleEvents(t, events, writer, lifecycle.WithAutoPromote(true))
+	h.appendDomain(3)
+
+	r := h.begin("processor failure with the original loss preserved")
+	_, done := runAsync(t, r)
+
+	select {
+	case <-writer.parked:
+	case <-time.After(waitTimeout):
+		t.Fatal("timed out waiting for the promotion retry to park")
+	}
+
+	errHandler := errors.New("handler died during the parked retry")
+	h.model.armHandleFailureWith(errHandler)
+	h.appendDomain(1)
+
+	err := waitDone(t, done)
+
+	if !errors.Is(err, errHandler) {
+		t.Errorf("want the processor's own failure surfaced, got %v", err)
+	}
+
+	if !errors.Is(err, errAppendResponseLost) {
+		t.Errorf("want the original lost append preserved in the result, got %v", err)
+	}
+
+	if errors.Is(err, context.Canceled) {
+		t.Errorf("want no cancellation the caller never issued in the result, got %v", err)
 	}
 }
