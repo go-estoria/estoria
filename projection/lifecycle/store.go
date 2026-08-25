@@ -29,6 +29,7 @@ func allDomainEvents() []estoria.DomainEvent[State] {
 	return []estoria.DomainEvent[State]{
 		RebuildInitiated{},
 		RunnerClaimed{},
+		RunnerReleased{},
 		BuildStarted{},
 		CaughtUp{},
 		Promoted{},

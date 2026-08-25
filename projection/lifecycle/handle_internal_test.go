@@ -591,7 +591,7 @@ func defeatedRebuildForTest(t *testing.T, toVersion int64) (*Rebuild, uuid.UUID,
 		RebuildInitiated{Attempt: attempt, Target: v1, Reason: "defeat classification", At: at},
 		RunnerClaimed{Attempt: attempt, Runner: runner, At: at},
 		BuildStarted{},
-		RunnerClaimed{Attempt: attempt, Runner: competitor, At: at},
+		RunnerClaimed{Attempt: attempt, Runner: competitor, Takeover: RunnerTakeover{Actor: "op", Reason: "competing takeover"}, At: at},
 		Abandoned{Cause: "the competitor gave up"},
 	)
 

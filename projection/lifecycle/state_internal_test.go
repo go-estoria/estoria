@@ -333,6 +333,108 @@ func TestFold_PoisonBranches(t *testing.T) {
 			},
 		},
 		{
+			name:       "runner claim over a standing claim without an attested takeover",
+			prior:      stateInPhase(PhaseBuilding),
+			event:      RunnerClaimed{Attempt: internalAttemptID, Runner: uuid.Must(uuid.NewV4()), At: internalAt},
+			wantReason: "without an attested takeover",
+			applied: func(t *testing.T, got State) {
+				t.Helper()
+
+				if got.Attempt.Runner == internalRunnerID {
+					t.Errorf("want the unattested claim applied as recorded, got %+v", got.Attempt)
+				}
+			},
+		},
+		{
+			name:       "runner takeover without an actor and reason",
+			prior:      stateInPhase(PhaseBuilding),
+			event:      RunnerClaimed{Attempt: internalAttemptID, Runner: uuid.Must(uuid.NewV4()), Takeover: RunnerTakeover{Actor: "op"}, At: internalAt},
+			wantReason: "without an actor and reason",
+			applied:    func(*testing.T, State) {},
+		},
+		{
+			name: "runner takeover with no standing claim",
+			prior: func() State {
+				s := stateInPhase(PhaseBuilding)
+				s.Attempt.Released = true
+				s.Attempt.ReleasedAt = internalAt
+				return s
+			}(),
+			event:      RunnerClaimed{Attempt: internalAttemptID, Runner: uuid.Must(uuid.NewV4()), Takeover: RunnerTakeover{Actor: "op", Reason: "mistaken"}, At: internalAt},
+			wantReason: "no standing claim to take over",
+			applied: func(t *testing.T, got State) {
+				t.Helper()
+
+				if got.Attempt.Released {
+					t.Errorf("want the claim applied, clearing the release, got %+v", got.Attempt)
+				}
+			},
+		},
+		{
+			name:       "runner release with no rebuild in flight",
+			prior:      stateInPhase(PhaseNone),
+			event:      RunnerReleased{Attempt: internalAttemptID, Runner: internalRunnerID, At: internalAt},
+			wantReason: "no rebuild in flight",
+			applied: func(t *testing.T, got State) {
+				t.Helper()
+
+				if !got.Attempt.Released {
+					t.Errorf("want the release applied as recorded, got %+v", got.Attempt)
+				}
+			},
+		},
+		{
+			name:       "runner release with no attempt ID",
+			prior:      stateInPhase(PhaseBuilding),
+			event:      RunnerReleased{Runner: internalRunnerID, At: internalAt},
+			wantReason: "no attempt ID",
+			applied:    func(*testing.T, State) {},
+		},
+		{
+			name:       "runner release with no runner ID",
+			prior:      stateInPhase(PhaseBuilding),
+			event:      RunnerReleased{Attempt: internalAttemptID, At: internalAt},
+			wantReason: "no runner ID",
+			applied:    func(*testing.T, State) {},
+		},
+		{
+			name:       "runner release for a different attempt",
+			prior:      stateInPhase(PhaseBuilding),
+			event:      RunnerReleased{Attempt: uuid.Must(uuid.NewV4()), Runner: internalRunnerID, At: internalAt},
+			wantReason: "different attempt",
+			applied:    func(*testing.T, State) {},
+		},
+		{
+			name:       "runner release by a runner that is not the claimant",
+			prior:      stateInPhase(PhaseBuilding),
+			event:      RunnerReleased{Attempt: internalAttemptID, Runner: uuid.Must(uuid.NewV4()), At: internalAt},
+			wantReason: "not the recorded claimant",
+			applied:    func(*testing.T, State) {},
+		},
+		{
+			name: "runner release over a claim already released",
+			prior: func() State {
+				s := stateInPhase(PhaseBuilding)
+				s.Attempt.Released = true
+				s.Attempt.ReleasedAt = internalAt
+				return s
+			}(),
+			event:      RunnerReleased{Attempt: internalAttemptID, Runner: internalRunnerID, At: internalAt},
+			wantReason: "already released",
+			applied:    func(*testing.T, State) {},
+		},
+		{
+			name: "runner release in an unknown phase",
+			prior: func() State {
+				s := stateInPhase(PhaseBuilding)
+				s.Attempt.Phase = Phase(99)
+				return s
+			}(),
+			event:      RunnerReleased{Attempt: internalAttemptID, Runner: internalRunnerID, At: internalAt},
+			wantReason: "unknown phase",
+			applied:    func(*testing.T, State) {},
+		},
+		{
 			name:       "catch-up outside the building and caught-up phases",
 			prior:      stateInPhase(PhaseCreated),
 			event:      CaughtUp{Position: 9, At: internalAt},
@@ -1533,6 +1635,8 @@ func TestAttemptStateVacant(t *testing.T) {
 				value.SetString("x")
 			case reflect.Int, reflect.Int64:
 				value.SetInt(1)
+			case reflect.Bool:
+				value.SetBool(true)
 			case reflect.Slice:
 				value.Set(reflect.MakeSlice(field.Type, 1, 1))
 			default:

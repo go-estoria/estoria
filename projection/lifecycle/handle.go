@@ -91,6 +91,14 @@ type Rebuild struct {
 	// rather than the cancellation.
 	stopped bool
 
+	// commandStopped records that this handle's own command (Abandon,
+	// Rollback) durably ended the attempt. Lost-append classification is
+	// moot from then on: the operator's own terminal command is the run's
+	// story, and no defeat read from a contended slot changes what this
+	// handle already did deliberately — so classification, and the reads it
+	// would issue on behalf of a run that is already wound down, is skipped.
+	commandStopped bool
+
 	// failure records why the reconcile loop stopped the processor when the
 	// stop carries a cause Run must surface rather than report as a benign
 	// wind-down: the lifecycle could not be rehydrated, the hydrated state no
@@ -143,6 +151,52 @@ var ErrRunnerDisplaced = errors.New("the rebuild attempt was claimed by another 
 // whose processor is still the attempt's current claimant — may promote it.
 var ErrNotCertified = errors.New("the rebuild has no current catch-up certification")
 
+// ErrClaimStanding reports a Run refused because the attempt's recorded
+// runner claim is standing: the claimant has not recorded its processor's
+// exit, and nothing fences data-plane writes within one attempt, so a
+// second processor over the same target would interleave writes with the
+// incumbent's. Wait for the incumbent to wind down and release its claim,
+// or — once the claimant is provably gone — take its claim over explicitly
+// with WithTakeover.
+var ErrClaimStanding = errors.New("the rebuild attempt's runner claim is standing")
+
+// claimReleaseTimeout bounds the wind-down's claim release append: the
+// release must survive the run context's own cancellation — a canceled run
+// is exactly a wind-down that should release — without letting a stalled
+// authority hold Run's return hostage.
+const claimReleaseTimeout = 5 * time.Second
+
+// A RunOption configures one Run.
+type RunOption func(*runConfig)
+
+// runConfig collects a Run's options.
+type runConfig struct {
+	takeover  RunnerTakeover
+	optionErr error
+}
+
+// WithTakeover authorizes this one Run to claim an attempt whose recorded
+// runner claim is standing, durably audited: the actor and reason are
+// recorded in the claim that performs the takeover. It attests what the
+// lifecycle cannot verify itself — that the incumbent runner is quiesced: a
+// clean wind-down releases its own claim and needs no takeover, but a
+// crashed runner releases nothing, and only an operator can vouch that its
+// processor is gone. Attesting over a live incumbent forfeits the gate's
+// guarantee: nothing fences data-plane writes within one attempt, and both
+// processors would write the same target until the incumbent observes its
+// displacement. The attestation applies only where the gate applies — a
+// Run finding no standing claim records a plain claim without it.
+func WithTakeover(actor, reason string) RunOption {
+	return func(c *runConfig) {
+		if actor == "" || reason == "" {
+			c.optionErr = errors.Join(c.optionErr, errors.New("a runner takeover requires an actor and a reason"))
+			return
+		}
+
+		c.takeover = RunnerTakeover{Actor: actor, Reason: reason}
+	}
+}
+
 // Name returns the projection whose lifecycle this handle drives.
 func (r *Rebuild) Name() string {
 	r.mu.Lock()
@@ -177,18 +231,26 @@ func (r *Rebuild) Checkpoint(ctx context.Context) (checkpointstore.Checkpoint, e
 // Run drives the in-flight rebuild. It first claims the attempt for this
 // run — a RunnerClaimed append in every runnable phase, atomic with
 // BuildStarted when the attempt has never started — so ownership is durably
-// recorded before the processor exists. It then runs a processor for the
-// target version; entering at a catch-up-eligible phase (created, building,
-// or caught up), it waits for the drain to reach the head, records CaughtUp,
-// and certifies the catch-up in-process. The certificate, not the persisted
-// phase, is the promotion license: a rebuild entering at PhaseCaughtUp
-// re-certifies by draining to the current head and recording a fresh
-// CaughtUp — the phase is preserved, never regressed — and only then
-// promotes, if the orchestrator auto-promotes. The processor keeps tailing
-// until ctx is canceled. While it runs, a reconcile loop rehydrates the
-// lifecycle on an interval and stops the processor once the attempt is no
-// longer in flight or another runner has claimed it, so a superseded builder
-// winds itself down instead of running until an operator notices.
+// recorded before the processor exists. A standing claim refuses the Run
+// with an error wrapping ErrClaimStanding: the recorded claimant has not
+// released its claim, and nothing fences data-plane writes within one
+// attempt, so a second processor over the same target could interleave
+// writes with the incumbent's. A wind-down releases its claim durably —
+// best-effort, once its processor has fully exited — so a successor Run is
+// admitted transparently; after a crash, which releases nothing, an
+// operator takes the standing claim over explicitly with WithTakeover. Run
+// then runs a processor for the target version; entering at a
+// catch-up-eligible phase (created, building, or caught up), it waits for
+// the drain to reach the head, records CaughtUp, and certifies the
+// catch-up in-process. The certificate, not the persisted phase, is the
+// promotion license: a rebuild entering at PhaseCaughtUp re-certifies by
+// draining to the current head and recording a fresh CaughtUp — the phase
+// is preserved, never regressed — and only then promotes, if the
+// orchestrator auto-promotes. The processor keeps tailing until ctx is
+// canceled. While it runs, a reconcile loop rehydrates the lifecycle on an
+// interval and stops the processor once the attempt is no longer in flight
+// or another runner has claimed it, so a superseded builder winds itself
+// down instead of running until an operator notices.
 //
 // Run returns nil once the attempt reaches a terminal state — through this
 // handle's own commands or through transitions recorded elsewhere — and the
@@ -202,7 +264,21 @@ func (r *Rebuild) Checkpoint(ctx context.Context) (checkpointstore.Checkpoint, e
 // the live version is a plain processor.Processor, not a lifecycle concern.
 // Run may be called at most once per handle, successful or not; Resume the
 // projection for a new handle to run it again.
-func (r *Rebuild) Run(ctx context.Context) error {
+func (r *Rebuild) Run(ctx context.Context, opts ...RunOption) error {
+	var config runConfig
+
+	for _, opt := range opts {
+		if opt == nil {
+			return errors.New("run option must not be nil")
+		}
+
+		opt(&config)
+	}
+
+	if config.optionErr != nil {
+		return config.optionErr
+	}
+
 	r.mu.Lock()
 
 	if r.ran {
@@ -226,6 +302,23 @@ func (r *Rebuild) Run(ctx context.Context) error {
 	attempt := state.Attempt
 	runner := uuid.Must(uuid.NewV4())
 
+	// The takeover gate: a standing claim — claimed, never released —
+	// refuses transparent supersession, and the claim below carries the
+	// attestation exactly when it takes a standing claim over. Over a vacant
+	// or released claim there is nothing to take over, and the claim is
+	// plain: the fold refuses an attestation with nothing it could attest.
+	takeover := RunnerTakeover{}
+
+	if standing := !attempt.Runner.IsNil() && !attempt.Released; standing {
+		if config.takeover == (RunnerTakeover{}) {
+			r.mu.Unlock()
+			return fmt.Errorf("projection %q: %w: runner %s claimed attempt %s and has not recorded its exit; wait for the claim's release, or take it over with WithTakeover once the claimant is provably gone",
+				state.Name, ErrClaimStanding, attempt.Runner, attempt.ID)
+		}
+
+		takeover = config.takeover
+	}
+
 	var transitions []estoria.DomainEvent[State]
 
 	switch attempt.Phase {
@@ -234,7 +327,7 @@ func (r *Rebuild) Run(ctx context.Context) error {
 		return fmt.Errorf("projection %q has no rebuild in flight; nothing to run", state.Name)
 	case PhaseCreated:
 		transitions = []estoria.DomainEvent[State]{
-			RunnerClaimed{Attempt: attempt.ID, Runner: runner, At: time.Now()},
+			RunnerClaimed{Attempt: attempt.ID, Runner: runner, Takeover: takeover, At: time.Now()},
 			BuildStarted{},
 		}
 	case PhaseBuilding, PhaseCaughtUp, PhasePromoted, PhaseRetiring:
@@ -249,7 +342,7 @@ func (r *Rebuild) Run(ctx context.Context) error {
 		}
 
 		transitions = []estoria.DomainEvent[State]{
-			RunnerClaimed{Attempt: attempt.ID, Runner: runner, FromPosition: position, At: time.Now()},
+			RunnerClaimed{Attempt: attempt.ID, Runner: runner, FromPosition: position, Takeover: takeover, At: time.Now()},
 		}
 	default:
 		r.mu.Unlock()
@@ -302,6 +395,14 @@ func (r *Rebuild) Run(ctx context.Context) error {
 		}
 	}
 
+	// The claim is durable and observed as this run's: from here, every
+	// exit releases it — after the reconcile join and the processor's fully
+	// published exit on the paths that start one, immediately on a refusal
+	// that starts nothing — so a clean wind-down never strands a standing
+	// claim that only an attested takeover could recover.
+	r.runner = runner
+	defer r.releaseClaim(ctx)
+
 	handler, err := r.orchestrator.config.Handler(attempt.Target)
 	if err != nil {
 		r.mu.Unlock()
@@ -327,7 +428,6 @@ func (r *Rebuild) Run(ctx context.Context) error {
 	exited := make(chan struct{})
 	returned := make(chan struct{})
 
-	r.runner = runner
 	r.stopProcessor = stop
 	r.processorExited = exited
 	r.processorReturned = returned
@@ -759,17 +859,21 @@ func (r *Rebuild) promoteAfterCatchUp(ctx context.Context, attemptID, runnerID u
 // may still be in flight — so the promotion is retried at the same expected
 // version and the stream arbitrates.
 //
-// The loop runs on a context canceled when the certifying processor exits:
-// every stop that must end the run stops and joins the processor, so the
-// exit wakes a parked interval wait and unblocks a hung fold, and the
-// wind-down path owns the outcome. The caller's own cancellation reports
-// the context's error — the lost append is stale news by then, and which
-// error surfaces must not depend on scheduling. It reports promoted=true
-// once the promotion is durably resolved in its favor, installing the
-// observed history in the handle.
+// The loop runs on a context canceled when the certifying processor
+// returns: every stop that must end the run stops and joins the processor,
+// so the return wakes a parked interval wait and unblocks a hung fold, and
+// the wind-down path owns the outcome. The return signal — not the
+// published exit — is the cancellation source, because it is lock-free: a
+// retrying Promote holds the handle lock while its append honors this
+// context, and exit publication needs that same lock, so waiting on the
+// published exit would deadlock the retry against the publication. The
+// caller's own cancellation reports the context's error — the lost append
+// is stale news by then, and which error surfaces must not depend on
+// scheduling. It reports promoted=true once the promotion is durably
+// resolved in its favor, installing the observed history in the handle.
 func (r *Rebuild) reconcileUnknownPromotion(ctx context.Context, attemptID, runnerID uuid.UUID, slot int64, lost error) (bool, error) {
 	r.mu.Lock()
-	exited := r.processorExited
+	returned := r.processorReturned
 	r.mu.Unlock()
 
 	rctx, cancel := context.WithCancel(ctx)
@@ -777,7 +881,7 @@ func (r *Rebuild) reconcileUnknownPromotion(ctx context.Context, attemptID, runn
 
 	go func() {
 		select {
-		case <-exited:
+		case <-returned:
 			cancel()
 		case <-rctx.Done():
 		}
@@ -789,9 +893,23 @@ func (r *Rebuild) reconcileUnknownPromotion(ctx context.Context, attemptID, runn
 		}
 
 		loaded, err := r.hydrateFresh(rctx, slot)
+
+		var checkErr error
+		if err == nil {
+			checkErr = checkLifecycleAggregate(loaded, r.name)
+		}
+
 		switch {
-		case err != nil || checkLifecycleAggregate(loaded, r.name) != nil:
+		case err != nil:
 			// The authority is unreadable; nothing is proven either way.
+		case checkErr != nil:
+			// The fold read back but does not validate. The exact prefix is
+			// immutable, so the poison can never heal: retrying it as a
+			// transient read would spin forever. Fail closed with the
+			// validation verdict; the wind-down path surfaces it.
+			r.recordTerminalStop(checkErr)
+
+			return false, lost
 		case loaded.Version() < slot:
 			// The slot is empty, which proves nothing — the lost append may
 			// still be in flight — so retry at the same expected version and
@@ -1081,19 +1199,41 @@ func (r *Rebuild) claimDefeat(ctx context.Context, base AttemptState, lost error
 	}
 }
 
-// recordLostAppend classifies a lifecycle append this run lost to a version
-// conflict, from the exact event that defeated it — the fold at the slot the
-// append contended for — so the verdict is deterministic no matter what
-// landed on the stream afterward. A loss resolving to ErrEventsAppended is never
-// classified: the events at the contended slots are this run's own durable
-// append, and the raw error already reports exactly that. A load failure —
-// or a fold that never reaches the slot — leaves the verdict unclassified
-// rather than masking the original loss; a fold at the slot renders its
-// verdict through recordSlotDefeat.
+// recordLostAppend classifies a lifecycle append this run lost, from the
+// exact event that defeated it — the fold at the slot the append contended
+// for — so the verdict is deterministic no matter what landed on the stream
+// afterward. A loss resolving to ErrEventsAppended is never classified: the
+// events at the contended slots are this run's own durable append, and the
+// raw error already reports exactly that. A save that vouched for neither
+// outcome reports no version mismatch to derive the slot from, but the
+// append itself captured the slot it contended for, and that slot is just
+// as authoritative: the append was version-guarded to it, so a foreign
+// event found there proves the append can never land and renders the same
+// verdict a mismatch defeat would — while a slot never reached proves
+// nothing and records nothing, exactly as an empty fold does. A load
+// failure — or a fold that never reaches the slot — leaves the verdict
+// unclassified rather than masking the original loss; a fold at the slot
+// renders its verdict through recordSlotDefeat. An attempt this handle's
+// own command ended is never classified: the deliberate local stop is the
+// run's story, and reading the slot on its behalf could outlive the run on
+// a stalled authority.
 func (r *Rebuild) recordLostAppend(ctx context.Context, attemptID, runnerID uuid.UUID, lost error) {
+	r.mu.Lock()
+	commandStopped := r.commandStopped
+	r.mu.Unlock()
+
+	if commandStopped {
+		return
+	}
+
 	slot, ok := defeatSlot(lost, r.lifecycleStream())
 	if !ok {
-		return
+		var failed appendError
+		if aggregatestore.SaveOutcome(lost) != aggregatestore.AppendOutcomeUnknown || !errors.As(lost, &failed) {
+			return
+		}
+
+		slot = failed.slot
 	}
 
 	loaded, err := r.hydrateFresh(ctx, slot)
@@ -1349,6 +1489,7 @@ func (r *Rebuild) Rollback(ctx context.Context) error {
 	}
 
 	r.stopped = true
+	r.commandStopped = true
 	r.mu.Unlock()
 
 	stopErr := r.awaitProcessorStop(ctx)
@@ -1398,6 +1539,7 @@ func (r *Rebuild) Abandon(ctx context.Context, cause string) error {
 	}
 
 	r.stopped = true
+	r.commandStopped = true
 	r.mu.Unlock()
 
 	if appendErr != nil {
@@ -1755,6 +1897,42 @@ func (r *Rebuild) awaitProcessorStop(ctx context.Context) error {
 		return nil
 	case <-ctx.Done():
 		return ctx.Err()
+	}
+}
+
+// releaseClaim durably releases this run's claim at wind-down, best-effort:
+// it appends RunnerReleased when the handle's view still shows the attempt
+// in flight under this run's unreleased claim and validly folded, and the
+// append's optimistic concurrency arbitrates against anything the view has
+// not seen. A view showing the attempt ended, another claimant, or a
+// poisoned fold releases nothing — vacated attempts have no claim to
+// release, foreign claims are not this run's to release, and no command
+// acts on a poisoned fold. Failure to release is logged, never surfaced:
+// the claim then stays standing, and recovery is an operator-attested
+// takeover, the same as after a crash. The append runs detached from the
+// run context with its own bounded deadline — the common wind-down IS the
+// run context's cancellation, and an unreleased claim would refuse every
+// transparent successor.
+func (r *Rebuild) releaseClaim(ctx context.Context) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	attempt := r.aggregate.State().Attempt
+
+	if attempt.Phase == PhaseNone || attempt.Runner != r.runner || attempt.Released {
+		return
+	}
+
+	if checkLifecycleAggregate(r.aggregate, r.name) != nil {
+		return
+	}
+
+	releaseCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), claimReleaseTimeout)
+	defer cancel()
+
+	if err := r.appendLocked(releaseCtx, RunnerReleased{Attempt: attempt.ID, Runner: r.runner, At: time.Now()}); err != nil {
+		r.orchestrator.log.Warn("could not release the runner claim at wind-down; a successor run must take the claim over explicitly",
+			"attempt_id", attempt.ID, "runner", r.runner, "error", err)
 	}
 }
 

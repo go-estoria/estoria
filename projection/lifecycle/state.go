@@ -17,7 +17,8 @@
 // version is an allocation counter, not a count of successful rebuilds.
 //
 // Only decisions and durable facts are events: initiated, claimed, started,
-// caught up, promoted, rolled back, abandoned, retiring, retired. Progress is not —
+// caught up, promoted, rolled back, abandoned, retiring, retired, and the
+// claim's release at wind-down. Progress is not —
 // the advancing checkpoint lives in a checkpointstore.Store, and liveness is
 // inferred from checkpoint recency, because a crashed process appends
 // nothing on its way down. The test for what belongs in the stream: would a
@@ -178,11 +179,25 @@ type AttemptState struct {
 	Reason string
 
 	// Runner identifies the runner that most recently claimed the attempt —
-	// the process presumed to be building it. Claims are cooperative
-	// supersession: a superseded runner observes its displacement and winds
-	// itself down; nothing fences its data-plane writes, version isolation
-	// contains them.
+	// the process presumed to be building it. Nothing fences data-plane
+	// writes within one attempt — two processors over the same target would
+	// interleave writes into one storage and checkpoint identity — so
+	// supersession is gated rather than transparent: a claim is admitted
+	// only over a vacant or released claim, or by an explicitly attested
+	// takeover, and a superseded runner that is still alive observes its
+	// displacement and winds itself down.
 	Runner uuid.UUID
+
+	// Released reports that the most recently claimed runner recorded its
+	// processor's exit: its data-plane writes have ceased, and the next
+	// claim is admitted transparently. False while a claim is standing —
+	// claimed and not released — which refuses transparent claims (see
+	// Runner); a crashed runner records no release, leaving its claim
+	// standing for an operator-attested takeover.
+	Released bool
+
+	// ReleasedAt is when the most recent claim was released.
+	ReleasedAt time.Time
 
 	// InitiatedAt is when the rebuild was admitted.
 	InitiatedAt time.Time
@@ -222,12 +237,14 @@ func (a AttemptState) Vacant() bool {
 		a.Phase == PhaseNone &&
 		a.Reason == "" &&
 		a.Runner == uuid.Nil &&
+		!a.Released &&
 		a.InitiatedAt.IsZero() &&
 		a.ClaimedAt.IsZero() &&
 		a.CaughtUpAt.IsZero() &&
 		a.CaughtUpPos == 0 &&
 		a.PromotedAt.IsZero() &&
 		a.RetiringAt.IsZero() &&
+		a.ReleasedAt.IsZero() &&
 		len(a.RetiringWitnesses) == 0
 }
 
@@ -476,6 +493,12 @@ func (s State) validateAttempt() error {
 	// created phase records the runner that last claimed it.
 	if a.Phase != PhaseCreated && a.Runner.IsNil() {
 		return fmt.Errorf("attempt in phase %s records no claimed runner", a.Phase)
+	}
+
+	// A release testifies that a recorded claim's runner exited, so it
+	// cannot exist without the claim it released.
+	if a.Released && a.Runner.IsNil() {
+		return errors.New("attempt records a released claim with no claimed runner")
 	}
 
 	if a.Previous != (projection.ID{}) {

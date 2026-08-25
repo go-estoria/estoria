@@ -1954,11 +1954,12 @@ func TestPromote_CertificateDiesWithTheRun(t *testing.T) {
 	}
 }
 
-// TestRun_DisplacedBuilderWindsDown pins cooperative supersession: a second
-// run's claim displaces the first builder, whose reconcile loop observes the
-// recorded runner change, stops its processor, and surfaces
-// ErrRunnerDisplaced — with its certification revoked for good, so the
-// displaced handle cannot promote what it no longer builds.
+// TestRun_DisplacedBuilderWindsDown pins displacement through an attested
+// takeover: a second run takes the standing claim over, and the first
+// builder's reconcile loop observes the recorded runner change, stops its
+// processor, and surfaces ErrRunnerDisplaced — with its certification
+// revoked for good, so the displaced handle cannot promote what it no
+// longer builds.
 func TestRun_DisplacedBuilderWindsDown(t *testing.T) {
 	t.Parallel()
 
@@ -1974,7 +1975,17 @@ func TestRun_DisplacedBuilderWindsDown(t *testing.T) {
 		t.Fatalf("resuming the second runner: %v", err)
 	}
 
-	cancel2, done2 := runAsync(t, r2)
+	// The incumbent's claim is standing, so the second runner takes it over
+	// with an explicit attestation; the incumbent then observes the claim
+	// and winds itself down.
+	ctx2, cancel2 := context.WithCancel(t.Context())
+	t.Cleanup(cancel2)
+
+	done2 := make(chan error, 1)
+
+	go func() {
+		done2 <- r2.Run(ctx2, lifecycle.WithTakeover("op", "displacing the incumbent"))
+	}()
 
 	// The first builder observes the second runner's claim and winds down.
 	if err := waitDone(t, done1); !errors.Is(err, lifecycle.ErrRunnerDisplaced) {
@@ -2112,9 +2123,10 @@ func TestRun_UnobservedClaimRefusedWhenSuperseded(t *testing.T) {
 	writer.armFailure()
 	authority.armHydrateBefore(1, func(ctx context.Context) error {
 		competing, err := json.Marshal(lifecycle.RunnerClaimed{
-			Attempt: attemptID,
-			Runner:  uuid.Must(uuid.NewV4()),
-			At:      time.Date(2026, 8, 18, 9, 0, 0, 0, time.UTC),
+			Attempt:  attemptID,
+			Runner:   uuid.Must(uuid.NewV4()),
+			Takeover: lifecycle.RunnerTakeover{Actor: "op", Reason: "competing takeover"},
+			At:       time.Date(2026, 8, 18, 9, 0, 0, 0, time.UTC),
 		})
 		if err != nil {
 			return err
@@ -2240,9 +2252,10 @@ func TestRun_LostCatchUpToCompetingClaimIsDisplacement(t *testing.T) {
 	waitPhase(t, r, lifecycle.PhaseBuilding)
 
 	writer.armRaceAfter(0, writableLifecycleEvent(t, lifecycle.RunnerClaimed{
-		Attempt: r.State().Attempt.ID,
-		Runner:  uuid.Must(uuid.NewV4()),
-		At:      time.Date(2026, 8, 18, 10, 0, 0, 0, time.UTC),
+		Attempt:  r.State().Attempt.ID,
+		Runner:   uuid.Must(uuid.NewV4()),
+		Takeover: lifecycle.RunnerTakeover{Actor: "op", Reason: "competing takeover"},
+		At:       time.Date(2026, 8, 18, 10, 0, 0, 0, time.UTC),
 	}))
 	h.model.releaseGate()
 
@@ -2273,9 +2286,10 @@ func TestRun_LostCatchUpToClaimThenAbandonIsDisplacement(t *testing.T) {
 
 	writer.armRaceAfter(0,
 		writableLifecycleEvent(t, lifecycle.RunnerClaimed{
-			Attempt: r.State().Attempt.ID,
-			Runner:  uuid.Must(uuid.NewV4()),
-			At:      time.Date(2026, 8, 18, 10, 0, 0, 0, time.UTC),
+			Attempt:  r.State().Attempt.ID,
+			Runner:   uuid.Must(uuid.NewV4()),
+			Takeover: lifecycle.RunnerTakeover{Actor: "op", Reason: "competing takeover"},
+			At:       time.Date(2026, 8, 18, 10, 0, 0, 0, time.UTC),
 		}),
 		writableLifecycleEvent(t, lifecycle.Abandoned{Cause: "the winning claimant gave up"}),
 	)
@@ -2334,9 +2348,10 @@ func TestRun_LostCatchUpDisplacementSurvivesReconciledEnd(t *testing.T) {
 	// parks holding it — released only when the lost catch-up's wind-down
 	// cancels the run, which is exactly the in-flight-read race.
 	appendRawLifecycleEvent(t, events, lifecycle.RunnerClaimed{
-		Attempt: r.State().Attempt.ID,
-		Runner:  uuid.Must(uuid.NewV4()),
-		At:      time.Date(2026, 8, 18, 13, 0, 0, 0, time.UTC),
+		Attempt:  r.State().Attempt.ID,
+		Runner:   uuid.Must(uuid.NewV4()),
+		Takeover: lifecycle.RunnerTakeover{Actor: "op", Reason: "competing takeover"},
+		At:       time.Date(2026, 8, 18, 13, 0, 0, 0, time.UTC),
 	})
 	appendRawLifecycleEvent(t, events, lifecycle.Abandoned{Cause: "the winning claimant gave up"})
 
@@ -2746,9 +2761,10 @@ func TestRun_LostAutoPromotionToCompetingClaimIsDisplacement(t *testing.T) {
 
 	// Skip this run's own CaughtUp append; race the Promoted that follows.
 	writer.armRaceAfter(1, writableLifecycleEvent(t, lifecycle.RunnerClaimed{
-		Attempt: r.State().Attempt.ID,
-		Runner:  uuid.Must(uuid.NewV4()),
-		At:      time.Date(2026, 8, 18, 10, 0, 0, 0, time.UTC),
+		Attempt:  r.State().Attempt.ID,
+		Runner:   uuid.Must(uuid.NewV4()),
+		Takeover: lifecycle.RunnerTakeover{Actor: "op", Reason: "competing takeover"},
+		At:       time.Date(2026, 8, 18, 10, 0, 0, 0, time.UTC),
 	}))
 	h.model.releaseGate()
 
@@ -3226,8 +3242,9 @@ func TestResumeAfterCrash(t *testing.T) {
 	v1 := projection.ID{Name: "orders", Version: 1}
 	waitFor(t, func() bool { return len(h.model.table(v1)) == 3 })
 
-	// The stream records the full story: initiated, the first run's claim and
-	// start, the resumed run's claim, and the catch-up.
+	// The stream records the full story: initiated, the first run's claim,
+	// start, and wind-down release, the resumed run's transparent claim, and
+	// the catch-up.
 	replay, err := lifecycle.NewStore(h.events)
 	if err != nil {
 		t.Fatalf("creating the replay store: %v", err)
@@ -3238,8 +3255,8 @@ func TestResumeAfterCrash(t *testing.T) {
 		t.Fatalf("loading lifecycle aggregate: %v", err)
 	}
 
-	if got := loaded.Version(); got != 5 {
-		t.Errorf("want 5 recorded transitions (initiated, claimed, started, claimed again, caught up), got %d", got)
+	if got := loaded.Version(); got != 6 {
+		t.Errorf("want 6 recorded transitions (initiated, claimed, started, released, claimed again, caught up), got %d", got)
 	}
 
 	if got := countEventsOfType(t, h.events, lifecycle.RunnerClaimed{}.EventType()); got != 2 {
@@ -7163,9 +7180,10 @@ func TestRun_ForeignClaimInSlotIsDisplacement(t *testing.T) {
 	// A competing runner's claim over the same attempt durably wins the
 	// contested slot.
 	claim, err := json.Marshal(lifecycle.RunnerClaimed{
-		Attempt: r.State().Attempt.ID,
-		Runner:  uuid.Must(uuid.NewV4()),
-		At:      time.Date(2026, 8, 22, 9, 0, 0, 0, time.UTC),
+		Attempt:  r.State().Attempt.ID,
+		Runner:   uuid.Must(uuid.NewV4()),
+		Takeover: lifecycle.RunnerTakeover{Actor: "op", Reason: "competing takeover"},
+		At:       time.Date(2026, 8, 22, 9, 0, 0, 0, time.UTC),
 	})
 	if err != nil {
 		t.Fatalf("marshaling the competing claim: %v", err)
@@ -7237,5 +7255,482 @@ func TestRun_ProcessorExitUnblocksAParkedSlotFold(t *testing.T) {
 
 	if err := waitDone(t, done); err != nil {
 		t.Errorf("want a prompt clean wind-down after the abandon, got %v", err)
+	}
+}
+
+// retryParkingPromotedWriter swallows the first append recording Promoted —
+// the caller sees an unmarked error, nothing lands — and parks every later
+// Promoted append on its context, honoring cancellation the way a real store
+// does. parked signals once the first retry is parked.
+type retryParkingPromotedWriter struct {
+	eventstore.Store
+	mu     sync.Mutex
+	fired  bool
+	once   sync.Once
+	parked chan struct{}
+}
+
+func (w *retryParkingPromotedWriter) AppendStream(ctx context.Context, streamID typeid.ID, events []*eventstore.WritableEvent, opts eventstore.AppendStreamOptions) ([]*eventstore.Event, error) {
+	promoted := false
+	for _, event := range events {
+		if event.Type == (lifecycle.Promoted{}).EventType() {
+			promoted = true
+		}
+	}
+
+	if !promoted {
+		return w.Store.AppendStream(ctx, streamID, events, opts)
+	}
+
+	w.mu.Lock()
+	first := !w.fired
+	w.fired = true
+	w.mu.Unlock()
+
+	if first {
+		return nil, errors.New("append response lost")
+	}
+
+	w.once.Do(func() { close(w.parked) })
+	<-ctx.Done()
+
+	return nil, ctx.Err()
+}
+
+// TestRun_ParkedPromotionRetryUnblocksOnProcessorReturn pins the retry
+// loop's cancellation source: the retrying Promote holds the handle lock
+// while its append honors the reconciliation context, and exit publication
+// needs that same lock — so the cancellation must come from the lock-free
+// return signal. Waiting on the published exit instead deadlocks the run:
+// the append waits for the cancellation, the cancellation waits for the
+// published exit, and the publication waits for the lock the append holds.
+func TestRun_ParkedPromotionRetryUnblocksOnProcessorReturn(t *testing.T) {
+	t.Parallel()
+
+	events := newEventStore(t)
+	writer := &retryParkingPromotedWriter{Store: events, parked: make(chan struct{})}
+	h := buildHarnessWithLifecycleEvents(t, events, writer, lifecycle.WithAutoPromote(true))
+	h.appendDomain(3)
+
+	r := h.begin("promotion retry parked on a context-honoring store")
+	_, done := runAsync(t, r)
+
+	// The first Promoted append vanished without an outcome, and the retry
+	// is parked inside the store, holding the handle lock.
+	select {
+	case <-writer.parked:
+	case <-time.After(waitTimeout):
+		t.Fatal("timed out waiting for the promotion retry to park")
+	}
+
+	// The processor dies on its own while the retry holds the lock.
+	errHandler := errors.New("handler died during the parked retry")
+	h.model.armHandleFailureWith(errHandler)
+	h.appendDomain(1)
+
+	if err := waitDone(t, done); !errors.Is(err, errHandler) {
+		t.Errorf("want the processor's own failure surfaced after the parked retry unblocked, got %v", err)
+	}
+}
+
+// gatedVersionedBlockingStore, once armed, parks versioned reads of the
+// lifecycle stream on their context — counting the reads it parked — and
+// disarms without releasing them: reads issued after disarm pass through.
+type gatedVersionedBlockingStore struct {
+	eventstore.Store
+	mu      sync.Mutex
+	armed   bool
+	blocked int
+}
+
+func (s *gatedVersionedBlockingStore) arm() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.armed = true
+}
+
+func (s *gatedVersionedBlockingStore) disarm() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.armed = false
+}
+
+func (s *gatedVersionedBlockingStore) blockedCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return s.blocked
+}
+
+func (s *gatedVersionedBlockingStore) ReadStream(ctx context.Context, streamID typeid.ID, opts eventstore.ReadStreamOptions) (eventstore.StreamIterator, error) {
+	s.mu.Lock()
+	block := s.armed && streamID == ordersLifecycleStreamID() && opts.Count > 0
+	if block {
+		s.blocked++
+	}
+	s.mu.Unlock()
+
+	if block {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+
+	return s.Store.ReadStream(ctx, streamID, opts)
+}
+
+// TestRun_CededPromotionLossStillClassifiesTheSlot pins the loss verdict
+// when promotion reconciliation cedes before ever reading its slot: a
+// competing claim wins the contested slot and its claimant abandons, head
+// reconciliation sees only the terminal end and records a clean stop, and
+// the parked slot fold dies with the processor. The lost append's own
+// captured slot must still classify the loss — the run reports the
+// displacement, not a clean wind-down.
+func TestRun_CededPromotionLossStillClassifiesTheSlot(t *testing.T) {
+	t.Parallel()
+
+	events := newEventStore(t)
+	writer := &droppingPromotedWriter{Store: events, drops: -1}
+	blocker := &gatedVersionedBlockingStore{Store: writer}
+	h := buildHarnessWithLifecycleEvents(t, events, blocker, lifecycle.WithAutoPromote(true))
+	h.appendDomain(3)
+
+	r := h.begin("displacement hidden behind a reconciled end")
+	_, done := runAsync(t, r)
+
+	waitFor(t, func() bool { return writer.attemptCount() >= 1 })
+	blocker.arm()
+	waitFor(t, func() bool { return blocker.blockedCount() >= 1 })
+
+	// The competing claim wins the contested slot and its claimant abandons
+	// immediately after; only the captured slot still shows the defeat.
+	appendRawLifecycleEvent(t, events, lifecycle.RunnerClaimed{
+		Attempt:  r.State().Attempt.ID,
+		Runner:   uuid.Must(uuid.NewV4()),
+		Takeover: lifecycle.RunnerTakeover{Actor: "op", Reason: "competing takeover"},
+		At:       time.Date(2026, 8, 24, 9, 0, 0, 0, time.UTC),
+	})
+	appendRawLifecycleEvent(t, events, lifecycle.Abandoned{Cause: "the winning claimant gave up"})
+	blocker.disarm()
+
+	if err := waitDone(t, done); !errors.Is(err, lifecycle.ErrRunnerDisplaced) {
+		t.Errorf("want the loss classified from the captured slot after ceding, got %v", err)
+	}
+}
+
+// TestRun_PoisonedSlotHistoryFailsClosed pins how promotion reconciliation
+// treats a slot fold that reads back but does not validate: the exact
+// prefix is immutable, so the poison can never heal, and retrying it as a
+// transient read failure spins forever. The run must fail closed with the
+// validation verdict instead.
+func TestRun_PoisonedSlotHistoryFailsClosed(t *testing.T) {
+	t.Parallel()
+
+	events := newEventStore(t)
+	writer := &droppingPromotedWriter{Store: events, drops: -1}
+	blocker := &headBlockingStore{Store: writer}
+	h := buildHarnessWithLifecycleEvents(t, events, blocker, lifecycle.WithAutoPromote(true))
+	h.appendDomain(3)
+
+	r := h.begin("poisoned history in the contested slot")
+	_, done := runAsync(t, r)
+
+	waitFor(t, func() bool { return writer.attemptCount() >= 1 })
+	blocker.arm()
+	waitFor(t, func() bool { return blocker.blockedCount() >= 1 })
+
+	// A fold-poisoning event wins the contested slot; with head reads
+	// blocked, only the slot fold can render the verdict.
+	appendRawLifecycleEvent(t, events, lifecycle.BuildStarted{})
+
+	if err := waitDone(t, done); !errors.Is(err, lifecycle.ErrInvalidState) {
+		t.Errorf("want the immutable poisoned prefix to fail the run closed, got %v", err)
+	}
+}
+
+// TestRun_StandingClaimRefusesTransparentSupersession pins the takeover
+// gate: while the incumbent's recorded claim is standing — no processor
+// exit recorded — a second Run must refuse rather than claim transparently.
+// Nothing fences data-plane writes within one attempt: both runners would
+// write the same target storage and checkpoint, and an order-sensitive
+// handler could apply an older event over a newer one, permanently
+// regressing a promoted projection. The refusal appends nothing and leaves
+// the incumbent untouched.
+func TestRun_StandingClaimRefusesTransparentSupersession(t *testing.T) {
+	t.Parallel()
+
+	h := newHarness(t)
+	h.appendDomain(3)
+
+	r1 := h.begin("incumbent with a live processor")
+	cancel1, done1 := runAsync(t, r1)
+	waitPhase(t, r1, lifecycle.PhaseCaughtUp)
+
+	r2, err := h.orchestrator.Resume(t.Context(), "orders")
+	if err != nil {
+		t.Fatalf("resuming the second runner: %v", err)
+	}
+
+	if err := r2.Run(t.Context()); !errors.Is(err, lifecycle.ErrClaimStanding) {
+		t.Fatalf("want the standing claim to refuse the second run with ErrClaimStanding, got %v", err)
+	}
+
+	// The refusal precedes any append: the incumbent's claim is the only
+	// one, and no second build ever started.
+	if got := countEventsOfType(t, h.events, lifecycle.RunnerClaimed{}.EventType()); got != 1 {
+		t.Errorf("want only the incumbent's claim durable, got %d", got)
+	}
+
+	// The incumbent is untouched: still certified, still promotable.
+	if err := r1.Promote(t.Context()); err != nil {
+		t.Errorf("want the incumbent still promotable after the refused takeover, got %v", err)
+	}
+
+	cancel1()
+
+	if err := waitDone(t, done1); !errors.Is(err, context.Canceled) {
+		t.Errorf("want the incumbent's tailing run to report cancellation, got %v", err)
+	}
+}
+
+// TestRun_TakeoverClaimsACrashedRunnersAttempt pins the operator recovery
+// path: a crashed runner records no release, so its claim stands and a
+// plain Run is refused — and an explicitly attested takeover claims the
+// attempt, recording the attestation durably in the claim that won.
+func TestRun_TakeoverClaimsACrashedRunnersAttempt(t *testing.T) {
+	t.Parallel()
+
+	h := newHarness(t)
+	h.appendDomain(3)
+
+	r := h.begin("claimed by a runner that then crashes")
+	attemptID := r.State().Attempt.ID
+
+	// The crashed incumbent: a durable claim and start with no release —
+	// exactly what a process that died mid-build leaves behind.
+	appendRawLifecycleEvent(t, h.events, lifecycle.RunnerClaimed{
+		Attempt: attemptID,
+		Runner:  uuid.Must(uuid.NewV4()),
+		At:      time.Date(2026, 8, 24, 9, 0, 0, 0, time.UTC),
+	})
+	appendRawLifecycleEvent(t, h.events, lifecycle.BuildStarted{})
+
+	plain, err := h.orchestrator.Resume(t.Context(), "orders")
+	if err != nil {
+		t.Fatalf("resuming for the plain run: %v", err)
+	}
+
+	if err := plain.Run(t.Context()); !errors.Is(err, lifecycle.ErrClaimStanding) {
+		t.Fatalf("want the crashed runner's standing claim to refuse a plain run, got %v", err)
+	}
+
+	resumed, err := h.orchestrator.Resume(t.Context(), "orders")
+	if err != nil {
+		t.Fatalf("resuming for the takeover: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(t.Context())
+	t.Cleanup(cancel)
+
+	done := make(chan error, 1)
+
+	go func() {
+		done <- resumed.Run(ctx, lifecycle.WithTakeover("op", "incumbent process crashed"))
+	}()
+
+	waitPhase(t, resumed, lifecycle.PhaseCaughtUp)
+
+	// The takeover's attestation is durable in the claim that won.
+	var attested int
+
+	for _, raw := range rawEventsOfType(t, h.events, lifecycle.RunnerClaimed{}.EventType()) {
+		var claim lifecycle.RunnerClaimed
+		if err := json.Unmarshal(raw, &claim); err != nil {
+			t.Fatalf("decoding claim: %v", err)
+		}
+
+		if claim.Takeover != (lifecycle.RunnerTakeover{}) {
+			attested++
+
+			if claim.Takeover.Actor != "op" || claim.Takeover.Reason != "incumbent process crashed" {
+				t.Errorf("want the takeover's actor and reason recorded, got %+v", claim.Takeover)
+			}
+		}
+	}
+
+	if attested != 1 {
+		t.Errorf("want exactly the takeover claim attested, got %d", attested)
+	}
+
+	cancel()
+
+	if err := waitDone(t, done); !errors.Is(err, context.Canceled) {
+		t.Errorf("want the takeover run to report cancellation, got %v", err)
+	}
+}
+
+// TestRun_ProcessorFailureReleasesTheClaim pins the wind-down release on the
+// failure path: a run whose processor dies still releases its claim once the
+// processor has fully exited, so a successor is admitted transparently
+// instead of needing an attested takeover.
+func TestRun_ProcessorFailureReleasesTheClaim(t *testing.T) {
+	t.Parallel()
+
+	h := newHarness(t)
+	h.appendDomain(3)
+
+	r := h.begin("processor will die")
+	_, done := runAsync(t, r)
+	waitPhase(t, r, lifecycle.PhaseCaughtUp)
+
+	errHandler := errors.New("handler died mid-tail")
+	h.model.armHandleFailureWith(errHandler)
+	h.appendDomain(1)
+
+	if err := waitDone(t, done); !errors.Is(err, errHandler) {
+		t.Fatalf("want the processor's failure surfaced, got %v", err)
+	}
+
+	if got := countEventsOfType(t, h.events, lifecycle.RunnerReleased{}.EventType()); got != 1 {
+		t.Fatalf("want the failed run's claim released, got %d releases", got)
+	}
+
+	// The release admits the successor transparently: its run fails on the
+	// still-failing handler, never on the claim gate.
+	resumed, err := h.orchestrator.Resume(t.Context(), "orders")
+	if err != nil {
+		t.Fatalf("resuming after the failure: %v", err)
+	}
+
+	if err := resumed.Run(t.Context()); errors.Is(err, lifecycle.ErrClaimStanding) || !errors.Is(err, errHandler) {
+		t.Errorf("want the successor admitted past the released claim and failed by its handler, got %v", err)
+	}
+
+	if got := countEventsOfType(t, h.events, lifecycle.RunnerClaimed{}.EventType()); got != 2 {
+		t.Errorf("want the successor's transparent claim recorded (2 total), got %d", got)
+	}
+}
+
+// TestRun_RefusedStartReleasesTheClaim pins the release on Run's own
+// refusal paths after the claim is durable: a handler factory failure
+// starts no processor, and the claim it strands must still be released so
+// a successor is admitted transparently.
+func TestRun_RefusedStartReleasesTheClaim(t *testing.T) {
+	t.Parallel()
+
+	events := newEventStore(t)
+	appendDomainTo(t, events, 3)
+
+	errFactory := errors.New("factory refused")
+	failing := &atomic.Bool{}
+	failing.Store(true)
+
+	model := newReadModel()
+	orchestrator := bareOrchestrator(t, events, cpmemory.NewCheckpointStore(), func(id projection.ID) (projection.EventHandler, error) {
+		if failing.Load() {
+			return nil, errFactory
+		}
+
+		return model.handler(id)
+	})
+
+	r, err := orchestrator.Begin(t.Context(), "orders", "factory will refuse")
+	if err != nil {
+		t.Fatalf("beginning rebuild: %v", err)
+	}
+
+	if err := r.Run(t.Context()); !errors.Is(err, errFactory) {
+		t.Fatalf("want the factory failure surfaced, got %v", err)
+	}
+
+	if got := countEventsOfType(t, events, lifecycle.RunnerReleased{}.EventType()); got != 1 {
+		t.Fatalf("want the refused start's claim released, got %d releases", got)
+	}
+
+	// The release admits the successor transparently once the factory heals.
+	failing.Store(false)
+
+	resumed, err := orchestrator.Resume(t.Context(), "orders")
+	if err != nil {
+		t.Fatalf("resuming after the refused start: %v", err)
+	}
+
+	cancel, done := runAsync(t, resumed)
+	waitPhase(t, resumed, lifecycle.PhaseCaughtUp)
+
+	cancel()
+
+	if err := waitDone(t, done); !errors.Is(err, context.Canceled) {
+		t.Errorf("want the successor's run to report cancellation, got %v", err)
+	}
+}
+
+// TestRun_TakeoverOptionValidation pins WithTakeover's refusals: a takeover
+// without an actor and reason is refused before anything is read or
+// claimed, as is a nil option.
+func TestRun_TakeoverOptionValidation(t *testing.T) {
+	t.Parallel()
+
+	h := newHarness(t)
+	r := h.begin("takeover option validation")
+
+	if err := r.Run(t.Context(), lifecycle.WithTakeover("", "reason without an actor")); err == nil ||
+		!strings.Contains(err.Error(), "actor and a reason") {
+		t.Errorf("want the actorless takeover refused, got %v", err)
+	}
+
+	second, err := h.orchestrator.Resume(t.Context(), "orders")
+	if err != nil {
+		t.Fatalf("resuming: %v", err)
+	}
+
+	if err := second.Run(t.Context(), nil); err == nil || !strings.Contains(err.Error(), "must not be nil") {
+		t.Errorf("want the nil option refused, got %v", err)
+	}
+
+	if got := countEventsOfType(t, h.events, lifecycle.RunnerClaimed{}.EventType()); got != 0 {
+		t.Errorf("want no claim recorded by refused runs, got %d", got)
+	}
+}
+
+// TestRun_TakeoverAppliesOnlyToAStandingClaim pins the attestation's scope:
+// a Run carrying WithTakeover but finding no standing claim records a plain
+// claim — over a vacant claim there is nothing the attestation could
+// attest, and recording it would poison the fold.
+func TestRun_TakeoverAppliesOnlyToAStandingClaim(t *testing.T) {
+	t.Parallel()
+
+	h := newHarness(t)
+	h.appendDomain(3)
+
+	r := h.begin("takeover over a vacant claim")
+
+	ctx, cancel := context.WithCancel(t.Context())
+	t.Cleanup(cancel)
+
+	done := make(chan error, 1)
+
+	go func() {
+		done <- r.Run(ctx, lifecycle.WithTakeover("op", "mistaken precaution"))
+	}()
+
+	waitPhase(t, r, lifecycle.PhaseCaughtUp)
+
+	for _, raw := range rawEventsOfType(t, h.events, lifecycle.RunnerClaimed{}.EventType()) {
+		var claim lifecycle.RunnerClaimed
+		if err := json.Unmarshal(raw, &claim); err != nil {
+			t.Fatalf("decoding claim: %v", err)
+		}
+
+		if claim.Takeover != (lifecycle.RunnerTakeover{}) {
+			t.Errorf("want the vacant claim recorded plain, got attestation %+v", claim.Takeover)
+		}
+	}
+
+	cancel()
+
+	if err := waitDone(t, done); !errors.Is(err, context.Canceled) {
+		t.Errorf("want the run to report cancellation, got %v", err)
 	}
 }

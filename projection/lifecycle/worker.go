@@ -169,7 +169,21 @@ func (w *Worker) drain(ctx context.Context, live map[string]cutoverFold, after i
 	}
 
 	iter, err := w.events.ReadAll(ctx, eventstore.ReadAllOptions{AfterPosition: after})
+	// The same whole-error arbitration as the iterator path, for a failure
+	// racing cancellation at the read's opening: a failure carrying nothing
+	// but the cancellation is the context's own story, and an independent
+	// failure is joined with it rather than discarded. A successfully opened
+	// iterator proceeds — the loop's entry check reports the cancellation
+	// after the deferred close releases it.
 	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			if leavesMatch(err, ctxErr) {
+				return after, ctxErr
+			}
+
+			return after, errors.Join(ctxErr, fmt.Errorf("reading events: %w", err))
+		}
+
 		return after, fmt.Errorf("reading events: %w", err)
 	}
 

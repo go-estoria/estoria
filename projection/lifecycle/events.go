@@ -81,20 +81,43 @@ func (e RebuildInitiated) ApplyTo(s State) State {
 // runnable phase and phase-preserving in all of them, so duplicate execution
 // is durably observable in the stream. The claim names the attempt it
 // covers, so a delayed or misdirected claim cannot silently reassign an
-// attempt it never belonged to. Ownership is cooperative supersession — a
-// previously recorded runner observes its displacement and winds itself
-// down; runner identity is not checked by handler writes or checkpoint
-// saves, and nothing here fences the data plane. FromPosition is the
-// checkpoint position observed at claim time — audit information; the
-// processor loads its own resume position from the checkpoint store when it
-// starts, and the two can differ if the checkpoint moves in between. A
-// claim with no runner ID, with no attempt ID, for a different attempt than
-// the one in flight, or with no attempt in flight poisons the fold.
+// attempt it never belonged to. Ownership transfer is gated on the
+// incumbent's recorded exit: runner identity is not checked by handler
+// writes or checkpoint saves, and two processors over one attempt would
+// interleave writes into the same target storage and checkpoint — so a
+// claim is admitted only over a vacant or released claim, or by carrying an
+// explicitly attested Takeover of a standing one, durably auditing who
+// vouched that the incumbent was quiesced. A superseded runner that is
+// still alive observes its displacement and winds itself down.
+// FromPosition is the checkpoint position observed at claim time — audit
+// information; the processor loads its own resume position from the
+// checkpoint store when it starts, and the two can differ if the checkpoint
+// moves in between. A claim with no runner ID, with no attempt ID, for a
+// different attempt than the one in flight, or with no attempt in flight
+// poisons the fold — as does a takeover attestation missing its actor or
+// reason, a claim over a standing claim with no attested takeover, and a
+// takeover attested with no standing claim to take over.
 type RunnerClaimed struct {
 	Attempt      uuid.UUID
 	Runner       uuid.UUID
 	FromPosition int64
-	At           time.Time
+
+	// Takeover audits an explicitly attested takeover of a standing claim:
+	// the actor who vouched that the incumbent runner was quiesced, and
+	// why. Zero for a claim of a vacant or released attempt.
+	Takeover RunnerTakeover
+
+	At time.Time
+}
+
+// A RunnerTakeover attests that a standing runner claim was taken over
+// deliberately: the incumbent recorded no release — it crashed, or its
+// process is otherwise provably gone — and the named actor vouched for its
+// quiescence. Recorded in the claim that performed the takeover, so the
+// audit trail lives in the same event the arbitration admitted.
+type RunnerTakeover struct {
+	Actor  string
+	Reason string
 }
 
 // EventType returns the type of event.
@@ -128,8 +151,84 @@ func (e RunnerClaimed) ApplyTo(s State) State {
 			"projection", s.Name, "phase", s.Attempt.Phase)
 	}
 
+	switch standing := !s.Attempt.Runner.IsNil() && !s.Attempt.Released; {
+	case e.Takeover != (RunnerTakeover{}) && (e.Takeover.Actor == "" || e.Takeover.Reason == ""):
+		s = s.poison("runner takeover recorded without an actor and reason",
+			"projection", s.Name, "runner", e.Runner)
+	case standing && e.Takeover == (RunnerTakeover{}):
+		s = s.poison("runner claim recorded over a standing claim without an attested takeover",
+			"projection", s.Name, "claimant", s.Attempt.Runner, "runner", e.Runner)
+	case !standing && e.Takeover != (RunnerTakeover{}):
+		s = s.poison("runner takeover attested with no standing claim to take over",
+			"projection", s.Name, "runner", e.Runner)
+	}
+
 	s.Attempt.Runner = e.Runner
 	s.Attempt.ClaimedAt = e.At
+	s.Attempt.Released = false
+	s.Attempt.ReleasedAt = time.Time{}
+
+	return s
+}
+
+// RunnerReleased records that the attempt's claimed runner wound its run
+// down with its processor fully exited: the claim is released, and the
+// runner's data-plane writes have provably ceased. A released attempt
+// admits the next claim transparently; a standing claim — claimed, never
+// released — admits only an explicitly attested takeover, because nothing
+// fences data-plane writes within one attempt (see RunnerClaimed). Appended
+// best-effort by every wind-down that leaves the attempt in flight under
+// this runner's claim; a crashed runner appends nothing, leaving its claim
+// standing for an operator-attested takeover. A release with no attempt ID,
+// with no runner ID, with no rebuild in flight, for a different attempt, by
+// a runner that is not the recorded claimant, or over a claim already
+// released poisons the fold.
+type RunnerReleased struct {
+	Attempt uuid.UUID
+	Runner  uuid.UUID
+	At      time.Time
+}
+
+// EventType returns the type of event.
+func (RunnerReleased) EventType() string { return "runnerreleased" }
+
+// New returns a new instance of the event.
+func (RunnerReleased) New() estoria.DomainEvent[State] { return &RunnerReleased{} }
+
+// ApplyTo applies the event to state, returning the new state.
+func (e RunnerReleased) ApplyTo(s State) State {
+	switch {
+	case e.Attempt.IsNil():
+		s = s.poison("runner release recorded with no attempt ID",
+			"projection", s.Name)
+	case e.Runner.IsNil():
+		s = s.poison("runner release recorded with no runner ID",
+			"projection", s.Name)
+	}
+
+	switch s.Attempt.Phase {
+	case PhaseCreated, PhaseBuilding, PhaseCaughtUp, PhasePromoted, PhaseRetiring:
+		switch {
+		case e.Attempt != s.Attempt.ID:
+			s = s.poison("runner release recorded for a different attempt",
+				"projection", s.Name, "released_attempt", e.Attempt, "attempt", s.Attempt.ID)
+		case e.Runner != s.Attempt.Runner:
+			s = s.poison("runner release recorded by a runner that is not the recorded claimant",
+				"projection", s.Name, "releasing_runner", e.Runner, "claimant", s.Attempt.Runner)
+		case s.Attempt.Released:
+			s = s.poison("runner release recorded over a claim already released",
+				"projection", s.Name, "runner", e.Runner)
+		}
+	case PhaseNone:
+		s = s.poison("runner release recorded with no rebuild in flight",
+			"projection", s.Name, "runner", e.Runner)
+	default:
+		s = s.poison("runner release recorded in an unknown phase",
+			"projection", s.Name, "phase", s.Attempt.Phase)
+	}
+
+	s.Attempt.Released = true
+	s.Attempt.ReleasedAt = e.At
 
 	return s
 }

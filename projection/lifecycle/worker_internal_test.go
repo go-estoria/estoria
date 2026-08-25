@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/go-estoria/estoria/eventstore"
@@ -248,4 +249,81 @@ func TestDeliverCancellationPrecedesEverySetter(t *testing.T) {
 	if setter.touched {
 		t.Error("want no setter applied from a canceled delivery")
 	}
+}
+
+// selfCancelingReader cancels the drain's context from inside ReadAll and
+// returns the configured error: the read's result arrives alongside the
+// cancellation, exactly the race the whole-error classification governs.
+type selfCancelingReader struct {
+	cancel func()
+	err    error
+}
+
+func (r *selfCancelingReader) ReadAll(context.Context, eventstore.ReadAllOptions) (eventstore.StreamIterator, error) {
+	r.cancel()
+	return nil, r.err
+}
+
+// TestDrainReadAllCancellationProvenance pins the whole-error classification
+// at the ReadAll site, mirroring the iterator path: a failure carrying
+// nothing but the cancellation folds into exactly the context's own error,
+// and an independent read failure racing the cancellation is joined with it
+// rather than discarded.
+func TestDrainReadAllCancellationProvenance(t *testing.T) {
+	t.Parallel()
+
+	t.Run("cancellation-shaped failure is the context's own error", func(t *testing.T) {
+		t.Parallel()
+
+		ctx, cancel := context.WithCancel(t.Context())
+		t.Cleanup(cancel)
+
+		reader := &selfCancelingReader{cancel: cancel, err: fmt.Errorf("reader observed: %w", context.Canceled)}
+
+		worker, err := NewWorker(reader, WithCutoverSetter(nopSetter{}))
+		if err != nil {
+			t.Fatalf("creating worker: %v", err)
+		}
+
+		position, err := worker.drain(ctx, map[string]cutoverFold{}, 5, nil)
+
+		//nolint:errorlint // Identity is the assertion: a wrapped or joined context error must fail here.
+		if err != context.Canceled {
+			t.Fatalf("want exactly the context's error, got %v", err)
+		}
+
+		if position != 5 {
+			t.Errorf("want the position unmoved at 5, got %d", position)
+		}
+	})
+
+	t.Run("independent failure racing the cancellation is joined", func(t *testing.T) {
+		t.Parallel()
+
+		errRead := errors.New("read refused")
+
+		ctx, cancel := context.WithCancel(t.Context())
+		t.Cleanup(cancel)
+
+		reader := &selfCancelingReader{cancel: cancel, err: errRead}
+
+		worker, err := NewWorker(reader, WithCutoverSetter(nopSetter{}))
+		if err != nil {
+			t.Fatalf("creating worker: %v", err)
+		}
+
+		position, err := worker.drain(ctx, map[string]cutoverFold{}, 5, nil)
+
+		if !errors.Is(err, context.Canceled) {
+			t.Errorf("want the cancellation kept in the verdict, got %v", err)
+		}
+
+		if !errors.Is(err, errRead) {
+			t.Errorf("want the independent read failure kept alongside it, got %v", err)
+		}
+
+		if position != 5 {
+			t.Errorf("want the position unmoved at 5, got %d", position)
+		}
+	})
 }

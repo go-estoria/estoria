@@ -40,6 +40,14 @@ func claimed() lifecycle.RunnerClaimed {
 	return lifecycle.RunnerClaimed{Attempt: attemptID, Runner: runnerID, At: claimedAt}
 }
 
+func released() lifecycle.RunnerReleased {
+	return lifecycle.RunnerReleased{Attempt: attemptID, Runner: runnerID, At: caughtUpAt}
+}
+
+func takeover() lifecycle.RunnerTakeover {
+	return lifecycle.RunnerTakeover{Actor: "op", Reason: "incumbent process crashed"}
+}
+
 func caughtUp() lifecycle.CaughtUp {
 	return lifecycle.CaughtUp{Position: 4_182_331, Duration: 14 * time.Minute, At: caughtUpAt}
 }
@@ -148,9 +156,9 @@ func TestTransitions(t *testing.T) {
 			},
 		},
 		{
-			name:  "RunnerClaimed supersedes the previous claimant",
+			name:  "RunnerClaimed takes over the standing claimant with an attestation",
 			prior: fold(initiated(), claimed(), lifecycle.BuildStarted{}),
-			event: lifecycle.RunnerClaimed{Attempt: attemptID, Runner: runner2ID, FromPosition: 1_000, At: caughtUpAt},
+			event: lifecycle.RunnerClaimed{Attempt: attemptID, Runner: runner2ID, FromPosition: 1_000, Takeover: takeover(), At: caughtUpAt},
 			want: func(s lifecycle.State) lifecycle.State {
 				s.Attempt.Runner = runner2ID
 				s.Attempt.ClaimedAt = caughtUpAt
@@ -158,9 +166,31 @@ func TestTransitions(t *testing.T) {
 			},
 		},
 		{
+			name:  "RunnerClaimed succeeds a released claimant transparently",
+			prior: fold(initiated(), claimed(), lifecycle.BuildStarted{}, released()),
+			event: lifecycle.RunnerClaimed{Attempt: attemptID, Runner: runner2ID, FromPosition: 1_000, At: caughtUpAt},
+			want: func(s lifecycle.State) lifecycle.State {
+				s.Attempt.Runner = runner2ID
+				s.Attempt.ClaimedAt = caughtUpAt
+				s.Attempt.Released = false
+				s.Attempt.ReleasedAt = time.Time{}
+				return s
+			},
+		},
+		{
+			name:  "RunnerReleased records the claim's release",
+			prior: fold(initiated(), claimed(), lifecycle.BuildStarted{}),
+			event: released(),
+			want: func(s lifecycle.State) lifecycle.State {
+				s.Attempt.Released = true
+				s.Attempt.ReleasedAt = caughtUpAt
+				return s
+			},
+		},
+		{
 			name:  "RunnerClaimed preserves the caught-up phase",
 			prior: fold(initiated(), claimed(), lifecycle.BuildStarted{}, caughtUp()),
-			event: lifecycle.RunnerClaimed{Attempt: attemptID, Runner: runner2ID, FromPosition: 2_000, At: promotedAt},
+			event: lifecycle.RunnerClaimed{Attempt: attemptID, Runner: runner2ID, FromPosition: 2_000, Takeover: takeover(), At: promotedAt},
 			want: func(s lifecycle.State) lifecycle.State {
 				s.Attempt.Runner = runner2ID
 				s.Attempt.ClaimedAt = promotedAt
@@ -170,7 +200,7 @@ func TestTransitions(t *testing.T) {
 		{
 			name:  "RunnerClaimed preserves the promoted phase",
 			prior: fold(initiated(), claimed(), lifecycle.BuildStarted{}, caughtUp(), promoted()),
-			event: lifecycle.RunnerClaimed{Attempt: attemptID, Runner: runner2ID, FromPosition: 3_000, At: retiringAt},
+			event: lifecycle.RunnerClaimed{Attempt: attemptID, Runner: runner2ID, FromPosition: 3_000, Takeover: takeover(), At: retiringAt},
 			want: func(s lifecycle.State) lifecycle.State {
 				s.Attempt.Runner = runner2ID
 				s.Attempt.ClaimedAt = retiringAt
@@ -180,7 +210,7 @@ func TestTransitions(t *testing.T) {
 		{
 			name:  "RunnerClaimed preserves the retiring phase",
 			prior: fold(initiated(), claimed(), lifecycle.BuildStarted{}, caughtUp(), promoted(), retireStarted()),
-			event: lifecycle.RunnerClaimed{Attempt: attemptID, Runner: runner2ID, FromPosition: 4_000, At: retiringAt},
+			event: lifecycle.RunnerClaimed{Attempt: attemptID, Runner: runner2ID, FromPosition: 4_000, Takeover: takeover(), At: retiringAt},
 			want: func(s lifecycle.State) lifecycle.State {
 				s.Attempt.Runner = runner2ID
 				s.Attempt.ClaimedAt = retiringAt
