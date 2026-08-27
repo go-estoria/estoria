@@ -21,8 +21,7 @@
 // claim's release at wind-down. Progress is not —
 // the advancing checkpoint lives in a checkpointstore.Store, and liveness is
 // inferred from checkpoint recency, because a crashed process appends
-// nothing on its way down. The test for what belongs in the stream: would a
-// postmortem cite it?
+// nothing on its way down.
 package lifecycle
 
 import (

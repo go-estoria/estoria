@@ -208,7 +208,7 @@ var ErrEventsAppended = errors.New("events were appended")
 // event store: this save contributed no events to the stream. It says nothing
 // about the stream itself — an optimistic-concurrency refusal fails precisely
 // because another writer may have moved it — and decorators are not
-// transactional, so a hook or decorator that ran before the failure may have
+// transactional, so a decorator that ran before the failure may have
 // mutated the aggregate or queued events of its own, and a retried save
 // persists whatever is queued at retry time, not necessarily the original
 // command.
@@ -269,10 +269,6 @@ func (o AppendOutcome) String() string {
 // a deeper or sibling branch would resolve. Outcome decisions must use this
 // resolver; errors.Is searches the entire tree and can confirm both
 // sentinels on the same error.
-//
-// The resolver is the traversal: it matches sentinel and marker identities
-// level by level, outermost first, exactly where errors.Is would search the
-// whole tree and defeat the shadowing it exists for.
 //
 //nolint:errorlint // identity matching per node is the resolver's design
 func SaveOutcome(err error) AppendOutcome {

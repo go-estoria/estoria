@@ -1464,8 +1464,8 @@ func (r *Rebuild) recordSlotDefeat(loaded *aggregatestore.Aggregate[State], atte
 // Promote cuts reads over to the target version by recording Promoted — the
 // event is the flip. Cutover workers converge registered setters on it: a
 // running worker tails and delivers the flip, and a restarted worker refolds
-// and applies each projection's final cutover. Nothing runs inline, so there
-// is no hook failure to special-case and no unrecorded cutover to repair.
+// and applies each projection's final cutover. Nothing runs inline; there is
+// no unrecorded cutover to repair.
 //
 // Promotion requires a current catch-up certification: persisted
 // PhaseCaughtUp is a historical fact, not a standing license, so only the
@@ -1475,16 +1475,11 @@ func (r *Rebuild) recordSlotDefeat(loaded *aggregatestore.Aggregate[State], atte
 // the current head, before it can promote; the refusal wraps
 // ErrNotCertified.
 //
-// Promotion performs no fresh fold: the certificate is minted only by a run
-// on this handle, a run's entry installs an event-only fold, and every
-// input the flip records descends from that fold through this handle's own
-// appends — so the certificate protocol, not a refold, anchors promotion to
-// the events. The retained version is load-bearing: the flip's append
-// carries it as the expected version, so the append itself arbitrates
-// against every transition recorded since certification. A refold here
-// would absorb a competing claim after the certificate checks had already
-// passed, and the flip would then commit over a claimant the certificate
-// never covered.
+// Promotion performs no fresh fold: the certificate protocol anchors it to
+// the events, and the retained version is load-bearing — the flip's append
+// carries it as the expected version, arbitrating against every transition
+// recorded since certification; a refold would admit a claimant the
+// certificate never covered.
 func (r *Rebuild) Promote(ctx context.Context) error {
 	r.mu.Lock()
 
