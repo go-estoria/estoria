@@ -27,3 +27,12 @@ func (a *Aggregate[S]) TestOnlySetStateAtVersion(state S, version int64) {
 func (a *Aggregate[S]) TestOnlyUnappliedEvents() []*Event[S] {
 	return a.unappliedEvents
 }
+
+// TestOnlyApplyNext applies the next queued event, as a save or hydration does.
+func (a *Aggregate[S]) TestOnlyApplyNext() error {
+	return a.applyNext()
+}
+
+// NilStateForTest reports whether the snapshotting store's nil guard rejects
+// state, so the guard's nilable-kind coverage can be pinned directly.
+func NilStateForTest(state any) bool { return nilState(state) }

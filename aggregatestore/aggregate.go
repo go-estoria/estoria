@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"math"
 	"time"
 
 	"github.com/go-estoria/estoria"
@@ -64,6 +65,16 @@ func (a *Aggregate[S]) AppendWithMetadata(metadata map[string]string, events ...
 	}
 }
 
+// DiscardUnsavedEvents discards the aggregate's queued unsaved events,
+// restoring it to its last loaded or saved shape. Callers use it after a
+// failed Save so the failed events cannot ride along with a later save. When
+// the failure resolved to ErrEventsAppended the events are durable despite the
+// error; discarding them does not undo that, and hydrating the aggregate is
+// how they are observed.
+func (a *Aggregate[S]) DiscardUnsavedEvents() {
+	a.clearUnsavedEvents()
+}
+
 // MergeEventMetadata merges the given metadata into each of the aggregate's
 // unsaved events. A key already present on an event is overwritten: the latest
 // write wins. This is how ambient context — correlation and causation IDs,
@@ -104,10 +115,16 @@ func (a *Aggregate[S]) Version() int64 {
 // applyNext applies the next domain event in the apply queue to the state.
 // A successfully applied event increments the aggregate's version. If
 // there are no events in the apply queue, ErrNoUnappliedEvents is returned.
+// An aggregate at the maximum representable version applies nothing further:
+// its next-version computation would wrap negative, and a corrupt event
+// carrying the wrapped version would false-match it.
 func (a *Aggregate[S]) applyNext() error {
-	if len(a.unappliedEvents) == 0 {
+	switch {
+	case len(a.unappliedEvents) == 0:
 		return ErrNoUnappliedEvents
-	} else if a.unappliedEvents[0].Version != a.version+1 {
+	case a.version == math.MaxInt64:
+		return fmt.Errorf("aggregate is at the maximum version %d; no further events can be applied", int64(math.MaxInt64))
+	case a.unappliedEvents[0].Version != a.version+1:
 		return fmt.Errorf("event version mismatch: expected %d, got %d", a.version+1, a.unappliedEvents[0].Version)
 	}
 

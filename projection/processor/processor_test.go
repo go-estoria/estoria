@@ -62,6 +62,9 @@ func TestNew(t *testing.T) {
 		{"rejects a nil logger", func() (*processor.Processor, error) {
 			return processor.New(events, checkpoints, id, handler, processor.WithLogger(nil))
 		}},
+		{"rejects a nil option", func() (*processor.Processor, error) {
+			return processor.New(events, checkpoints, id, handler, nil)
+		}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()

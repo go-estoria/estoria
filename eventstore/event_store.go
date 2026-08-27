@@ -92,6 +92,11 @@ type StreamWriter interface {
 	// store-assigned ID, stream ID and version, timestamp, and global position
 	// (where the backend has one), alongside the payload, content type, and
 	// metadata as written.
+	//
+	// An append that returns an error may or may not have taken effect — a
+	// store can commit and lose its response — with one exception: a
+	// StreamVersionMismatchError is a refusal, returned only when nothing
+	// was appended.
 	AppendStream(ctx context.Context, streamID typeid.ID, events []*WritableEvent, opts AppendStreamOptions) ([]*Event, error)
 }
 
@@ -229,14 +234,25 @@ func VersionPtr(v int64) *int64 {
 // itself. Callers and backends must not write keys carrying it.
 const ReservedMetadataPrefix = "estoria."
 
+// ReservedStreamTypePrefix is the stream type prefix reserved for estoria's
+// own infrastructure streams, such as projection rebuild aggregates. User
+// aggregate types must not carry it; aggregatestore enforces this. The
+// enforcement is a guardrail against accidental collision, not a trust
+// boundary: callers own their event store and can write to any stream in it.
+const ReservedStreamTypePrefix = "estoria."
+
 // An Event is an event that has been read from an event store.
 type Event struct {
 	ID             typeid.ID
 	StreamID       typeid.ID
 	StreamVersion  int64
 	GlobalPosition *int64
-	Timestamp      time.Time
-	Data           []byte
+
+	// Timestamp is assigned by the store at append time, in UTC — as is
+	// every timestamp estoria persists.
+	Timestamp time.Time
+
+	Data []byte
 
 	// DataContentType is the MIME content type of Data, declared by the codec
 	// that produced the bytes. Stores return it exactly as it was written; an
@@ -312,6 +328,10 @@ func (e EventUnmarshalingError) Is(target error) bool {
 // StreamVersionMismatchError is returned when the expected stream version does not match
 // the actual stream version. When StreamMustNotExist triggers this error, ExpectedVersion
 // is set to 0, which is indistinguishable from an explicit ExpectVersion of 0.
+//
+// A mismatch is a refusal: implementations return it only when the append
+// left the stream untouched, and callers may rely on nothing having been
+// appended.
 type StreamVersionMismatchError struct {
 	StreamID        typeid.ID
 	ExpectedVersion int64

@@ -123,7 +123,7 @@ func (s *EventStore) AppendStream(_ context.Context, streamID typeid.ID, events 
 			StreamID:        streamID,
 			StreamVersion:   currentVersion + int64(i) + 1,
 			GlobalPosition:  &globalPos,
-			Timestamp:       time.Now(),
+			Timestamp:       time.Now().UTC(),
 			Data:            writableEvent.Data,
 			DataContentType: writableEvent.DataContentType,
 			Metadata:        writableEvent.Metadata,

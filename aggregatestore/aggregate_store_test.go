@@ -2,7 +2,9 @@ package aggregatestore_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"testing"
 
 	"github.com/go-estoria/estoria/aggregatestore"
 	"github.com/go-estoria/estoria/typeid"
@@ -79,4 +81,68 @@ func (e mockEntity) EntityID() typeid.ID {
 // from the aggregate type name and the UUID, the state from the factory, at a version.
 func newMockAggregate(id uuid.UUID, version int64) *aggregatestore.Aggregate[mockEntity] {
 	return aggregatestore.NewAggregateForTest(typeid.New("mockentity", id), newMockEntity(id), version)
+}
+
+// TestSaveOutcome pins outcome resolution: one answer per error, outermost
+// marker first, contradictions to unknown.
+func TestSaveOutcome(t *testing.T) {
+	t.Parallel()
+
+	for _, tt := range []struct {
+		name string
+		err  error
+		want aggregatestore.AppendOutcome
+	}{
+		{name: "nil vouches for nothing", err: nil, want: aggregatestore.AppendOutcomeUnknown},
+		{name: "an unmarked error vouches for nothing", err: errors.New("connection reset"), want: aggregatestore.AppendOutcomeUnknown},
+		{name: "the bare appended sentinel", err: aggregatestore.ErrEventsAppended, want: aggregatestore.AppendOutcomeAppended},
+		{name: "the bare nothing-appended sentinel", err: aggregatestore.ErrNoEventsAppended, want: aggregatestore.AppendOutcomeNothingAppended},
+		{
+			name: "a wrapped marker resolves through any depth",
+			err:  fmt.Errorf("outer: %w", fmt.Errorf("inner: %w", aggregatestore.ErrEventsAppended)),
+			want: aggregatestore.AppendOutcomeAppended,
+		},
+		{
+			name: "agreeing branches resolve to their shared outcome",
+			err:  errors.Join(fmt.Errorf("a: %w", aggregatestore.ErrNoEventsAppended), errors.New("b")),
+			want: aggregatestore.AppendOutcomeNothingAppended,
+		},
+		{
+			name: "contradicting branches at the same depth resolve to unknown",
+			err:  errors.Join(fmt.Errorf("a: %w", aggregatestore.ErrEventsAppended), fmt.Errorf("b: %w", aggregatestore.ErrNoEventsAppended)),
+			want: aggregatestore.AppendOutcomeUnknown,
+		},
+		{
+			name: "the shallower marker wins across branches",
+			err: errors.Join(
+				aggregatestore.ErrNoEventsAppended,
+				fmt.Errorf("outer: %w", fmt.Errorf("inner: %w", aggregatestore.ErrEventsAppended)),
+			),
+			want: aggregatestore.AppendOutcomeNothingAppended,
+		},
+		{
+			name: "a contradiction at the marker depth poisons an agreeing sibling branch",
+			err: errors.Join(
+				errors.Join(aggregatestore.ErrEventsAppended, aggregatestore.ErrNoEventsAppended),
+				errors.Join(aggregatestore.ErrNoEventsAppended),
+			),
+			want: aggregatestore.AppendOutcomeUnknown,
+		},
+		{
+			name: "a shallower marker shadows a deeper contradiction",
+			err: errors.Join(
+				aggregatestore.ErrNoEventsAppended,
+				fmt.Errorf("outer: %w", errors.Join(aggregatestore.ErrEventsAppended, aggregatestore.ErrNoEventsAppended)),
+			),
+			want: aggregatestore.AppendOutcomeNothingAppended,
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			if got := aggregatestore.SaveOutcome(tt.err); got != tt.want {
+				t.Errorf("want %v, got %v", tt.want, got)
+			}
+		})
+	}
 }

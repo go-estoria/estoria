@@ -1,9 +1,11 @@
 package aggregatestore
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"time"
 
 	"github.com/go-estoria/estoria"
@@ -15,6 +17,20 @@ import (
 // A SnapshotPolicy determines when to take snapshots.
 type SnapshotPolicy interface {
 	ShouldSnapshot(aggregateID typeid.ID, aggregateVersion int64, timestamp time.Time) bool
+}
+
+// A SnapshotStateValidator is implemented by state types that can vouch for
+// what their snapshots legitimately claim. SnapshottingStore consults it
+// after decoding a snapshot and before installing the state on the
+// aggregate — on the decoded state itself; on its address when only the
+// pointer receiver implements it; or, when the state type is an interface,
+// on an addressable copy of the dynamic value, which replaces the decoded
+// state on acceptance: a rejected payload is skipped in favor of full
+// hydration, exactly like an undecodable one, so tampered or truncated
+// snapshot storage degrades to replaying the events rather than seeding
+// the fold with fabricated state.
+type SnapshotStateValidator interface {
+	ValidateSnapshotState() error
 }
 
 // A SnapshottingStore wraps an aggregate store and uses a snapshot store to save snapshots
@@ -153,9 +169,44 @@ func (s *SnapshottingStore[S]) Hydrate(ctx context.Context, aggregate *Aggregate
 	// applies the fields it can before failing. Decoding into the live state would
 	// leave that partial state behind and then replay events on top of it, silently
 	// returning a corrupt aggregate with a nil error.
+	//
+	// The payload is cloned first: the bytes are the reader's to retain, and a
+	// zero-copy codec may install its input as state, which the replayed tail
+	// would then mutate in place — inside the retained snapshot itself.
 	state := s.inner.New(aggregate.ID().UUID).State()
-	if err := s.stateCodec.UnmarshalState(snap.Data, &state); err != nil {
+	if err := s.stateCodec.UnmarshalState(bytes.Clone(snap.Data), &state); err != nil {
 		log.Warn("failed to unmarshal snapshot, falling back to full hydration", "error", err)
+		return s.inner.Hydrate(ctx, aggregate, opts)
+	}
+
+	// An encoded null decodes into a nil pointer, map, or slice without
+	// error — any nilable kind, under a pluggable codec. Nil state can be
+	// neither validated nor installed: a validator method would dereference
+	// its nil receiver, and a nil map or slice would stand in for folded
+	// history the events never produced, while full replay reproduces any
+	// legitimately nil state on its own. The payload is treated exactly
+	// like an undecodable one.
+	if nilState(state) {
+		log.Warn("snapshot decoded to nil state, falling back to full hydration")
+		return s.inner.Hydrate(ctx, aggregate, opts)
+	}
+
+	// A state type that implements SnapshotStateValidator vouches for what
+	// snapshots of it can legitimately claim. A rejected payload is treated
+	// exactly like an undecodable one, because installing it would seed the
+	// tail's fold with fabricated state — the one thing full event replay
+	// can never produce on its own.
+	if err := validateSnapshotState(&state); err != nil {
+		log.Warn("snapshot state failed validation, falling back to full hydration", "error", err)
+		return s.inner.Hydrate(ctx, aggregate, opts)
+	}
+
+	// A validator receives the state through a pointer and may mutate what
+	// it vouches for — the interface write-back even installs the mutated
+	// copy — so nil is rechecked on the validated result: acceptance must
+	// not smuggle a nil past the decode-time guard.
+	if nilState(state) {
+		log.Warn("validated snapshot state is nil, falling back to full hydration")
 		return s.inner.Hydrate(ctx, aggregate, opts)
 	}
 
@@ -169,12 +220,70 @@ func (s *SnapshottingStore[S]) Hydrate(ctx context.Context, aggregate *Aggregate
 	return s.inner.Hydrate(ctx, aggregate, opts)
 }
 
+// nilableKind reports whether a value of kind k can hold nil — the shapes a
+// codec can produce from an encoded null.
+func nilableKind(k reflect.Kind) bool {
+	return k == reflect.Chan || k == reflect.Func || k == reflect.Interface ||
+		k == reflect.Map || k == reflect.Pointer || k == reflect.Slice ||
+		k == reflect.UnsafePointer
+}
+
+// nilState reports whether state holds nil — decoded from an encoded null,
+// or left behind by a validator that mutated what it vouched for. IsZero
+// stands in for IsNil: they agree on every nilable kind, and IsZero's
+// documented domain includes unsafe pointers.
+func nilState(state any) bool {
+	v := reflect.ValueOf(state)
+	return !v.IsValid() || (nilableKind(v.Kind()) && v.IsZero())
+}
+
+// validateSnapshotState consults the state's SnapshotStateValidator, if it
+// declares one, and reports whether the decoded payload may be installed.
+// The state value is consulted first, then its address, then — when the
+// state type is an interface, which hides its dynamic value's
+// pointer-receiver validator from both — the address of a copy of the
+// dynamic value; an accepted copy replaces the state, so the value the
+// validator vouched for is the value installed. At most one validator is
+// invoked; without one, every decoded payload is accepted.
+func validateSnapshotState[S any](state *S) error {
+	if validator, ok := any(*state).(SnapshotStateValidator); ok {
+		return validator.ValidateSnapshotState()
+	}
+
+	if validator, ok := any(state).(SnapshotStateValidator); ok {
+		return validator.ValidateSnapshotState()
+	}
+
+	dynamic := reflect.ValueOf(*state)
+	if !dynamic.IsValid() || dynamic.Type() == reflect.TypeFor[S]() {
+		return nil
+	}
+
+	addressable := reflect.New(dynamic.Type())
+	addressable.Elem().Set(dynamic)
+
+	validator, ok := addressable.Interface().(SnapshotStateValidator)
+	if !ok {
+		return nil
+	}
+
+	if err := validator.ValidateSnapshotState(); err != nil {
+		return err
+	}
+
+	if accepted, ok := addressable.Elem().Interface().(S); ok {
+		*state = accepted
+	}
+
+	return nil
+}
+
 // Save saves an aggregate, taking snapshots as needed.
-// An error that carries ErrEventsAppended means the events were appended but
+// An error resolving to ErrEventsAppended means the events were appended but
 // not applied to the in-memory aggregate.
 func (s *SnapshottingStore[S]) Save(ctx context.Context, aggregate *Aggregate[S], opts *SaveOptions) error {
 	if aggregate == nil {
-		return SaveError{Err: ErrNilAggregate}
+		return SaveError{Err: withSaveOutcome(ErrNoEventsAppended, ErrNilAggregate)}
 	}
 
 	log := s.log.With("aggregate_id", aggregate.ID())
@@ -195,7 +304,7 @@ func (s *SnapshottingStore[S]) Save(ctx context.Context, aggregate *Aggregate[S]
 		return SaveError{AggregateID: aggregate.ID(), Operation: "saving aggregate using inner store", Err: err}
 	}
 
-	now := time.Now()
+	now := time.Now().UTC()
 
 	for {
 		err := aggregate.applyNext()
@@ -206,7 +315,7 @@ func (s *SnapshottingStore[S]) Save(ctx context.Context, aggregate *Aggregate[S]
 			return SaveError{
 				AggregateID: aggregate.ID(),
 				Operation:   "applying next aggregate event",
-				Err:         fmt.Errorf("%w: %w", ErrEventsAppended, err),
+				Err:         withSaveOutcome(ErrEventsAppended, fmt.Errorf("events appended but not applied to the aggregate: %w", err)),
 			}
 		}
 
@@ -222,10 +331,13 @@ func (s *SnapshottingStore[S]) Save(ctx context.Context, aggregate *Aggregate[S]
 			continue
 		}
 
+		// The codec's output may alias memory the state still holds — the
+		// StateCodec contract permits it — and the writer may retain what it
+		// is handed, so the payload is detached before it crosses.
 		if err := s.writer.WriteSnapshot(ctx, &snapshotstore.AggregateSnapshot{
 			AggregateID:      aggregate.ID(),
 			AggregateVersion: aggregate.Version(),
-			Data:             data,
+			Data:             bytes.Clone(data),
 			DataContentType:  s.stateCodec.ContentType(),
 		}); err != nil {
 			log.Error("failed to write snapshot", "error", err)
