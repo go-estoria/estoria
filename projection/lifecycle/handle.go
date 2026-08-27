@@ -364,7 +364,7 @@ func (r *Rebuild) Run(ctx context.Context, opts ...RunOption) error {
 		return fmt.Errorf("projection %q has no rebuild in flight; nothing to run", state.Name)
 	case PhaseCreated:
 		transitions = []estoria.DomainEvent[State]{
-			RunnerClaimed{Attempt: attempt.ID, Runner: runner, Takeover: takeover, At: time.Now()},
+			RunnerClaimed{Attempt: attempt.ID, Runner: runner, Takeover: takeover, At: time.Now().UTC()},
 			BuildStarted{},
 		}
 	case PhaseBuilding, PhaseCaughtUp, PhasePromoted, PhaseRetiring:
@@ -379,7 +379,7 @@ func (r *Rebuild) Run(ctx context.Context, opts ...RunOption) error {
 		}
 
 		transitions = []estoria.DomainEvent[State]{
-			RunnerClaimed{Attempt: attempt.ID, Runner: runner, FromPosition: position, Takeover: takeover, At: time.Now()},
+			RunnerClaimed{Attempt: attempt.ID, Runner: runner, FromPosition: position, Takeover: takeover, At: time.Now().UTC()},
 		}
 	default:
 		r.mu.Unlock()
@@ -826,7 +826,7 @@ func (r *Rebuild) recordCatchUp(ctx context.Context, attemptID uuid.UUID, positi
 	if err := r.appendLocked(ctx, CaughtUp{
 		Position: position,
 		Duration: elapsed,
-		At:       time.Now(),
+		At:       time.Now().UTC(),
 	}); err != nil {
 		return false, false, err
 	}
@@ -1580,7 +1580,7 @@ func (r *Rebuild) Promote(ctx context.Context) error {
 		Next:             state.Attempt.Target,
 		Revision:         state.CutoverRevision + 1,
 		PolicyGeneration: state.RetirementPolicy.Generation,
-		At:               time.Now(),
+		At:               time.Now().UTC(),
 	})
 	if appendErr == nil {
 		// Consumed: the flip is recorded and observed.
@@ -1651,7 +1651,7 @@ func (r *Rebuild) Rollback(ctx context.Context) error {
 		From:       state.Live,
 		RevertedTo: state.Attempt.Previous,
 		Revision:   state.CutoverRevision + 1,
-		At:         time.Now(),
+		At:         time.Now().UTC(),
 	})
 	if appendErr != nil && aggregatestore.SaveOutcome(appendErr) != aggregatestore.AppendOutcomeAppended {
 		r.mu.Unlock()
@@ -1938,7 +1938,7 @@ func (r *Rebuild) Retire(ctx context.Context, opts ...RetireOption) error {
 			Witnesses:        required,
 			Receipts:         receipts,
 			Override:         config.override,
-			At:               time.Now(),
+			At:               time.Now().UTC(),
 		})
 		if err != nil {
 			if aggregatestore.SaveOutcome(err) == aggregatestore.AppendOutcomeAppended {
@@ -2135,7 +2135,7 @@ func (r *Rebuild) releaseClaim(ctx context.Context) {
 	releaseCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), claimReleaseTimeout)
 	defer cancel()
 
-	if err := r.appendLocked(releaseCtx, RunnerReleased{Attempt: attempt.ID, Runner: r.runner, At: time.Now()}); err != nil {
+	if err := r.appendLocked(releaseCtx, RunnerReleased{Attempt: attempt.ID, Runner: r.runner, At: time.Now().UTC()}); err != nil {
 		r.orchestrator.log.Warn("could not release the runner claim at wind-down; a successor run must take the claim over explicitly",
 			"attempt_id", attempt.ID, "runner", r.runner, "error", err)
 	}

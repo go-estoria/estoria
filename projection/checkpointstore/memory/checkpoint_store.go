@@ -47,7 +47,7 @@ func (s *CheckpointStore) Save(_ context.Context, id projection.ID, position int
 	s.checkpoints[id] = checkpointstore.Checkpoint{
 		ProjectionID: id,
 		Position:     position,
-		UpdatedAt:    time.Now(),
+		UpdatedAt:    time.Now().UTC(),
 	}
 
 	return nil

@@ -169,7 +169,7 @@ func (o *Orchestrator) Begin(ctx context.Context, name, reason string) (*Rebuild
 		Target:   target,
 		Previous: state.Live,
 		Reason:   reason,
-		At:       time.Now(),
+		At:       time.Now().UTC(),
 	})
 
 	if err := o.authority.Save(ctx, aggregate, nil); err != nil {
@@ -260,7 +260,7 @@ func (o *Orchestrator) SetRetirementPolicy(ctx context.Context, name string, cha
 		Unwitnessed: change.Unwitnessed,
 		Reason:      change.Reason,
 		Actor:       change.Actor,
-		At:          time.Now(),
+		At:          time.Now().UTC(),
 	})
 
 	if err := o.authority.Save(ctx, aggregate, nil); err != nil {

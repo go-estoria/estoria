@@ -247,8 +247,12 @@ type Event struct {
 	StreamID       typeid.ID
 	StreamVersion  int64
 	GlobalPosition *int64
-	Timestamp      time.Time
-	Data           []byte
+
+	// Timestamp is assigned by the store at append time, in UTC — as is
+	// every timestamp estoria persists.
+	Timestamp time.Time
+
+	Data []byte
 
 	// DataContentType is the MIME content type of Data, declared by the codec
 	// that produced the bytes. Stores return it exactly as it was written; an

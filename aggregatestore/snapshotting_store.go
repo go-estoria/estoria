@@ -304,7 +304,7 @@ func (s *SnapshottingStore[S]) Save(ctx context.Context, aggregate *Aggregate[S]
 		return SaveError{AggregateID: aggregate.ID(), Operation: "saving aggregate using inner store", Err: err}
 	}
 
-	now := time.Now()
+	now := time.Now().UTC()
 
 	for {
 		err := aggregate.applyNext()
