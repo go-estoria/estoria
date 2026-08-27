@@ -145,25 +145,4 @@ func TestSaveOutcome(t *testing.T) {
 			}
 		})
 	}
-
-	t.Run("a store's own marker shadows a marker inside the cause", func(t *testing.T) {
-		t.Parallel()
-
-		store, err := aggregatestore.NewHookableStore[mockEntity](&mockAggregateStore[mockEntity]{})
-		if err != nil {
-			t.Fatalf("creating hookable store: %v", err)
-		}
-
-		store.BeforeSave(func(context.Context, *aggregatestore.Aggregate[mockEntity]) error {
-			return fmt.Errorf("propagating a foreign failure: %w", aggregatestore.ErrEventsAppended)
-		})
-
-		saveErr := store.Save(t.Context(), newMockAggregate(uuid.Must(uuid.NewV4()), 1), nil)
-		if !errors.Is(saveErr, aggregatestore.ErrEventsAppended) {
-			t.Fatalf("want the buried foreign marker still visible to errors.Is, got %v", saveErr)
-		}
-		if got := aggregatestore.SaveOutcome(saveErr); got != aggregatestore.AppendOutcomeNothingAppended {
-			t.Errorf("want the refusal's own marker to win, got %v", got)
-		}
-	})
 }

@@ -78,8 +78,8 @@ func (a *Aggregate[S]) DiscardUnsavedEvents() {
 // MergeEventMetadata merges the given metadata into each of the aggregate's
 // unsaved events. A key already present on an event is overwritten: the latest
 // write wins. This is how ambient context — correlation and causation IDs,
-// actor, trace — is attached to a save as a whole, typically from a BeforeSave
-// hook.
+// actor, trace — is attached to a save as a whole, typically by a store
+// decorator before it delegates the save.
 func (a *Aggregate[S]) MergeEventMetadata(metadata map[string]string) {
 	if len(metadata) == 0 {
 		return

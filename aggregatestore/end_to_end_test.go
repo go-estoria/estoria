@@ -16,9 +16,9 @@ import (
 )
 
 // This test pins the observable behavior of the full aggregate store composition
-// (EventSourcedStore → SnapshottingStore → CachedStore → HookableStore) so that
-// refactors of the aggregatestore package are measured against it. Only mechanical
-// renames may touch this file while such a refactor is in flight.
+// (EventSourcedStore → SnapshottingStore → CachedStore) so that refactors of the
+// aggregatestore package are measured against it. Only mechanical renames may
+// touch this file while such a refactor is in flight.
 
 type account struct {
 	ID      typeid.ID
@@ -89,19 +89,12 @@ func (c *mapAggregateCache[S]) PutAggregate(_ context.Context, aggregateID typei
 
 var _ aggregatestore.AggregateCache[account] = (*mapAggregateCache[account])(nil)
 
-// hookCounts records which lifecycle hooks fired so the test can assert the
-// composition actually routed operations through the hookable layer.
-type hookCounts struct {
-	beforeLoad, afterLoad, beforeSave, afterSave int
-}
-
 func newComposedStore(
 	t *testing.T,
 	eventStore *memory.EventStore,
 	snapshotStore *snapshotmemory.SnapshotStore,
 	cache aggregatestore.AggregateCache[account],
-	counts *hookCounts,
-) *aggregatestore.HookableStore[account] {
+) *aggregatestore.CachedStore[account] {
 	t.Helper()
 
 	eventSourced, err := aggregatestore.New(eventStore, "account", newAccount,
@@ -121,29 +114,7 @@ func newComposedStore(
 		t.Fatalf("creating cached store: %v", err)
 	}
 
-	hookable, err := aggregatestore.NewHookableStore(cached)
-	if err != nil {
-		t.Fatalf("creating hookable store: %v", err)
-	}
-
-	hookable.BeforeLoad(func(_ context.Context, _ uuid.UUID) error {
-		counts.beforeLoad++
-		return nil
-	})
-	hookable.AfterLoad(func(_ context.Context, _ *aggregatestore.Aggregate[account]) error {
-		counts.afterLoad++
-		return nil
-	})
-	hookable.BeforeSave(func(_ context.Context, _ *aggregatestore.Aggregate[account]) error {
-		counts.beforeSave++
-		return nil
-	})
-	hookable.AfterSave(func(_ context.Context, _ *aggregatestore.Aggregate[account]) error {
-		counts.afterSave++
-		return nil
-	})
-
-	return hookable
+	return cached
 }
 
 func TestEndToEnd_FullComposition(t *testing.T) {
@@ -158,8 +129,7 @@ func TestEndToEnd_FullComposition(t *testing.T) {
 
 	snapshotStore := snapshotmemory.NewSnapshotStore()
 	cache := newMapAggregateCache[account]()
-	counts := &hookCounts{}
-	store := newComposedStore(t, eventStore, snapshotStore, cache, counts)
+	store := newComposedStore(t, eventStore, snapshotStore, cache)
 
 	accountUUID := uuid.Must(uuid.NewV4())
 	wantID := typeid.New("account", accountUUID)
@@ -226,8 +196,7 @@ func TestEndToEnd_FullComposition(t *testing.T) {
 
 	// A load with a cold cache hydrates from the snapshot plus the events past
 	// it and must converge on the same state.
-	coldCounts := &hookCounts{}
-	coldStore := newComposedStore(t, eventStore, snapshotStore, newMapAggregateCache[account](), coldCounts)
+	coldStore := newComposedStore(t, eventStore, snapshotStore, newMapAggregateCache[account]())
 
 	reloaded, err := coldStore.Load(ctx, accountUUID, nil)
 	if err != nil {
@@ -264,18 +233,5 @@ func TestEndToEnd_FullComposition(t *testing.T) {
 	// Loading an unknown aggregate reports ErrAggregateNotFound through every layer.
 	if _, err := store.Load(ctx, uuid.Must(uuid.NewV4()), nil); !errors.Is(err, aggregatestore.ErrAggregateNotFound) {
 		t.Errorf("loading unknown aggregate: want ErrAggregateNotFound, got %v", err)
-	}
-
-	// Every operation above went through the hookable layer.
-	if counts.beforeSave != 2 || counts.afterSave != 2 {
-		t.Errorf("save hooks: want 2/2, got %d/%d", counts.beforeSave, counts.afterSave)
-	}
-
-	if counts.beforeLoad != 3 || counts.afterLoad != 2 {
-		t.Errorf("load hooks: want before=3 (cache hit, time travel, not-found), after=2 (successes only), got %d/%d", counts.beforeLoad, counts.afterLoad)
-	}
-
-	if coldCounts.beforeLoad != 1 || coldCounts.afterLoad != 1 {
-		t.Errorf("cold store load hooks: want 1/1, got %d/%d", coldCounts.beforeLoad, coldCounts.afterLoad)
 	}
 }

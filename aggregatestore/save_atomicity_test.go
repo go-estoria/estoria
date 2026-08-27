@@ -16,9 +16,9 @@ import (
 // both directions matter.
 
 // TestSaveAtomicity_SentinelSurvivesComposition forces a post-append apply failure at
-// the bottom of the full four-store composition and asserts errors.Is still finds the
+// the bottom of the full three-store composition and asserts errors.Is still finds the
 // sentinel at the top. Every wrapping store rewraps failures in its own SaveError —
-// three deep by the time one reaches the caller — which is the failure mode that
+// two deep by the time one reaches the caller — which is the failure mode that
 // ruled out a field on SaveError: errors.As would bind the outermost wrapper, whose
 // field nobody set.
 func TestSaveAtomicity_SentinelSurvivesComposition(t *testing.T) {
@@ -31,7 +31,7 @@ func TestSaveAtomicity_SentinelSurvivesComposition(t *testing.T) {
 		t.Fatalf("creating event store: %v", err)
 	}
 
-	store := newComposedStore(t, eventStore, snapshotmemory.NewSnapshotStore(), newMapAggregateCache[account](), &hookCounts{})
+	store := newComposedStore(t, eventStore, snapshotmemory.NewSnapshotStore(), newMapAggregateCache[account]())
 
 	aggregate := store.New(uuid.Must(uuid.NewV4()))
 	aggregate.Append(fundsDeposited{Amount: 100})
@@ -66,7 +66,7 @@ func TestSaveAtomicity_PreAppendFailureCarriesNoSentinel(t *testing.T) {
 		t.Fatalf("creating event store: %v", err)
 	}
 
-	store := newComposedStore(t, eventStore, snapshotmemory.NewSnapshotStore(), newMapAggregateCache[account](), &hookCounts{})
+	store := newComposedStore(t, eventStore, snapshotmemory.NewSnapshotStore(), newMapAggregateCache[account]())
 	accountUUID := uuid.Must(uuid.NewV4())
 
 	aggregate := store.New(accountUUID)
