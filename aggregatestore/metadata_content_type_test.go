@@ -238,28 +238,35 @@ func TestSave_RejectsReservedMetadataKeys(t *testing.T) {
 	}
 }
 
-// TestBeforeSaveHook_InjectsMetadata covers the ambient-context path: a hook on
-// the wrapping store amends the events queued on the aggregate, and the amended
-// metadata is what reaches storage.
-func TestBeforeSaveHook_InjectsMetadata(t *testing.T) {
+// metadataInjectingStore decorates an aggregate store, merging ambient metadata
+// into the events queued on an aggregate before delegating the save.
+type metadataInjectingStore struct {
+	aggregatestore.Store[account]
+	metadata map[string]string
+}
+
+func (s metadataInjectingStore) Save(ctx context.Context, aggregate *aggregatestore.Aggregate[account], opts *aggregatestore.SaveOptions) error {
+	aggregate.MergeEventMetadata(s.metadata)
+	return s.Store.Save(ctx, aggregate, opts)
+}
+
+// TestSaveDecorator_InjectsMetadata covers the ambient-context path: a decorator
+// amends the events queued on the aggregate before delegating the save, and the
+// amended metadata is what reaches storage.
+func TestSaveDecorator_InjectsMetadata(t *testing.T) {
 	t.Parallel()
 
 	eventStore, _ := memory.NewEventStore()
 
-	hookable, err := aggregatestore.NewHookableStore(newAccountStore(t, eventStore))
-	if err != nil {
-		t.Fatalf("creating hookable store: %v", err)
+	store := metadataInjectingStore{
+		Store:    newAccountStore(t, eventStore),
+		metadata: map[string]string{"correlation_id": "corr-1"},
 	}
 
-	hookable.BeforeSave(func(_ context.Context, aggregate *aggregatestore.Aggregate[account]) error {
-		aggregate.MergeEventMetadata(map[string]string{"correlation_id": "corr-1"})
-		return nil
-	})
-
-	aggregate := hookable.New(uuid.Must(uuid.NewV4()))
+	aggregate := store.New(uuid.Must(uuid.NewV4()))
 	aggregate.Append(fundsDeposited{Amount: 10})
 
-	if err := hookable.Save(t.Context(), aggregate, nil); err != nil {
+	if err := store.Save(t.Context(), aggregate, nil); err != nil {
 		t.Fatalf("saving aggregate: %v", err)
 	}
 
