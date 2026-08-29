@@ -1,0 +1,38 @@
+# Enables auto-merge on Dependabot minor/patch PRs, so they land on their own
+# once the required "CI OK" check passes. Major updates are left for review.
+#
+# The merge is enabled with a fine-grained PAT (secret DEPENDABOT_AUTOMERGE_PAT,
+# contents + pull-requests read/write) rather than GITHUB_TOKEN: a merge
+# performed by GITHUB_TOKEN does not trigger `on: push` workflows, which would
+# silently skip release.yml. Until the secret exists, this workflow no-ops.
+name: Dependabot auto-merge
+
+on: pull_request
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  auto-merge:
+    name: Enable auto-merge
+    if: github.event.pull_request.user.login == 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fetch update metadata
+        id: metadata
+        uses: dependabot/fetch-metadata@v2
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Enable auto-merge for minor and patch updates
+        if: steps.metadata.outputs.update-type != 'version-update:semver-major'
+        env:
+          GH_TOKEN: ${{ secrets.DEPENDABOT_AUTOMERGE_PAT }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+        run: |
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::notice::DEPENDABOT_AUTOMERGE_PAT is not set; skipping auto-merge."
+            exit 0
+          fi
+          gh pr merge --auto --squash "$PR_URL"

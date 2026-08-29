@@ -44,3 +44,17 @@ jobs:
         run: go vet ./...
       - name: Test
         run: go test -race -cover ./...
+
+  # Single required-status-check context for branch protection: one stable
+  # name ("CI OK") no matter how the jobs above evolve.
+  ci-ok:
+    name: CI OK
+    if: always()
+    needs: [lint, test]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify all required jobs succeeded
+        run: |
+          for result in ${{ join(needs.*.result, ' ') }}; do
+            [ "$result" = "success" ] || { echo "a required job reported: $result"; exit 1; }
+          done
