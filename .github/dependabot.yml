@@ -6,21 +6,37 @@ updates:
     schedule:
       interval: weekly
     open-pull-requests-limit: 10
+    # release-info.yml requires a release label on every PR; without this,
+    # each dependabot PR would sit blocked waiting to be labeled by hand.
+    # A dependency bump changes the published module, so it earns a version.
+    labels:
+      - dependencies
+      - patch release
     groups:
-      # Batch minor/patch bumps into a single PR to cut noise.
-      # Major bumps still arrive as individual PRs.
+      # Batch minor/patch bumps into a single PR to cut noise; majors arrive
+      # as one grouped PR of their own for human review.
       go-minor-patch:
         update-types:
           - minor
           - patch
+      go-major:
+        update-types:
+          - major
 
-  # GitHub Actions used by the workflows in this repo.
+  # GitHub Actions used by the workflows in this repo. These don't change the
+  # published module, so they don't cut a version.
   - package-ecosystem: github-actions
     directory: /
     schedule:
       interval: weekly
+    labels:
+      - github_actions
+      - no release
     groups:
       github-actions:
         update-types:
           - minor
           - patch
+      github-actions-major:
+        update-types:
+          - major
