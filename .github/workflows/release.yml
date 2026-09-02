@@ -24,14 +24,14 @@ jobs:
     name: Tag and Release
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           # Full history so pr-semver-bump can see existing version tags.
           fetch-depth: 0
 
       - name: Tag New Version
         id: bump
-        uses: jefflinse/pr-semver-bump@v1.7.1
+        uses: jefflinse/pr-semver-bump@v1.7.4
         with:
           mode: bump
           repo-token: ${{ secrets.GITHUB_TOKEN }}
@@ -41,7 +41,7 @@ jobs:
 
       - name: Create GitHub Release
         if: steps.bump.outputs.skipped == 'false'
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ steps.bump.outputs.version }}
           body: ${{ steps.bump.outputs.release-notes }}
