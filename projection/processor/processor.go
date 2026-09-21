@@ -40,6 +40,10 @@ const iteratorCloseTimeout = 5 * time.Second
 // to the handler, and checkpoints its progress; once it reaches the head it
 // polls for new events at a fixed interval, re-saving the checkpoint each
 // idle cycle so checkpoint recency doubles as a liveness signal.
+//
+// Events are read in bounded batches, and a batch's iterator is closed before
+// any of its events is handled. The handler and checkpoint store therefore may
+// share a bounded resource, such as a connection pool, with the reader.
 type Processor struct {
 	events      eventstore.GlobalReader
 	checkpoints checkpointstore.Store

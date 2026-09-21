@@ -257,6 +257,37 @@ func TestProcessor_BatchSize(t *testing.T) {
 	}
 }
 
+// TestProcessor_FullBatchIsNotCaughtUp pins that exhausting a count-limited
+// read after exactly Count events does not establish the store head. A third,
+// short read is required after two full batches.
+func TestProcessor_FullBatchIsNotCaughtUp(t *testing.T) {
+	t.Parallel()
+
+	reader := &scriptedReader{scripts: []iteratorScript{
+		{events: []*eventstore.Event{eventAt(1), eventAt(2)}},
+		{events: []*eventstore.Event{eventAt(3), eventAt(4)}},
+		{},
+	}}
+	handler := &collector{}
+	p := newProcessor(t, reader, cpmemory.NewCheckpointStore(), handler,
+		processor.WithBatchSize(2),
+		processor.WithPollInterval(time.Hour),
+	)
+
+	cancel, done := start(t, p)
+	waitCaughtUp(t, p)
+
+	assertPositions(t, handler.snapshot(), 1, 2, 3, 4)
+	if got := len(reader.snapshotCounts()); got != 3 {
+		t.Errorf("want CaughtUp after a third, short read; got %d reads", got)
+	}
+
+	cancel()
+	if err := waitDone(t, done); !errors.Is(err, context.Canceled) {
+		t.Errorf("want Run to return the context's error on cancellation, got %v", err)
+	}
+}
+
 // TestProcessor_CheckpointEvery pins the checkpoint cadence: every n handled
 // events, plus the unconditional save at the end of the drain cycle.
 func TestProcessor_CheckpointEvery(t *testing.T) {
@@ -753,6 +784,7 @@ func TestProcessor_CancellationAccompanyingEmptyRead(t *testing.T) {
 	p := newProcessor(t, reader, checkpoints, handler)
 
 	err := p.Run(ctx)
+	//nolint:errorlint // Exact identity proves EOF was collapsed into the context error.
 	if err != context.Canceled {
 		t.Fatalf("want the empty-read EOF to collapse to context cancellation, got %v", err)
 	}
@@ -815,6 +847,7 @@ func TestProcessor_ContextObliviousIteratorStopsAfterCancellation(t *testing.T) 
 	p := newProcessor(t, reader, cpmemory.NewCheckpointStore(), handler)
 
 	err := p.Run(ctx)
+	//nolint:errorlint // Exact identity proves no iterator error wrapped the cancellation.
 	if err != context.Canceled {
 		t.Fatalf("want context cancellation, got %v", err)
 	}
@@ -844,6 +877,7 @@ func TestProcessor_CancellationDuringCloseSuppressesCallbacks(t *testing.T) {
 	p := newProcessor(t, reader, checkpoints, handler)
 
 	err := p.Run(ctx)
+	//nolint:errorlint // Exact identity proves close-time cancellation was returned unchanged.
 	if err != context.Canceled {
 		t.Fatalf("want context cancellation, got %v", err)
 	}
@@ -866,6 +900,7 @@ func TestProcessor_FinalHandlerCancellationWithholdsCaughtUp(t *testing.T) {
 	p := newProcessor(t, reader, checkpoints, handler)
 
 	err := p.Run(ctx)
+	//nolint:errorlint // Exact identity proves cancellation after handling was returned unchanged.
 	if err != context.Canceled {
 		t.Fatalf("want context cancellation, got %v", err)
 	}

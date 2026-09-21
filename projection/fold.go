@@ -9,10 +9,7 @@ import (
 	"github.com/go-estoria/estoria/eventstore"
 )
 
-// A Fold reads events from an event stream and executes a projection function
-// for each event. It invokes the handler while the caller-owned iterator
-// remains open; callers must account for resources or locks retained until
-// they close it.
+// A Fold reads events from an event stream and executes a projection function for each event.
 type Fold struct {
 	iter                   eventstore.StreamIterator
 	continueOnHandlerError bool
@@ -47,6 +44,10 @@ type Result struct {
 	NumFailedEvents int64
 }
 
+// Project reads the iterator to the end of the stream, handling each event as
+// it is read. The iterator belongs to the caller and stays open throughout, so
+// the handler must not need a resource retained by the iterator. Such handlers
+// should instead process events collected and closed by their caller.
 func (p *Fold) Project(ctx context.Context, eventHandler EventHandler) (*Result, error) {
 	if eventHandler == nil {
 		return nil, errors.New("event handler is required")
