@@ -153,6 +153,83 @@ func awaitExit(t *testing.T, runErr <-chan error) error {
 	}
 }
 
+// lease is a one-slot resource that refuses a second holder rather than
+// blocking, so holding it across a call that needs it surfaces as an error.
+type lease struct {
+	mu     sync.Mutex
+	holder string
+}
+
+func (l *lease) acquire(holder string) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	if l.holder != "" {
+		return errors.New(holder + " needs the resource while " + l.holder + " holds it")
+	}
+
+	l.holder = holder
+	return nil
+}
+
+func (l *lease) release() {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	l.holder = ""
+}
+
+// leasedReader holds the lease from ReadAll until the iterator is closed, as
+// a pooled connection is pinned by an open cursor.
+type leasedReader struct {
+	inner eventstore.GlobalReader
+	lease *lease
+}
+
+func (r *leasedReader) ReadAll(ctx context.Context, opts eventstore.ReadAllOptions) (eventstore.StreamIterator, error) {
+	if err := r.lease.acquire("an open iterator"); err != nil {
+		return nil, err
+	}
+
+	iter, err := r.inner.ReadAll(ctx, opts)
+	if err != nil {
+		r.lease.release()
+		return nil, err
+	}
+
+	return &leasedIterator{StreamIterator: iter, lease: r.lease}, nil
+}
+
+type leasedIterator struct {
+	eventstore.StreamIterator
+	lease  *lease
+	closed bool
+}
+
+func (i *leasedIterator) Close(ctx context.Context) error {
+	if !i.closed {
+		i.closed = true
+		i.lease.release()
+	}
+
+	return i.StreamIterator.Close(ctx)
+}
+
+// leasedSetter records cutovers while holding the same lease as the reader.
+type leasedSetter struct {
+	recordingSetter
+	lease *lease
+}
+
+func (s *leasedSetter) ApplyCutover(ctx context.Context, cutover lifecycle.Cutover) error {
+	if err := s.lease.acquire("the setter"); err != nil {
+		return err
+	}
+	defer s.lease.release()
+
+	return s.recordingSetter.ApplyCutover(ctx, cutover)
+}
+
 // countingReader wraps a GlobalReader, recording the AfterPosition of every
 // read issued through it once the read has been handed out.
 type countingReader struct {
@@ -1261,6 +1338,58 @@ func TestWorker_TailCloseFailureStopsTheWorker(t *testing.T) {
 	}
 
 	assertCutovers(t, recorder.seen(), []lifecycle.Cutover{{Live: ordersV1, Revision: 1}})
+}
+
+// TestWorker_TailDeliveryFollowsIteratorClose pins the resource order end to
+// end: the reader and setter share a one-slot resource, so delivery under an
+// open iterator would stop the worker instead of deadlocking the test.
+func TestWorker_TailDeliveryFollowsIteratorClose(t *testing.T) {
+	t.Parallel()
+
+	events := newEventStore(t)
+	projections, err := lifecycle.NewStore(events)
+	if err != nil {
+		t.Fatalf("creating lifecycle store: %v", err)
+	}
+
+	ordersV1 := projection.ID{Name: "orders", Version: 1}
+	ordersV2 := projection.ID{Name: "orders", Version: 2}
+	recordCutover(t, projections, ordersV1, projection.ID{}, false)
+
+	slot := &lease{}
+	setter := &leasedSetter{lease: slot}
+	worker, err := lifecycle.NewWorker(&leasedReader{inner: events, lease: slot},
+		lifecycle.WithCutoverSetter(setter),
+		lifecycle.WithPollInterval(2*time.Millisecond),
+	)
+	if err != nil {
+		t.Fatalf("creating worker: %v", err)
+	}
+
+	runErr, cancel := runWorker(t, worker)
+	waitReady(t, worker)
+	recordCutover(t, projections, ordersV2, ordersV1, false)
+
+	deadline := time.After(waitTimeout)
+	for len(setter.seen()) < 2 {
+		select {
+		case err := <-runErr:
+			t.Fatalf("want the tail cutover delivered on a one-slot resource, got %v", err)
+		case <-deadline:
+			t.Fatal("timed out waiting for the tail delivery")
+		case <-time.After(time.Millisecond):
+		}
+	}
+
+	assertCutovers(t, setter.seen(), []lifecycle.Cutover{
+		{Live: ordersV1, Revision: 1},
+		{Live: ordersV2, Revision: 2},
+	})
+
+	cancel()
+	if err := awaitExit(t, runErr); !errors.Is(err, context.Canceled) {
+		t.Fatalf("stopping worker: %v", err)
+	}
 }
 
 // TestWorker_CancellationStopsInitialization pins the entry check: a worker

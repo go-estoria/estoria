@@ -27,7 +27,9 @@ const defaultWorkerPollInterval = time.Second
 // name order, signals readiness, and then tails the sequence strictly after
 // the mark, folding and delivering each newly recorded cutover. Flips
 // superseded before the worker started are never delivered: the worker is a
-// convergence mechanism, not a per-event feed.
+// convergence mechanism, not a per-event feed. No setter runs while the
+// worker holds a read iterator open, so a setter may share a bounded resource,
+// such as a connection pool, with the reader.
 //
 // The worker keeps no durable progress — no checkpoint, no cursor, no state
 // shared with any other worker — so any number of workers may run
@@ -264,11 +266,14 @@ func (w *Worker) drain(ctx context.Context, live map[string]cutoverFold, after i
 	}
 
 	if ctxErr != nil {
-		if errors.Is(readErr, ctxErr) && !leavesMatch(readErr, ctxErr) {
+		switch {
+		case readErr == nil || leavesMatch(readErr, ctxErr):
+			return position, ctxErr
+		case errors.Is(readErr, ctxErr):
 			return position, readErr
+		default:
+			return position, errors.Join(ctxErr, readErr)
 		}
-
-		return position, ctxErr
 	}
 
 	for _, cutover := range accepted {

@@ -146,7 +146,13 @@ func (c *deadlineTrippedCtx) trip() { c.tripped = true }
 func promotedEvent(t *testing.T, position int64) *eventstore.Event {
 	t.Helper()
 
-	data, err := json.Marshal(Promoted{Next: projection.ID{Name: "orders", Version: 1}, Revision: 1})
+	return promotedEventWith(t, position, Promoted{Next: projection.ID{Name: "orders", Version: 1}, Revision: 1})
+}
+
+func promotedEventWith(t *testing.T, position int64, promoted Promoted) *eventstore.Event {
+	t.Helper()
+
+	data, err := json.Marshal(promoted)
 	if err != nil {
 		t.Fatalf("marshaling promoted event: %v", err)
 	}
@@ -191,7 +197,12 @@ func TestDrainCancellationPrecedesTheRead(t *testing.T) {
 func TestDrainTailDeliveryWaitsForIteratorClose(t *testing.T) {
 	t.Parallel()
 
-	iter := newScriptedIterator(promotedEvent(t, 9))
+	ordersV1 := projection.ID{Name: "orders", Version: 1}
+	ordersV2 := projection.ID{Name: "orders", Version: 2}
+	iter := newScriptedIterator(
+		promotedEvent(t, 9),
+		promotedEventWith(t, 10, Promoted{Previous: ordersV1, Next: ordersV2, Revision: 2}),
+	)
 	var applied []Cutover
 
 	setter := callbackSetter{apply: func(_ context.Context, cutover Cutover) error {
@@ -219,17 +230,20 @@ func TestDrainTailDeliveryWaitsForIteratorClose(t *testing.T) {
 		t.Error("want the iterator closed before drain returned")
 	}
 
-	if position != 9 {
-		t.Errorf("want position 9, got %d", position)
+	if position != 10 {
+		t.Errorf("want position 10, got %d", position)
 	}
 
-	want := Cutover{Live: projection.ID{Name: "orders", Version: 1}, Revision: 1}
-	if len(applied) != 1 || applied[0] != want {
-		t.Errorf("want delivery %+v after close, got %v", want, applied)
+	want := []Cutover{
+		{Live: ordersV1, Revision: 1},
+		{Live: ordersV2, Revision: 2},
+	}
+	if len(applied) != len(want) || applied[0] != want[0] || applied[1] != want[1] {
+		t.Errorf("want deliveries %v in order after close, got %v", want, applied)
 	}
 
-	if got := live["orders"].current; got != want {
-		t.Errorf("want the accepted cutover folded as %+v, got %+v", want, got)
+	if got := live["orders"].current; got != want[1] {
+		t.Errorf("want the final accepted cutover folded as %+v, got %+v", want[1], got)
 	}
 }
 
@@ -283,6 +297,34 @@ func TestDrainTailReadAndCloseFailuresPreventBufferedDelivery(t *testing.T) {
 	_, err = worker.drain(t.Context(), map[string]cutoverFold{}, 3, worker.deliver)
 	if !errors.Is(err, errRead) || !errors.Is(err, errClose) {
 		t.Fatalf("want the read and close failures joined, got %v", err)
+	}
+
+	if setter.touched {
+		t.Error("want no buffered delivery after the close failure")
+	}
+}
+
+func TestDrainTailValidationAndCloseFailuresPreventBufferedDelivery(t *testing.T) {
+	t.Parallel()
+
+	errClose := errors.New("close failed")
+	ordersV1 := projection.ID{Name: "orders", Version: 1}
+	ordersV2 := projection.ID{Name: "orders", Version: 2}
+	iter := newScriptedIterator(
+		promotedEvent(t, 9),
+		promotedEventWith(t, 10, Promoted{Previous: ordersV1, Next: ordersV2, Revision: 5}),
+	)
+	iter.closeErr = errClose
+
+	setter := &untouchableSetter{}
+	worker, err := NewWorker(stubReader{iter: iter}, WithCutoverSetter(setter))
+	if err != nil {
+		t.Fatalf("creating worker: %v", err)
+	}
+
+	_, err = worker.drain(t.Context(), map[string]cutoverFold{}, 3, worker.deliver)
+	if !errors.Is(err, errClose) || !strings.Contains(err.Error(), "records revision 5 after revision 1") {
+		t.Fatalf("want the validation and close failures joined, got %v", err)
 	}
 
 	if setter.touched {
@@ -403,35 +445,84 @@ func TestDrainTailCancellationBeforeDeliveryDropsBufferedCutovers(t *testing.T) 
 	t.Parallel()
 
 	errRead := errors.New("later read failed")
-	ctx, cancel := context.WithCancel(t.Context())
-	t.Cleanup(cancel)
+	ordersV1 := projection.ID{Name: "orders", Version: 1}
+	ordersV2 := projection.ID{Name: "orders", Version: 2}
 
-	iter := newScriptedIterator(promotedEvent(t, 9))
-	iter.terminalErr = errRead
-	iter.onClose = cancel
+	for _, tt := range []struct {
+		name         string
+		iterator     func(*testing.T) *scriptedIterator
+		wantErr      error
+		wantContains string
+		wantPosition int64
+		exactContext bool
+	}{
+		{
+			name: "without an independent failure",
+			iterator: func(t *testing.T) *scriptedIterator {
+				t.Helper()
+				return newScriptedIterator(promotedEvent(t, 9))
+			},
+			wantPosition: 9,
+			exactContext: true,
+		},
+		{
+			name: "with an independent read failure",
+			iterator: func(t *testing.T) *scriptedIterator {
+				t.Helper()
+				iter := newScriptedIterator(promotedEvent(t, 9))
+				iter.terminalErr = errRead
+				return iter
+			},
+			wantErr:      errRead,
+			wantPosition: 9,
+		},
+		{
+			name: "with an independent validation failure",
+			iterator: func(t *testing.T) *scriptedIterator {
+				t.Helper()
+				return newScriptedIterator(
+					promotedEvent(t, 9),
+					promotedEventWith(t, 10, Promoted{Previous: ordersV1, Next: ordersV2, Revision: 5}),
+				)
+			},
+			wantContains: "records revision 5 after revision 1",
+			wantPosition: 10,
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 
-	setter := &untouchableSetter{}
-	worker, err := NewWorker(stubReader{iter: iter}, WithCutoverSetter(setter))
-	if err != nil {
-		t.Fatalf("creating worker: %v", err)
-	}
+			ctx, cancel := context.WithCancel(t.Context())
+			t.Cleanup(cancel)
 
-	position, err := worker.drain(ctx, map[string]cutoverFold{}, 3, worker.deliver)
-	//nolint:errorlint // Identity is the assertion: post-close cancellation returns the context's own error.
-	if err != context.Canceled {
-		t.Fatalf("want exactly the context error, got %v", err)
-	}
+			iter := tt.iterator(t)
+			iter.onClose = cancel
+			setter := &untouchableSetter{}
+			worker, err := NewWorker(stubReader{iter: iter}, WithCutoverSetter(setter))
+			if err != nil {
+				t.Fatalf("creating worker: %v", err)
+			}
 
-	if errors.Is(err, errRead) {
-		t.Fatalf("want cancellation to suppress the later read failure, got %v", err)
-	}
-
-	if setter.touched {
-		t.Error("want no buffered delivery after cancellation")
-	}
-
-	if position != 9 {
-		t.Errorf("want the accepted event's position retained at 9, got %d", position)
+			position, err := worker.drain(ctx, map[string]cutoverFold{}, 3, worker.deliver)
+			if !errors.Is(err, context.Canceled) {
+				t.Fatalf("want context cancellation, got %v", err)
+			}
+			if tt.exactContext && err != context.Canceled { //nolint:errorlint // Exact identity is the contract without an independent failure.
+				t.Fatalf("want exactly the context error, got %v", err)
+			}
+			if tt.wantErr != nil && !errors.Is(err, tt.wantErr) {
+				t.Fatalf("want independent failure %v joined with cancellation, got %v", tt.wantErr, err)
+			}
+			if tt.wantContains != "" && !strings.Contains(err.Error(), tt.wantContains) {
+				t.Fatalf("want independent failure containing %q joined with cancellation, got %v", tt.wantContains, err)
+			}
+			if setter.touched {
+				t.Error("want no buffered delivery after cancellation")
+			}
+			if position != tt.wantPosition {
+				t.Errorf("want position %d, got %d", tt.wantPosition, position)
+			}
+		})
 	}
 }
 
