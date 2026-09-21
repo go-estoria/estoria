@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/go-estoria/estoria/eventstore"
@@ -45,6 +46,59 @@ type stubReader struct{ iter eventstore.StreamIterator }
 
 func (r stubReader) ReadAll(context.Context, eventstore.ReadAllOptions) (eventstore.StreamIterator, error) {
 	return r.iter, nil
+}
+
+// scriptedIterator yields its events, then one terminal result, and records
+// whether Close has completed so setters can assert the iterator lifecycle.
+type scriptedIterator struct {
+	events      []*eventstore.Event
+	terminalErr error
+	closeErr    error
+	onClose     func()
+
+	next int
+	open bool
+}
+
+func newScriptedIterator(events ...*eventstore.Event) *scriptedIterator {
+	return &scriptedIterator{events: events, open: true}
+}
+
+func (i *scriptedIterator) Next(context.Context) (*eventstore.Event, error) {
+	if i.next < len(i.events) {
+		event := i.events[i.next]
+		i.next++
+
+		return event, nil
+	}
+
+	if i.terminalErr != nil {
+		return nil, i.terminalErr
+	}
+
+	return nil, eventstore.ErrEndOfEventStream
+}
+
+func (i *scriptedIterator) Close(context.Context) error {
+	i.open = false
+
+	if i.onClose != nil {
+		i.onClose()
+	}
+
+	return i.closeErr
+}
+
+type callbackSetter struct {
+	apply func(context.Context, Cutover) error
+}
+
+func (s callbackSetter) ApplyCutover(ctx context.Context, cutover Cutover) error {
+	return s.apply(ctx, cutover)
+}
+
+func (callbackSetter) AppliedCutover(context.Context, string) (Cutover, error) {
+	return Cutover{}, ErrNoLiveVersion
 }
 
 // inHandIterator yields one event, firing a trigger — a cancellation, or a
@@ -131,6 +185,253 @@ func TestDrainCancellationPrecedesTheRead(t *testing.T) {
 
 	if reader.calls != 0 {
 		t.Errorf("want no read issued from a canceled drain, got %d", reader.calls)
+	}
+}
+
+func TestDrainTailDeliveryWaitsForIteratorClose(t *testing.T) {
+	t.Parallel()
+
+	iter := newScriptedIterator(promotedEvent(t, 9))
+	var applied []Cutover
+
+	setter := callbackSetter{apply: func(_ context.Context, cutover Cutover) error {
+		if iter.open {
+			t.Error("setter ran while the iterator was open")
+		}
+
+		applied = append(applied, cutover)
+
+		return nil
+	}}
+
+	worker, err := NewWorker(stubReader{iter: iter}, WithCutoverSetter(setter))
+	if err != nil {
+		t.Fatalf("creating worker: %v", err)
+	}
+
+	live := map[string]cutoverFold{}
+	position, err := worker.drain(t.Context(), live, 3, worker.deliver)
+	if err != nil {
+		t.Fatalf("draining tail: %v", err)
+	}
+
+	if iter.open {
+		t.Error("want the iterator closed before drain returned")
+	}
+
+	if position != 9 {
+		t.Errorf("want position 9, got %d", position)
+	}
+
+	want := Cutover{Live: projection.ID{Name: "orders", Version: 1}, Revision: 1}
+	if len(applied) != 1 || applied[0] != want {
+		t.Errorf("want delivery %+v after close, got %v", want, applied)
+	}
+
+	if got := live["orders"].current; got != want {
+		t.Errorf("want the accepted cutover folded as %+v, got %+v", want, got)
+	}
+}
+
+func TestDrainTailCloseFailurePreventsBufferedDelivery(t *testing.T) {
+	t.Parallel()
+
+	errClose := errors.New("close failed")
+	iter := newScriptedIterator(promotedEvent(t, 9))
+	iter.closeErr = errClose
+
+	setter := &untouchableSetter{}
+	worker, err := NewWorker(stubReader{iter: iter}, WithCutoverSetter(setter))
+	if err != nil {
+		t.Fatalf("creating worker: %v", err)
+	}
+
+	live := map[string]cutoverFold{}
+	position, err := worker.drain(t.Context(), live, 3, worker.deliver)
+	if !errors.Is(err, errClose) {
+		t.Fatalf("want the close failure, got %v", err)
+	}
+
+	if setter.touched {
+		t.Error("want no delivery from an iterator that failed to close")
+	}
+
+	if position != 9 {
+		t.Errorf("want position 9, got %d", position)
+	}
+
+	if got := live["orders"].current.Revision; got != 1 {
+		t.Errorf("want the accepted cutover retained in fold state, got revision %d", got)
+	}
+}
+
+func TestDrainTailReadAndCloseFailuresPreventBufferedDelivery(t *testing.T) {
+	t.Parallel()
+
+	errRead := errors.New("read failed")
+	errClose := errors.New("close failed")
+	iter := newScriptedIterator(promotedEvent(t, 9))
+	iter.terminalErr = errRead
+	iter.closeErr = errClose
+
+	setter := &untouchableSetter{}
+	worker, err := NewWorker(stubReader{iter: iter}, WithCutoverSetter(setter))
+	if err != nil {
+		t.Fatalf("creating worker: %v", err)
+	}
+
+	_, err = worker.drain(t.Context(), map[string]cutoverFold{}, 3, worker.deliver)
+	if !errors.Is(err, errRead) || !errors.Is(err, errClose) {
+		t.Fatalf("want the read and close failures joined, got %v", err)
+	}
+
+	if setter.touched {
+		t.Error("want no buffered delivery after the close failure")
+	}
+}
+
+func TestDrainTailDeliversAcceptedPrefixBeforeLaterFailure(t *testing.T) {
+	t.Parallel()
+
+	errRead := errors.New("read failed")
+
+	for _, tt := range []struct {
+		name         string
+		iterator     func(*testing.T) *scriptedIterator
+		wantErr      error
+		wantContains string
+		wantPosition int64
+	}{
+		{
+			name: "read failure",
+			iterator: func(t *testing.T) *scriptedIterator {
+				t.Helper()
+
+				iter := newScriptedIterator(promotedEvent(t, 9))
+				iter.terminalErr = errRead
+
+				return iter
+			},
+			wantErr:      errRead,
+			wantPosition: 9,
+		},
+		{
+			name: "validation failure",
+			iterator: func(t *testing.T) *scriptedIterator {
+				t.Helper()
+
+				return newScriptedIterator(promotedEvent(t, 9), promotedEvent(t, 10))
+			},
+			wantContains: "records revision 1 after revision 1",
+			wantPosition: 10,
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			iter := tt.iterator(t)
+			var applied []Cutover
+
+			setter := callbackSetter{apply: func(_ context.Context, cutover Cutover) error {
+				if iter.open {
+					t.Error("setter ran while the iterator was open")
+				}
+
+				applied = append(applied, cutover)
+
+				return nil
+			}}
+
+			worker, err := NewWorker(stubReader{iter: iter}, WithCutoverSetter(setter))
+			if err != nil {
+				t.Fatalf("creating worker: %v", err)
+			}
+
+			position, err := worker.drain(t.Context(), map[string]cutoverFold{}, 3, worker.deliver)
+			if tt.wantErr != nil && !errors.Is(err, tt.wantErr) {
+				t.Fatalf("want failure %v after prefix delivery, got %v", tt.wantErr, err)
+			}
+
+			if tt.wantContains != "" && (err == nil || !strings.Contains(err.Error(), tt.wantContains)) {
+				t.Fatalf("want failure containing %q after prefix delivery, got %v", tt.wantContains, err)
+			}
+
+			if position != tt.wantPosition {
+				t.Errorf("want position %d, got %d", tt.wantPosition, position)
+			}
+
+			want := Cutover{Live: projection.ID{Name: "orders", Version: 1}, Revision: 1}
+			if len(applied) != 1 || applied[0] != want {
+				t.Errorf("want accepted prefix %v delivered after close, got %v", want, applied)
+			}
+		})
+	}
+}
+
+func TestDrainTailDeliveryFailurePrecedesLaterReadFailure(t *testing.T) {
+	t.Parallel()
+
+	errRead := errors.New("read failed")
+	errDelivery := errors.New("delivery failed")
+	iter := newScriptedIterator(promotedEvent(t, 9))
+	iter.terminalErr = errRead
+
+	setter := callbackSetter{apply: func(context.Context, Cutover) error {
+		if iter.open {
+			t.Error("setter ran while the iterator was open")
+		}
+
+		return errDelivery
+	}}
+
+	worker, err := NewWorker(stubReader{iter: iter}, WithCutoverSetter(setter))
+	if err != nil {
+		t.Fatalf("creating worker: %v", err)
+	}
+
+	_, err = worker.drain(t.Context(), map[string]cutoverFold{}, 3, worker.deliver)
+	if !errors.Is(err, errDelivery) {
+		t.Fatalf("want the delivery failure, got %v", err)
+	}
+
+	if errors.Is(err, errRead) {
+		t.Fatalf("want the later read failure suppressed by the delivery failure, got %v", err)
+	}
+}
+
+func TestDrainTailCancellationBeforeDeliveryDropsBufferedCutovers(t *testing.T) {
+	t.Parallel()
+
+	errRead := errors.New("later read failed")
+	ctx, cancel := context.WithCancel(t.Context())
+	t.Cleanup(cancel)
+
+	iter := newScriptedIterator(promotedEvent(t, 9))
+	iter.terminalErr = errRead
+	iter.onClose = cancel
+
+	setter := &untouchableSetter{}
+	worker, err := NewWorker(stubReader{iter: iter}, WithCutoverSetter(setter))
+	if err != nil {
+		t.Fatalf("creating worker: %v", err)
+	}
+
+	position, err := worker.drain(ctx, map[string]cutoverFold{}, 3, worker.deliver)
+	//nolint:errorlint // Identity is the assertion: post-close cancellation returns the context's own error.
+	if err != context.Canceled {
+		t.Fatalf("want exactly the context error, got %v", err)
+	}
+
+	if errors.Is(err, errRead) {
+		t.Fatalf("want cancellation to suppress the later read failure, got %v", err)
+	}
+
+	if setter.touched {
+		t.Error("want no buffered delivery after cancellation")
+	}
+
+	if position != 9 {
+		t.Errorf("want the accepted event's position retained at 9, got %d", position)
 	}
 }
 
