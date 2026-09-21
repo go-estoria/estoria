@@ -27,6 +27,10 @@ import (
 // at the head of the event sequence, absent WithPollInterval.
 const DefaultPollInterval = time.Second
 
+// DefaultBatchSize is the maximum number of events read before an iterator is
+// closed and its events are handled, absent WithBatchSize.
+const DefaultBatchSize = 500
+
 // iteratorCloseTimeout bounds iterator cleanup: it must survive the caller's
 // cancellation without inheriting an unbounded wait from a Close that blocks.
 const iteratorCloseTimeout = 5 * time.Second
@@ -88,6 +92,7 @@ func New(
 		id:              id,
 		handler:         handler,
 		pollInterval:    DefaultPollInterval,
+		batchSize:       DefaultBatchSize,
 		checkpointEvery: 1,
 		caughtUp:        make(chan struct{}),
 		log:             estoria.GetLogger().WithGroup("processor"),
@@ -104,8 +109,8 @@ func New(
 	switch {
 	case processor.pollInterval <= 0:
 		return nil, errors.New("poll interval must be positive")
-	case processor.batchSize < 0:
-		return nil, errors.New("batch size must not be negative")
+	case processor.batchSize < 1:
+		return nil, errors.New("batch size must be positive")
 	case processor.checkpointEvery < 1:
 		return nil, errors.New("checkpoint interval must be positive")
 	case processor.log == nil:
@@ -118,10 +123,10 @@ func New(
 // Run blocks, driving the projection: it loads the checkpoint (a projection
 // that has none starts from the beginning), drains to the head of the event
 // sequence, then polls at the configured interval. It returns the context's
-// error on cancellation, and a non-nil error on any failure to read, handle
-// (absent WithContinueOnHandlerError), or checkpoint an event. Run may be
-// called at most once; a crashed or stopped projection is resumed by creating
-// a new Processor, which picks up from the checkpoint.
+// error on cancellation, and a non-nil error on any failure to read or close
+// an iterator, handle (absent WithContinueOnHandlerError), or checkpoint an
+// event. Run may be called at most once; a crashed or stopped projection is
+// resumed by creating a new Processor, which picks up from the checkpoint.
 func (p *Processor) Run(ctx context.Context) error {
 	if !p.running.CompareAndSwap(false, true) {
 		return errors.New("processor has already been run")
@@ -149,12 +154,18 @@ func (p *Processor) Run(ctx context.Context) error {
 		if !atHead {
 			continue
 		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 
 		// The idle touch: re-save an unchanged position so UpdatedAt stays
 		// fresh, making checkpoint recency a liveness signal. It precedes the
 		// caught-up signal because the signal gates promotion decisions: the
 		// head position must be durable before anyone acts on being caught up.
 		if err := p.saveCheckpoint(ctx); err != nil {
+			return err
+		}
+		if err := ctx.Err(); err != nil {
 			return err
 		}
 
@@ -195,54 +206,94 @@ func (p *Processor) Position() int64 {
 	return p.position.Load()
 }
 
-// drain reads and handles events from the current position until the iterator
-// is exhausted, reporting whether the cycle reached the head of the event
-// sequence rather than the batch size limit.
+// drain reads a bounded batch from the current position, closes its iterator,
+// then handles the buffered events. It reports whether the read reached the
+// head of the event sequence rather than the batch size limit.
 func (p *Processor) drain(ctx context.Context) (bool, error) {
 	iter, err := p.events.ReadAll(ctx, eventstore.ReadAllOptions{
 		AfterPosition: p.position.Load(),
 		Count:         p.batchSize,
 	})
 	if err != nil {
-		return false, fmt.Errorf("reading global event sequence: %w", err)
+		err = fmt.Errorf("reading global event sequence: %w", err)
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return false, joinCancellation(ctxErr, err)
+		}
+
+		return false, err
+	}
+	if iter == nil {
+		return false, errors.New("global event reader returned a nil iterator")
 	}
 
-	defer func() {
-		closeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), iteratorCloseTimeout)
-		defer cancel()
+	events := make([]bufferedEvent, 0)
+	var readErr error
 
-		if err := iter.Close(closeCtx); err != nil {
-			p.log.Error("closing event iterator", "projection_id", p.id, "error", err)
+	for int64(len(events)) < p.batchSize {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			readErr = joinCancellation(ctxErr, readErr)
+			break
 		}
-	}()
 
-	var yielded int64
-
-	for {
 		event, err := iter.Next(ctx)
-		if errors.Is(err, eventstore.ErrEndOfEventStream) {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			if err != nil {
+				err = fmt.Errorf("reading event: %w", err)
+			}
+			readErr = joinCancellation(ctxErr, err)
+			break
+		}
+
+		if errorLeavesMatch(err, eventstore.ErrEndOfEventStream) {
 			break
 		} else if err != nil {
-			return false, fmt.Errorf("reading event: %w", err)
+			readErr = fmt.Errorf("reading event: %w", err)
+			break
+		}
+
+		if event == nil {
+			readErr = errors.New("global reader yielded a nil event")
+			break
 		}
 
 		if event.GlobalPosition == nil {
-			return false, fmt.Errorf("event %s has no global position; the global reader contract requires one", event.ID)
+			readErr = fmt.Errorf("event %s has no global position; the global reader contract requires one", event.ID)
+			break
 		}
 
-		yielded++
+		events = append(events, bufferedEvent{event: event, position: *event.GlobalPosition})
+	}
 
-		if err := p.handler.Handle(ctx, event); err != nil {
+	closeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), iteratorCloseTimeout)
+	closeErr := iter.Close(closeCtx)
+	cancel()
+	ctxErr := ctx.Err()
+	if ctxErr != nil {
+		readErr = joinCancellation(ctxErr, readErr)
+	}
+	if closeErr != nil {
+		return false, errors.Join(readErr, fmt.Errorf("closing event iterator: %w", closeErr))
+	}
+	if ctxErr != nil {
+		return false, readErr
+	}
+
+	for _, buffered := range events {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return false, joinCancellation(ctxErr, readErr)
+		}
+
+		if err := p.handler.Handle(ctx, buffered.event); err != nil {
 			if !p.continueOnHandlerError {
 				return false, fmt.Errorf("handling event: %w", err)
 			}
 
 			// The failed event is advanced past and checkpointed with the
 			// rest of the batch: it will not be redelivered on restart.
-			p.log.Error("error handling event", "projection_id", p.id, "event_id", event.ID, "global_position", *event.GlobalPosition, "error", err)
+			p.log.Error("error handling event", "projection_id", p.id, "event_id", buffered.event.ID, "global_position", buffered.position, "error", err)
 		}
 
-		p.position.Store(*event.GlobalPosition)
+		p.position.Store(buffered.position)
 
 		p.sinceCheckpoint++
 		if p.sinceCheckpoint >= p.checkpointEvery {
@@ -252,7 +303,74 @@ func (p *Processor) drain(ctx context.Context) (bool, error) {
 		}
 	}
 
-	return p.batchSize == 0 || yielded < p.batchSize, nil
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return false, joinCancellation(ctxErr, readErr)
+	}
+
+	if readErr != nil {
+		return false, readErr
+	}
+
+	return int64(len(events)) < p.batchSize, nil
+}
+
+type bufferedEvent struct {
+	event    *eventstore.Event
+	position int64
+}
+
+// joinCancellation collapses errors containing only cancellation or an end
+// marker to ctxErr, while retaining any independent failure.
+func joinCancellation(ctxErr, err error) error {
+	if err == nil || errorLeavesMatch(err, ctxErr, eventstore.ErrEndOfEventStream) {
+		return ctxErr
+	}
+	if errors.Is(err, ctxErr) {
+		return err
+	}
+
+	return errors.Join(ctxErr, err)
+}
+
+// errorLeavesMatch reports whether every leaf in err's error tree matches at
+// least one target.
+func errorLeavesMatch(err error, targets ...error) bool {
+	if err == nil {
+		return false
+	}
+
+	if joined, ok := err.(interface{ Unwrap() []error }); ok {
+		causes := joined.Unwrap()
+		if len(causes) == 0 {
+			return matchesAny(err, targets)
+		}
+
+		for _, cause := range causes {
+			if !errorLeavesMatch(cause, targets...) {
+				return false
+			}
+		}
+
+		return true
+	}
+
+	if wrapped, ok := err.(interface{ Unwrap() error }); ok {
+		if cause := wrapped.Unwrap(); cause != nil {
+			return errorLeavesMatch(cause, targets...)
+		}
+	}
+
+	return matchesAny(err, targets)
+}
+
+func matchesAny(err error, targets []error) bool {
+	for _, target := range targets {
+		if errors.Is(err, target) {
+			return true
+		}
+	}
+
+	return false
 }
 
 // loadPosition returns the checkpointed position to resume after, or 0 for a
@@ -283,9 +401,9 @@ func (p *Processor) saveCheckpoint(ctx context.Context) error {
 // An Option configures a Processor.
 type Option func(*Processor)
 
-// WithBatchSize limits how many events each read requests, as
-// eventstore.ReadAllOptions.Count. The default of 0 reads without limit, so a
-// single drain cycle spans the entire backlog.
+// WithBatchSize sets the positive maximum number of events buffered from each
+// read before its iterator is closed and the events are handled. The value is
+// passed as eventstore.ReadAllOptions.Count. The default is DefaultBatchSize.
 func WithBatchSize(size int64) Option {
 	return func(p *Processor) {
 		p.batchSize = size

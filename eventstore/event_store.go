@@ -32,7 +32,9 @@ type StreamReader interface {
 	ReadStream(ctx context.Context, id typeid.ID, opts ReadStreamOptions) (StreamIterator, error)
 }
 
-// An StreamIterator reads events from a stream.
+// An StreamIterator reads events from a stream. An iterator may retain a
+// connection, transaction, snapshot, cursor, or lock until Close returns, so
+// callers should close it promptly.
 type StreamIterator interface {
 	// Next reads the next event from the stream.
 	// It returns ErrEndOfEventStream when there are no more events.

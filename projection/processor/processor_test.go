@@ -3,6 +3,7 @@ package processor_test
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -55,6 +56,9 @@ func TestNew(t *testing.T) {
 		}},
 		{"rejects a negative batch size", func() (*processor.Processor, error) {
 			return processor.New(events, checkpoints, id, handler, processor.WithBatchSize(-1))
+		}},
+		{"rejects a zero batch size", func() (*processor.Processor, error) {
+			return processor.New(events, checkpoints, id, handler, processor.WithBatchSize(0))
 		}},
 		{"rejects a non-positive checkpoint interval", func() (*processor.Processor, error) {
 			return processor.New(events, checkpoints, id, handler, processor.WithCheckpointEvery(0))
@@ -490,6 +494,389 @@ func TestProcessor_RunTwice(t *testing.T) {
 	}
 }
 
+func TestProcessor_ClosesIteratorBeforeCallbacks(t *testing.T) {
+	t.Parallel()
+
+	if processor.DefaultBatchSize != 500 {
+		t.Fatalf("want DefaultBatchSize 500, got %d", processor.DefaultBatchSize)
+	}
+
+	probe := &openIteratorProbe{}
+	reader := &scriptedReader{
+		probe:   probe,
+		scripts: []iteratorScript{{events: []*eventstore.Event{eventAt(1)}}},
+	}
+	handler := &probedCollector{probe: probe}
+	checkpoints := &probedSaveStore{Store: cpmemory.NewCheckpointStore(), probe: probe}
+	p := newProcessor(t, reader, checkpoints, handler, processor.WithPollInterval(time.Hour))
+
+	cancel, done := start(t, p)
+	waitCaughtUp(t, p)
+
+	snapshot := probe.snapshot()
+	if snapshot.open {
+		t.Error("want the iterator closed before CaughtUp")
+	}
+	if snapshot.closeCalls != 1 {
+		t.Errorf("want one iterator close, got %d", snapshot.closeCalls)
+	}
+	if len(snapshot.callbacksWhileOpen) != 0 {
+		t.Errorf("want no callbacks while the iterator is open, got %v", snapshot.callbacksWhileOpen)
+	}
+	assertPositions(t, handler.snapshot(), 1)
+	assertPositions(t, snapshot.saves, 1, 1)
+
+	counts := reader.snapshotCounts()
+	if len(counts) != 1 || counts[0] != processor.DefaultBatchSize {
+		t.Errorf("want one read with Count %d, got %v", processor.DefaultBatchSize, counts)
+	}
+
+	cancel()
+	if err := waitDone(t, done); !errors.Is(err, context.Canceled) {
+		t.Errorf("want Run to return the context's error on cancellation, got %v", err)
+	}
+}
+
+func TestProcessor_CloseFailurePreventsCallbacks(t *testing.T) {
+	t.Parallel()
+
+	closeErr := errors.New("close failed")
+	probe := &openIteratorProbe{}
+	reader := &scriptedReader{
+		probe: probe,
+		scripts: []iteratorScript{{
+			events:   []*eventstore.Event{eventAt(1)},
+			closeErr: closeErr,
+		}},
+	}
+	handler := &probedCollector{probe: probe}
+	checkpoints := &probedSaveStore{Store: cpmemory.NewCheckpointStore(), probe: probe}
+	p := newProcessor(t, reader, checkpoints, handler)
+
+	err := p.Run(t.Context())
+	if !errors.Is(err, closeErr) {
+		t.Fatalf("want the close failure returned, got %v", err)
+	}
+
+	snapshot := probe.snapshot()
+	if len(snapshot.handled) != 0 || len(snapshot.saves) != 0 {
+		t.Errorf("want no callbacks after a close failure, got handled %v and saves %v", snapshot.handled, snapshot.saves)
+	}
+
+	select {
+	case <-p.CaughtUp():
+		t.Error("want CaughtUp withheld after a close failure")
+	default:
+	}
+}
+
+func TestProcessor_JoinsReadAndCloseFailures(t *testing.T) {
+	t.Parallel()
+
+	readErr := errors.New("read failed")
+	closeErr := errors.New("close failed")
+	iterationErr := errors.Join(eventstore.ErrEndOfEventStream, readErr)
+	probe := &openIteratorProbe{}
+	reader := &scriptedReader{
+		probe: probe,
+		scripts: []iteratorScript{{
+			events:   []*eventstore.Event{eventAt(1)},
+			readErr:  iterationErr,
+			closeErr: closeErr,
+		}},
+	}
+	handler := &probedCollector{probe: probe}
+	checkpoints := &probedSaveStore{Store: cpmemory.NewCheckpointStore(), probe: probe}
+	p := newProcessor(t, reader, checkpoints, handler)
+
+	err := p.Run(t.Context())
+	if !errors.Is(err, readErr) || !errors.Is(err, closeErr) {
+		t.Fatalf("want joined read and close failures, got %v", err)
+	}
+
+	snapshot := probe.snapshot()
+	if len(snapshot.handled) != 0 || len(snapshot.saves) != 0 {
+		t.Errorf("want no callbacks after a close failure, got handled %v and saves %v", snapshot.handled, snapshot.saves)
+	}
+}
+
+func TestProcessor_ProcessesPrefixBeforeReturningReadFailure(t *testing.T) {
+	t.Parallel()
+
+	readErr := errors.New("read failed")
+	probe := &openIteratorProbe{}
+	reader := &scriptedReader{
+		probe: probe,
+		scripts: []iteratorScript{{
+			events:  []*eventstore.Event{eventAt(1), eventAt(2)},
+			readErr: readErr,
+		}},
+	}
+	handler := &probedCollector{probe: probe}
+	checkpoints := &probedSaveStore{Store: cpmemory.NewCheckpointStore(), probe: probe}
+	p := newProcessor(t, reader, checkpoints, handler)
+
+	err := p.Run(t.Context())
+	if !errors.Is(err, readErr) {
+		t.Fatalf("want the read failure returned after the prefix, got %v", err)
+	}
+
+	snapshot := probe.snapshot()
+	assertPositions(t, snapshot.handled, 1, 2)
+	assertPositions(t, snapshot.saves, 1, 2)
+	if len(snapshot.callbacksWhileOpen) != 0 {
+		t.Errorf("want no callbacks while the iterator is open, got %v", snapshot.callbacksWhileOpen)
+	}
+
+	select {
+	case <-p.CaughtUp():
+		t.Error("want a partial errored read not to signal CaughtUp")
+	default:
+	}
+}
+
+func TestProcessor_PrefixCallbackFailurePrecedesReadFailure(t *testing.T) {
+	t.Parallel()
+
+	t.Run("handler", func(t *testing.T) {
+		t.Parallel()
+
+		readErr := errors.New("read failed")
+		handlerErr := errors.New("handler failed")
+		reader := &scriptedReader{scripts: []iteratorScript{{
+			events:  []*eventstore.Event{eventAt(1)},
+			readErr: readErr,
+		}}}
+		p := newProcessor(t, reader, cpmemory.NewCheckpointStore(), &collector{failAt: 1, failWith: handlerErr})
+
+		err := p.Run(t.Context())
+		if !errors.Is(err, handlerErr) || errors.Is(err, readErr) {
+			t.Fatalf("want only the handler failure, got %v", err)
+		}
+	})
+
+	t.Run("checkpoint", func(t *testing.T) {
+		t.Parallel()
+
+		readErr := errors.New("read failed")
+		saveErr := errors.New("save failed")
+		reader := &scriptedReader{scripts: []iteratorScript{{
+			events:  []*eventstore.Event{eventAt(1)},
+			readErr: readErr,
+		}}}
+		checkpoints := &fixedSaveErrorStore{Store: cpmemory.NewCheckpointStore(), err: saveErr}
+		p := newProcessor(t, reader, checkpoints, &collector{})
+
+		err := p.Run(t.Context())
+		if !errors.Is(err, saveErr) || errors.Is(err, readErr) {
+			t.Fatalf("want only the checkpoint failure, got %v", err)
+		}
+	})
+}
+
+func TestProcessor_InvalidBufferedEventProcessesValidPrefix(t *testing.T) {
+	t.Parallel()
+
+	for _, tt := range []struct {
+		name    string
+		bad     *eventstore.Event
+		wantErr string
+	}{
+		{name: "nil event", bad: nil, wantErr: "nil event"},
+		{name: "nil global position", bad: &eventstore.Event{}, wantErr: "no global position"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			reader := &scriptedReader{scripts: []iteratorScript{{
+				events: []*eventstore.Event{eventAt(1), tt.bad, eventAt(3)},
+			}}}
+			handler := &collector{}
+			checkpoints := &saveRecorder{Store: cpmemory.NewCheckpointStore()}
+			p := newProcessor(t, reader, checkpoints, handler)
+
+			err := p.Run(t.Context())
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("want an error containing %q, got %v", tt.wantErr, err)
+			}
+
+			assertPositions(t, handler.snapshot(), 1)
+			assertPositions(t, checkpoints.snapshot(), 1)
+
+			select {
+			case <-p.CaughtUp():
+				t.Error("want an invalid partial read not to signal CaughtUp")
+			default:
+			}
+		})
+	}
+}
+
+func TestProcessor_ChecksCancellationBeforeEachBufferedEvent(t *testing.T) {
+	t.Parallel()
+
+	reader := &scriptedReader{scripts: []iteratorScript{{events: []*eventstore.Event{
+		eventAt(1), eventAt(2), eventAt(3),
+	}}}}
+	ctx, cancel := context.WithCancel(t.Context())
+	var handled []int64
+	handler := projection.EventHandlerFunc(func(_ context.Context, event *eventstore.Event) error {
+		handled = append(handled, *event.GlobalPosition)
+		cancel()
+		return nil
+	})
+	p := newProcessor(t, reader, cpmemory.NewCheckpointStore(), handler, processor.WithCheckpointEvery(3))
+
+	err := p.Run(ctx)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("want context cancellation, got %v", err)
+	}
+	assertPositions(t, handled, 1)
+	if got := p.Position(); got != 1 {
+		t.Errorf("want position 1 after cancellation, got %d", got)
+	}
+}
+
+func TestProcessor_CancellationAccompanyingEmptyRead(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(t.Context())
+	probe := &openIteratorProbe{}
+	reader := &scriptedReader{
+		probe: probe,
+		scripts: []iteratorScript{{
+			nextHook: cancel,
+		}},
+	}
+	handler := &probedCollector{probe: probe}
+	checkpoints := &probedSaveStore{Store: cpmemory.NewCheckpointStore(), probe: probe}
+	p := newProcessor(t, reader, checkpoints, handler)
+
+	err := p.Run(ctx)
+	if err != context.Canceled {
+		t.Fatalf("want the empty-read EOF to collapse to context cancellation, got %v", err)
+	}
+
+	snapshot := probe.snapshot()
+	if snapshot.closeCalls != 1 {
+		t.Errorf("want the iterator closed once, got %d", snapshot.closeCalls)
+	}
+	if len(snapshot.handled) != 0 || len(snapshot.saves) != 0 {
+		t.Errorf("want no callbacks after cancellation, got handled %v and saves %v", snapshot.handled, snapshot.saves)
+	}
+	assertCaughtUpWithheld(t, p)
+}
+
+func TestProcessor_CancellationJoinsReadAndCloseFailures(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(t.Context())
+	readErr := errors.New("read failed")
+	closeErr := errors.New("close failed")
+	probe := &openIteratorProbe{}
+	reader := &scriptedReader{
+		probe: probe,
+		scripts: []iteratorScript{{
+			readErr:  readErr,
+			closeErr: closeErr,
+			nextHook: cancel,
+		}},
+	}
+	handler := &probedCollector{probe: probe}
+	checkpoints := &probedSaveStore{Store: cpmemory.NewCheckpointStore(), probe: probe}
+	p := newProcessor(t, reader, checkpoints, handler)
+
+	err := p.Run(ctx)
+	if !errors.Is(err, context.Canceled) || !errors.Is(err, readErr) || !errors.Is(err, closeErr) {
+		t.Fatalf("want joined cancellation, read, and close failures, got %v", err)
+	}
+
+	snapshot := probe.snapshot()
+	if len(snapshot.handled) != 0 || len(snapshot.saves) != 0 {
+		t.Errorf("want no callbacks after cancellation and close failure, got handled %v and saves %v", snapshot.handled, snapshot.saves)
+	}
+}
+
+func TestProcessor_ContextObliviousIteratorStopsAfterCancellation(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(t.Context())
+	nextCalls := 0
+	reader := &scriptedReader{scripts: []iteratorScript{{
+		events: []*eventstore.Event{eventAt(1), eventAt(2), eventAt(3)},
+		nextHook: func() {
+			nextCalls++
+			if nextCalls == 1 {
+				cancel()
+			}
+		},
+	}}}
+	handler := &collector{}
+	p := newProcessor(t, reader, cpmemory.NewCheckpointStore(), handler)
+
+	err := p.Run(ctx)
+	if err != context.Canceled {
+		t.Fatalf("want context cancellation, got %v", err)
+	}
+	if nextCalls != 1 {
+		t.Errorf("want iteration to stop after one Next call, got %d", nextCalls)
+	}
+	assertPositions(t, handler.snapshot())
+	if got := p.Position(); got != 0 {
+		t.Errorf("want the event returned with cancellation discarded, got position %d", got)
+	}
+}
+
+func TestProcessor_CancellationDuringCloseSuppressesCallbacks(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(t.Context())
+	probe := &openIteratorProbe{}
+	reader := &scriptedReader{
+		probe: probe,
+		scripts: []iteratorScript{{
+			events:    []*eventstore.Event{eventAt(1)},
+			closeHook: cancel,
+		}},
+	}
+	handler := &probedCollector{probe: probe}
+	checkpoints := &probedSaveStore{Store: cpmemory.NewCheckpointStore(), probe: probe}
+	p := newProcessor(t, reader, checkpoints, handler)
+
+	err := p.Run(ctx)
+	if err != context.Canceled {
+		t.Fatalf("want context cancellation, got %v", err)
+	}
+
+	snapshot := probe.snapshot()
+	if len(snapshot.handled) != 0 || len(snapshot.saves) != 0 {
+		t.Errorf("want no callbacks after cancellation during Close, got handled %v and saves %v", snapshot.handled, snapshot.saves)
+	}
+}
+
+func TestProcessor_FinalHandlerCancellationWithholdsCaughtUp(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(t.Context())
+	reader := &scriptedReader{scripts: []iteratorScript{{
+		events: []*eventstore.Event{eventAt(1)},
+	}}}
+	handler := &collectorWithHook{hook: cancel}
+	checkpoints := &saveRecorder{Store: cpmemory.NewCheckpointStore()}
+	p := newProcessor(t, reader, checkpoints, handler)
+
+	err := p.Run(ctx)
+	if err != context.Canceled {
+		t.Fatalf("want context cancellation, got %v", err)
+	}
+	assertPositions(t, handler.snapshot(), 1)
+	assertPositions(t, checkpoints.snapshot(), 1)
+	if got := p.Position(); got != 1 {
+		t.Errorf("want the successfully handled event reflected at position 1, got %d", got)
+	}
+	assertCaughtUpWithheld(t, p)
+}
+
 //
 // helpers
 //
@@ -632,6 +1019,20 @@ func assertPositions(t *testing.T, got []int64, want ...int64) {
 	}
 }
 
+func assertCaughtUpWithheld(t *testing.T, p *processor.Processor) {
+	t.Helper()
+
+	select {
+	case <-p.CaughtUp():
+		t.Error("want CaughtUp withheld")
+	default:
+	}
+}
+
+func eventAt(position int64) *eventstore.Event {
+	return &eventstore.Event{GlobalPosition: &position}
+}
+
 // collector records the global position of each event it handles, failing
 // at failAt if set.
 type collector struct {
@@ -639,6 +1040,19 @@ type collector struct {
 	positions []int64
 	failAt    int64
 	failWith  error
+}
+
+type collectorWithHook struct {
+	collector
+	hook func()
+}
+
+func (c *collectorWithHook) Handle(ctx context.Context, event *eventstore.Event) error {
+	err := c.collector.Handle(ctx, event)
+	if c.hook != nil {
+		c.hook()
+	}
+	return err
 }
 
 func (c *collector) Handle(_ context.Context, event *eventstore.Event) error {
@@ -726,6 +1140,181 @@ func (s *saveRecorder) snapshot() []int64 {
 	defer s.mu.Unlock()
 
 	return append([]int64(nil), s.positions...)
+}
+
+type fixedSaveErrorStore struct {
+	checkpointstore.Store
+	err error
+}
+
+func (s *fixedSaveErrorStore) Save(context.Context, projection.ID, int64) error {
+	return s.err
+}
+
+type iteratorScript struct {
+	events    []*eventstore.Event
+	readErr   error
+	closeErr  error
+	nextHook  func()
+	closeHook func()
+}
+
+type scriptedReader struct {
+	mu      sync.Mutex
+	scripts []iteratorScript
+	counts  []int64
+	probe   *openIteratorProbe
+}
+
+func (r *scriptedReader) ReadAll(_ context.Context, opts eventstore.ReadAllOptions) (eventstore.StreamIterator, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	r.counts = append(r.counts, opts.Count)
+	var script iteratorScript
+	if len(r.scripts) > 0 {
+		script = r.scripts[0]
+		r.scripts = r.scripts[1:]
+	}
+
+	if r.probe != nil {
+		r.probe.opened()
+	}
+
+	return &scriptedIterator{script: script, probe: r.probe}, nil
+}
+
+func (r *scriptedReader) snapshotCounts() []int64 {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	return append([]int64(nil), r.counts...)
+}
+
+type scriptedIterator struct {
+	script iteratorScript
+	next   int
+	probe  *openIteratorProbe
+}
+
+func (i *scriptedIterator) Next(context.Context) (*eventstore.Event, error) {
+	if i.script.nextHook != nil {
+		i.script.nextHook()
+	}
+
+	if i.next < len(i.script.events) {
+		event := i.script.events[i.next]
+		i.next++
+		return event, nil
+	}
+
+	if i.script.readErr != nil {
+		return nil, i.script.readErr
+	}
+
+	return nil, eventstore.ErrEndOfEventStream
+}
+
+func (i *scriptedIterator) Close(context.Context) error {
+	if i.script.closeHook != nil {
+		i.script.closeHook()
+	}
+
+	if i.probe != nil {
+		i.probe.closed(i.script.closeErr == nil)
+	}
+
+	return i.script.closeErr
+}
+
+type openIteratorProbe struct {
+	mu                 sync.Mutex
+	open               bool
+	closeCalls         int
+	handled            []int64
+	saves              []int64
+	callbacksWhileOpen []string
+}
+
+func (p *openIteratorProbe) opened() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	p.open = true
+}
+
+func (p *openIteratorProbe) closed(succeeded bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	p.closeCalls++
+	if succeeded {
+		p.open = false
+	}
+}
+
+func (p *openIteratorProbe) handledAt(position int64) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if p.open {
+		p.callbacksWhileOpen = append(p.callbacksWhileOpen, "handler")
+	}
+	p.handled = append(p.handled, position)
+}
+
+func (p *openIteratorProbe) savedAt(position int64) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if p.open {
+		p.callbacksWhileOpen = append(p.callbacksWhileOpen, "checkpoint")
+	}
+	p.saves = append(p.saves, position)
+}
+
+type iteratorProbeSnapshot struct {
+	open               bool
+	closeCalls         int
+	handled            []int64
+	saves              []int64
+	callbacksWhileOpen []string
+}
+
+func (p *openIteratorProbe) snapshot() iteratorProbeSnapshot {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	return iteratorProbeSnapshot{
+		open:               p.open,
+		closeCalls:         p.closeCalls,
+		handled:            append([]int64(nil), p.handled...),
+		saves:              append([]int64(nil), p.saves...),
+		callbacksWhileOpen: append([]string(nil), p.callbacksWhileOpen...),
+	}
+}
+
+type probedCollector struct {
+	probe *openIteratorProbe
+}
+
+func (c *probedCollector) Handle(_ context.Context, event *eventstore.Event) error {
+	c.probe.handledAt(*event.GlobalPosition)
+	return nil
+}
+
+func (c *probedCollector) snapshot() []int64 {
+	return c.probe.snapshot().handled
+}
+
+type probedSaveStore struct {
+	checkpointstore.Store
+	probe *openIteratorProbe
+}
+
+func (s *probedSaveStore) Save(ctx context.Context, id projection.ID, position int64) error {
+	s.probe.savedAt(position)
+	return s.Store.Save(ctx, id, position)
 }
 
 // discardLogger keeps the error path in "continue on handler error" from

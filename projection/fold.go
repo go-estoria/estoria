@@ -9,7 +9,10 @@ import (
 	"github.com/go-estoria/estoria/eventstore"
 )
 
-// A Fold reads events from an event stream and executes a projection function for each event.
+// A Fold reads events from an event stream and executes a projection function
+// for each event. It invokes the handler while the caller-owned iterator
+// remains open; callers must account for resources or locks retained until
+// they close it.
 type Fold struct {
 	iter                   eventstore.StreamIterator
 	continueOnHandlerError bool
