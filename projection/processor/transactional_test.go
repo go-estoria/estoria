@@ -32,55 +32,60 @@ func TestNew_TransactionalCheckpoints(t *testing.T) {
 	handler := &collector{}
 	id := projection.ID{Name: "orders", Version: 1}
 
+	const (
+		missingCapability = "transactional checkpoints require a checkpoint store that implements checkpointstore.TransactionalStore"
+		cadenceRequired   = "transactional checkpoints with continue-on-handler-error require a checkpoint interval of 1"
+	)
+
 	for _, tt := range []struct {
 		name    string
 		make    func() (*processor.Processor, error)
-		wantErr bool
+		wantErr string
 	}{
 		{"rejects a store lacking the capability", func() (*processor.Processor, error) {
 			return processor.New(events, plainStore{cpmemory.NewCheckpointStore()}, id, handler,
 				processor.WithTransactionalCheckpoints())
-		}, true},
+		}, missingCapability},
 		{"rejects continue-on-error with a cadence above one", func() (*processor.Processor, error) {
 			return processor.New(events, cpmemory.NewCheckpointStore(), id, handler,
 				processor.WithTransactionalCheckpoints(),
 				processor.WithContinueOnHandlerError(true),
 				processor.WithCheckpointEvery(2))
-		}, true},
+		}, cadenceRequired},
 		{"rejects continue-on-error with a cadence above one regardless of option order", func() (*processor.Processor, error) {
 			return processor.New(events, cpmemory.NewCheckpointStore(), id, handler,
 				processor.WithCheckpointEvery(2),
 				processor.WithContinueOnHandlerError(true),
 				processor.WithTransactionalCheckpoints())
-		}, true},
+		}, cadenceRequired},
 		{"accepts a transactional store", func() (*processor.Processor, error) {
 			return processor.New(events, cpmemory.NewCheckpointStore(), id, handler,
 				processor.WithTransactionalCheckpoints())
-		}, false},
+		}, ""},
 		{"accepts continue-on-error at a cadence of one", func() (*processor.Processor, error) {
 			return processor.New(events, cpmemory.NewCheckpointStore(), id, handler,
 				processor.WithTransactionalCheckpoints(),
 				processor.WithContinueOnHandlerError(true),
 				processor.WithCheckpointEvery(1))
-		}, false},
+		}, ""},
 		{"accepts a cadence above one without continue-on-error", func() (*processor.Processor, error) {
 			return processor.New(events, cpmemory.NewCheckpointStore(), id, handler,
 				processor.WithTransactionalCheckpoints(),
 				processor.WithCheckpointEvery(5))
-		}, false},
+		}, ""},
 		{"accepts a store lacking the capability without the option", func() (*processor.Processor, error) {
 			return processor.New(events, plainStore{cpmemory.NewCheckpointStore()}, id, handler,
 				processor.WithContinueOnHandlerError(true),
 				processor.WithCheckpointEvery(5))
-		}, false},
+		}, ""},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
 			p, err := tt.make()
-			if tt.wantErr {
-				if err == nil {
-					t.Error("want an error, got nil")
+			if tt.wantErr != "" {
+				if err == nil || err.Error() != tt.wantErr {
+					t.Errorf("want error %q, got %v", tt.wantErr, err)
 				}
 
 				return
@@ -534,6 +539,48 @@ func TestProcessor_Transactional_CancellationRollsBackOnLiveContext(t *testing.T
 	}
 }
 
+// TestProcessor_Transactional_CancellationDuringLastEventOfWindowDoesNotFlush pins that
+// shutdown never flushes: a handler that cancels the run while handling the event that
+// would complete its window gets a rollback, not a save and commit, even from a store
+// that ignores the cancelled context.
+func TestProcessor_Transactional_CancellationDuringLastEventOfWindowDoesNotFlush(t *testing.T) {
+	t.Parallel()
+
+	events, inner := newStores(t)
+	appendEvents(t, events, 2)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	t.Cleanup(cancel)
+
+	store := newScriptedTxStore(inner)
+	handler := &txHandler{store: store, onHandle: func(position int64) {
+		if position == 1 {
+			cancel()
+		}
+	}}
+	p := newProcessor(t, events, store, handler, processor.WithTransactionalCheckpoints())
+
+	done := make(chan error, 1)
+
+	go func() {
+		done <- p.Run(ctx)
+	}()
+
+	if err := waitDone(t, done); !errors.Is(err, context.Canceled) {
+		t.Errorf("want Run to return the context's error, got %v", err)
+	}
+
+	store.assertCalls(t, "tx1:begin", "tx1:handle:1", "tx1:rollback")
+
+	if rollbackCtxErrs := store.rollbackContextErrors(); len(rollbackCtxErrs) != 1 || rollbackCtxErrs[0] != nil {
+		t.Errorf("want one rollback on a live context, got context errors %v", rollbackCtxErrs)
+	}
+
+	if _, err := inner.Load(t.Context(), testID()); !errors.Is(err, checkpointstore.ErrCheckpointNotFound) {
+		t.Errorf("want no checkpoint, got %v", err)
+	}
+}
+
 // TestProcessor_Transactional_PanicRollsBackDuringUnwinding pins that the cleanup
 // survives a panicking handler.
 func TestProcessor_Transactional_PanicRollsBackDuringUnwinding(t *testing.T) {
@@ -610,6 +657,79 @@ func TestProcessor_Transactional_CommitFailureBeforeCatchUp(t *testing.T) {
 			store.assertCalls(t, tt.want...)
 			assertCaughtUpWithheld(t, p)
 		})
+	}
+}
+
+// TestProcessor_Transactional_CommitFailureAfterCatchUp pins that a commit error after
+// the first catch-up stops the processor without reopening the CaughtUp signal or
+// changing the position it certified.
+func TestProcessor_Transactional_CommitFailureAfterCatchUp(t *testing.T) {
+	t.Parallel()
+
+	events, inner := newStores(t)
+	appendEvents(t, events, 2)
+
+	store := newScriptedTxStore(inner)
+	handler := &txHandler{store: store}
+	p := newProcessor(t, events, store, handler, processor.WithTransactionalCheckpoints())
+
+	_, done := start(t, p)
+	waitCaughtUp(t, p)
+
+	if got := p.CaughtUpPosition(); got != 2 {
+		t.Fatalf("want CaughtUpPosition 2, got %d", got)
+	}
+
+	store.failFutureCommits(errCommit)
+	appendEvents(t, events, 2)
+
+	if err := waitDone(t, done); !errors.Is(err, errCommit) {
+		t.Errorf("want the commit failure, got %v", err)
+	}
+
+	select {
+	case <-p.CaughtUp():
+	default:
+		t.Error("want CaughtUp to remain closed")
+	}
+
+	if got := p.CaughtUpPosition(); got != 2 {
+		t.Errorf("want CaughtUpPosition unchanged at 2, got %d", got)
+	}
+}
+
+// TestProcessor_Transactional_WindowClosedByHeadAcrossBatches pins a window that spans
+// batch-limited reads and is ended by reaching the head rather than by the cadence: one
+// transaction, one save at the final position, one commit, and CaughtUp only after it.
+func TestProcessor_Transactional_WindowClosedByHeadAcrossBatches(t *testing.T) {
+	t.Parallel()
+
+	events, inner := newStores(t)
+	appendEvents(t, events, 3)
+
+	store := newScriptedTxStore(inner)
+	handler := &txHandler{store: store}
+	p := newProcessor(t, events, store, handler,
+		processor.WithTransactionalCheckpoints(),
+		processor.WithBatchSize(1),
+		processor.WithCheckpointEvery(10),
+	)
+
+	cancel, done := start(t, p)
+	waitCaughtUp(t, p)
+
+	got := store.calls()
+	cancel()
+
+	if err := waitDone(t, done); !errors.Is(err, context.Canceled) {
+		t.Fatalf("want Run to return the context's error on cancellation, got %v", err)
+	}
+
+	want := []string{
+		"tx1:begin", "tx1:handle:1", "tx1:handle:2", "tx1:handle:3", "tx1:save:3", "tx1:commit",
+	}
+	if len(got) < len(want) || !slices.Equal(got[:len(want)], want) {
+		t.Errorf("want calls beginning\n  %v\ngot\n  %v", want, got)
 	}
 }
 
@@ -713,6 +833,9 @@ type scriptedTxStore struct {
 	// even when its scripted Commit result is an error.
 	commitPersistsOnError bool
 
+	// commitFailure, once set, fails every later Commit regardless of the script.
+	commitFailure error
+
 	mu              sync.Mutex
 	log             []string
 	begins          int
@@ -764,6 +887,13 @@ func scripted(results []error, call int) error {
 	}
 
 	return nil
+}
+
+func (s *scriptedTxStore) failFutureCommits(err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.commitFailure = err
 }
 
 func (s *scriptedTxStore) calls() []string {
@@ -864,6 +994,10 @@ func (tx *scriptedTx) Commit(ctx context.Context) error {
 	defer s.mu.Unlock()
 
 	err := scripted(s.commitErrs, s.commits)
+	if s.commitFailure != nil {
+		err = s.commitFailure
+	}
+
 	s.commits++
 	s.log = append(s.log, tx.entry("commit"))
 
