@@ -350,8 +350,8 @@ func (p *Processor) drain(ctx context.Context) (bool, error) {
 				)
 			}
 
-			// The failed event is advanced past and checkpointed with the
-			// rest of the batch: it will not be redelivered on restart.
+			// The failed event is advanced past and checkpointed: it will not
+			// be redelivered on restart.
 			p.log.Error("error handling event", "projection_id", p.id, "event_id", buffered.event.ID, "global_position", buffered.position, "error", err)
 		}
 
@@ -505,6 +505,14 @@ func (p *Processor) openTransaction(ctx context.Context) error {
 // position in its transaction and committing, or, if no window is open, saves
 // and commits in a transaction of its own.
 func (p *Processor) saveTransactionalCheckpoint(ctx context.Context) error {
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		if rollbackErr := p.rollbackWindow(ctx); rollbackErr != nil {
+			p.log.Error("error rolling back checkpoint transaction", "projection_id", p.id, "error", rollbackErr)
+		}
+
+		return joinCancellation(ctxErr, nil)
+	}
+
 	if p.tx == nil {
 		if err := p.openTransaction(ctx); err != nil {
 			return err
@@ -575,17 +583,12 @@ func WithCheckpointEvery(n int) Option {
 
 // WithContinueOnHandlerError sets whether to continue past events whose
 // handling fails, rather than stopping. A failed event is logged, advanced
-// past, and checkpointed with the rest of its batch, so it is not redelivered
-// on restart.
-//
-// The default behavior is to stop, leaving the failed event before the
-// checkpoint so a restart redelivers it.
-//
-// Under WithTransactionalCheckpoints the failed event's transaction is rolled
-// back and the skipped position is checkpointed in a fresh one, which requires
-// WithCheckpointEvery to be 1. A handler error that reports a missing
-// transaction is skipped like any other, so a deployment that omits the
-// option but keeps this one skips every event.
+// past, and checkpointed, so it is not redelivered on restart. The default
+// behavior is to stop, leaving the failed event before the checkpoint so a
+// restart redelivers it. Under WithTransactionalCheckpoints the failed event's
+// transaction is rolled back and the skipped position is checkpointed in a
+// fresh one, which requires WithCheckpointEvery to be 1; a handler error that
+// reports a missing transaction is skipped like any other.
 func WithContinueOnHandlerError(shouldContinue bool) Option {
 	return func(p *Processor) {
 		p.continueOnHandlerError = shouldContinue

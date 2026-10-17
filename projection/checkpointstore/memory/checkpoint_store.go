@@ -17,9 +17,7 @@ type CheckpointStore struct {
 	checkpoints map[projection.ID]checkpointstore.Checkpoint
 	mu          sync.RWMutex
 
-	// open holds one token while a transaction is open. It is separate from mu,
-	// which guards only the committed map, so reads and plain writes proceed
-	// while a transaction is open.
+	// open holds a token while a transaction is open.
 	open chan struct{}
 }
 
