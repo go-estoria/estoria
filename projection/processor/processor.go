@@ -506,11 +506,7 @@ func (p *Processor) openTransaction(ctx context.Context) error {
 // and commits in a transaction of its own.
 func (p *Processor) saveTransactionalCheckpoint(ctx context.Context) error {
 	if ctxErr := ctx.Err(); ctxErr != nil {
-		if rollbackErr := p.rollbackWindow(ctx); rollbackErr != nil {
-			p.log.Error("error rolling back checkpoint transaction", "projection_id", p.id, "error", rollbackErr)
-		}
-
-		return joinCancellation(ctxErr, nil)
+		return p.abandonWindow(ctx, ctxErr)
 	}
 
 	if p.tx == nil {
@@ -527,16 +523,30 @@ func (p *Processor) saveTransactionalCheckpoint(ctx context.Context) error {
 		return fmt.Errorf("saving checkpoint: %w", err)
 	}
 
-	tx := p.tx
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return p.abandonWindow(ctx, ctxErr)
+	}
+
+	err := p.tx.Commit(ctx)
 	p.tx = nil
 
-	if err := tx.Commit(ctx); err != nil {
+	if err != nil {
 		return fmt.Errorf("committing checkpoint: %w", err)
 	}
 
 	p.sinceCheckpoint = 0
 
 	return nil
+}
+
+// abandonWindow rolls back the open window, if any, because ctx is done with
+// ctxErr, and returns ctxErr.
+func (p *Processor) abandonWindow(ctx context.Context, ctxErr error) error {
+	if rollbackErr := p.rollbackWindow(ctx); rollbackErr != nil {
+		p.log.Error("error rolling back checkpoint transaction", "projection_id", p.id, "error", rollbackErr)
+	}
+
+	return ctxErr
 }
 
 // rollbackWindow rolls back and forgets the open transaction, if any, on a

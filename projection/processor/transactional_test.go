@@ -581,6 +581,76 @@ func TestProcessor_Transactional_CancellationDuringLastEventOfWindowDoesNotFlush
 	}
 }
 
+// TestProcessor_Transactional_CancellationDuringSaveDoesNotCommit pins that a window
+// whose run is cancelled while its checkpoint is being saved is rolled back rather
+// than committed, even by a store that ignores the cancelled context.
+func TestProcessor_Transactional_CancellationDuringSaveDoesNotCommit(t *testing.T) {
+	t.Parallel()
+
+	events, inner := newStores(t)
+	appendEvents(t, events, 1)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	t.Cleanup(cancel)
+
+	store := newScriptedTxStore(inner)
+	store.onSave = func(int64) { cancel() }
+	handler := &txHandler{store: store}
+	p := newProcessor(t, events, store, handler, processor.WithTransactionalCheckpoints())
+
+	done := make(chan error, 1)
+
+	go func() {
+		done <- p.Run(ctx)
+	}()
+
+	if err := waitDone(t, done); !errors.Is(err, context.Canceled) {
+		t.Errorf("want Run to return the context's error, got %v", err)
+	}
+
+	store.assertCalls(t, "tx1:begin", "tx1:handle:1", "tx1:save:1", "tx1:rollback")
+
+	if rollbackCtxErrs := store.rollbackContextErrors(); len(rollbackCtxErrs) != 1 || rollbackCtxErrs[0] != nil {
+		t.Errorf("want one rollback on a live context, got context errors %v", rollbackCtxErrs)
+	}
+
+	if _, err := inner.Load(t.Context(), testID()); !errors.Is(err, checkpointstore.ErrCheckpointNotFound) {
+		t.Errorf("want no checkpoint, got %v", err)
+	}
+}
+
+// TestProcessor_Transactional_CommitPanicRollsBackDuringUnwinding pins that a
+// transaction whose Commit panics is still rolled back by the cleanup.
+func TestProcessor_Transactional_CommitPanicRollsBackDuringUnwinding(t *testing.T) {
+	t.Parallel()
+
+	events, inner := newStores(t)
+	appendEvents(t, events, 1)
+
+	store := newScriptedTxStore(inner)
+	store.panicOnCommit = true
+	handler := &txHandler{store: store}
+	p := newProcessor(t, events, store, handler, processor.WithTransactionalCheckpoints())
+
+	var recovered any
+
+	func() {
+		defer func() { recovered = recover() }()
+
+		_ = p.Run(t.Context())
+	}()
+
+	if recovered != "commit panicked" {
+		t.Errorf("want the commit's panic to propagate, got %v", recovered)
+	}
+
+	store.assertCalls(t, "tx1:begin", "tx1:handle:1", "tx1:save:1", "tx1:commit", "tx1:rollback")
+
+	if rollbackCtxErrs := store.rollbackContextErrors(); len(rollbackCtxErrs) != 1 || rollbackCtxErrs[0] != nil {
+		t.Errorf("want one rollback on a live context, got context errors %v", rollbackCtxErrs)
+	}
+}
+
 // TestProcessor_Transactional_PanicRollsBackDuringUnwinding pins that the cleanup
 // survives a panicking handler.
 func TestProcessor_Transactional_PanicRollsBackDuringUnwinding(t *testing.T) {
@@ -829,6 +899,9 @@ type scriptedTxStore struct {
 	commitErrs   []error
 	rollbackErrs []error
 
+	onSave        func(position int64)
+	panicOnCommit bool
+
 	// commitPersistsOnError applies a transaction's save to the committed store
 	// even when its scripted Commit result is an error.
 	commitPersistsOnError bool
@@ -984,6 +1057,10 @@ func (tx *scriptedTx) Save(_ context.Context, id projection.ID, position int64) 
 
 	tx.pending = append(tx.pending, pendingSave{id: id, position: position})
 
+	if s.onSave != nil {
+		s.onSave(position)
+	}
+
 	return nil
 }
 
@@ -1000,6 +1077,10 @@ func (tx *scriptedTx) Commit(ctx context.Context) error {
 
 	s.commits++
 	s.log = append(s.log, tx.entry("commit"))
+
+	if s.panicOnCommit {
+		panic("commit panicked")
+	}
 
 	if tx.ended {
 		return errors.New("transaction has ended")
