@@ -1,16 +1,24 @@
-// Package storetest provides an acceptance suite that every
-// checkpointstore.Store implementation is expected to pass.
+// Package storetest provides acceptance suites that checkpointstore
+// implementations are expected to pass: one for every checkpointstore.Store,
+// and one more for stores that also implement checkpointstore.TransactionalStore.
 //
-// A backend wires it up with a single test:
+// A backend wires them up with a test each:
 //
 //	func TestCheckpointStore_AcceptanceTest(t *testing.T) {
 //		storetest.RunCheckpointStoreSuite(t, func(t *testing.T) checkpointstore.Store {
 //			return newStoreForTest(t)
 //		})
 //	}
+//
+//	func TestCheckpointStore_TransactionalAcceptanceTest(t *testing.T) {
+//		storetest.RunTransactionalStoreSuite(t, func(t *testing.T) checkpointstore.TransactionalStore {
+//			return newStoreForTest(t)
+//		})
+//	}
 package storetest
 
 import (
+	"context"
 	"errors"
 	"strings"
 	"testing"
@@ -46,6 +54,34 @@ func RunCheckpointStoreSuite(t *testing.T, newStore NewStoreFunc) {
 		{"refreshes UpdatedAt on a save at an unchanged position", clauseRefreshesUpdatedAt},
 		{"deletes a checkpoint", clauseDeletesCheckpoint},
 		{"reports ErrCheckpointNotFound deleting a checkpoint that does not exist", clauseDeleteAbsent},
+	} {
+		t.Run(clause.name, func(t *testing.T) {
+			clause.run(t, newStore(t))
+		})
+	}
+}
+
+// RunTransactionalStoreSuite runs the transactional checkpoint store acceptance suite
+// against stores returned by newStore, reporting each clause as its own named subtest.
+// It complements RunCheckpointStoreSuite and does not repeat it.
+//
+// The suite does not call t.Parallel; parallelism is the caller's to choose. Every
+// clause ends its transaction, so a backend that serializes transactions is safe to
+// share across clauses. Rollback after a failed Commit is not covered, because no
+// backend-independent way to make Commit fail exists; backends test it themselves.
+func RunTransactionalStoreSuite(t *testing.T, newStore func(t *testing.T) checkpointstore.TransactionalStore) {
+	t.Helper()
+
+	for _, clause := range []struct {
+		name string
+		run  func(t *testing.T, store checkpointstore.TransactionalStore)
+	}{
+		{"leaves no checkpoint for a save in a rolled-back transaction", clauseRollbackDiscardsSave},
+		{"makes a save in a committed transaction visible through Load", clauseCommitPublishesSave},
+		{"hides an uncommitted save from Load outside the transaction", clauseUncommittedSaveIsInvisible},
+		{"reports an error on a second Commit", clauseSecondCommitFails},
+		{"returns nil from Rollback after Commit and keeps the committed checkpoint", clauseRollbackAfterCommit},
+		{"returns nil from Rollback after Rollback", clauseRollbackAfterRollback},
 	} {
 		t.Run(clause.name, func(t *testing.T) {
 			clause.run(t, newStore(t))
@@ -171,6 +207,134 @@ func clauseDeleteAbsent(t *testing.T, store checkpointstore.Store) {
 	}
 }
 
+// clauseRollbackDiscardsSave pins that a rolled-back window persists nothing: neither a
+// first checkpoint nor an overwrite of an existing one.
+func clauseRollbackDiscardsSave(t *testing.T, store checkpointstore.TransactionalStore) {
+	fresh := newProjectionID()
+	existing := newProjectionID()
+	saveCheckpoint(t, store, existing, 3)
+
+	tx := beginTransaction(t, store)
+	transactionSave(t, tx, fresh)
+	transactionSave(t, tx, existing)
+
+	if err := tx.Rollback(t.Context()); err != nil {
+		t.Fatalf("rolling back: %v", err)
+	}
+
+	if _, err := store.Load(t.Context(), fresh); !errors.Is(err, checkpointstore.ErrCheckpointNotFound) {
+		t.Errorf("want ErrCheckpointNotFound loading a checkpoint saved only in a rolled-back transaction, got %v", err)
+	}
+
+	if got := loadCheckpoint(t, store, existing).Position; got != 3 {
+		t.Errorf("want the existing checkpoint's position 3 after rollback, got %d", got)
+	}
+}
+
+// clauseCommitPublishesSave pins that a committed window's checkpoint is the store's
+// checkpoint: readable through the plain Load with the store-assigned UpdatedAt.
+func clauseCommitPublishesSave(t *testing.T, store checkpointstore.TransactionalStore) {
+	id := newProjectionID()
+
+	tx := beginTransaction(t, store)
+	transactionSave(t, tx, id)
+
+	if err := tx.Commit(t.Context()); err != nil {
+		t.Fatalf("committing: %v", err)
+	}
+
+	checkpoint := loadCheckpoint(t, store, id)
+	if checkpoint.Position != 8 {
+		t.Errorf("want position 8, got %d", checkpoint.Position)
+	}
+
+	if checkpoint.UpdatedAt.IsZero() {
+		t.Error("want an assigned UpdatedAt, got the zero time")
+	}
+}
+
+// clauseUncommittedSaveIsInvisible pins isolation: the plain Load, which runs outside
+// the transaction, sees the committed state until Commit and the new state after.
+func clauseUncommittedSaveIsInvisible(t *testing.T, store checkpointstore.TransactionalStore) {
+	fresh := newProjectionID()
+	existing := newProjectionID()
+	saveCheckpoint(t, store, existing, 3)
+
+	tx := beginTransaction(t, store)
+	transactionSave(t, tx, fresh)
+	transactionSave(t, tx, existing)
+
+	if _, err := store.Load(t.Context(), fresh); !errors.Is(err, checkpointstore.ErrCheckpointNotFound) {
+		t.Errorf("want ErrCheckpointNotFound loading an uncommitted first checkpoint, got %v", err)
+	}
+
+	if got := loadCheckpoint(t, store, existing).Position; got != 3 {
+		t.Errorf("want the committed position 3 before Commit, got %d", got)
+	}
+
+	if err := tx.Commit(t.Context()); err != nil {
+		t.Fatalf("committing: %v", err)
+	}
+
+	if got := loadCheckpoint(t, store, fresh).Position; got != 8 {
+		t.Errorf("want position 8 after Commit, got %d", got)
+	}
+
+	if got := loadCheckpoint(t, store, existing).Position; got != 8 {
+		t.Errorf("want position 8 after Commit, got %d", got)
+	}
+}
+
+// clauseSecondCommitFails pins that Commit ends the transaction: committing again is an
+// error rather than a silent success, so a caller cannot mistake a no-op for durability.
+func clauseSecondCommitFails(t *testing.T, store checkpointstore.TransactionalStore) {
+	tx := beginTransaction(t, store)
+	transactionSave(t, tx, newProjectionID())
+
+	if err := tx.Commit(t.Context()); err != nil {
+		t.Fatalf("committing: %v", err)
+	}
+
+	if err := tx.Commit(t.Context()); err == nil {
+		t.Error("want an error from a second Commit, got nil")
+	}
+}
+
+// clauseRollbackAfterCommit pins the cleanup-safe contract that lets a processor defer
+// Rollback unconditionally: it succeeds once the transaction has committed, and it
+// does not undo the commit.
+func clauseRollbackAfterCommit(t *testing.T, store checkpointstore.TransactionalStore) {
+	id := newProjectionID()
+
+	tx := beginTransaction(t, store)
+	transactionSave(t, tx, id)
+
+	if err := tx.Commit(t.Context()); err != nil {
+		t.Fatalf("committing: %v", err)
+	}
+
+	if err := tx.Rollback(t.Context()); err != nil {
+		t.Errorf("want nil from Rollback after Commit, got %v", err)
+	}
+
+	if got := loadCheckpoint(t, store, id).Position; got != 8 {
+		t.Errorf("want the committed position 8 to survive Rollback, got %d", got)
+	}
+}
+
+// clauseRollbackAfterRollback pins that Rollback is idempotent.
+func clauseRollbackAfterRollback(t *testing.T, store checkpointstore.TransactionalStore) {
+	tx := beginTransaction(t, store)
+
+	if err := tx.Rollback(t.Context()); err != nil {
+		t.Fatalf("rolling back: %v", err)
+	}
+
+	if err := tx.Rollback(t.Context()); err != nil {
+		t.Errorf("want nil from Rollback after Rollback, got %v", err)
+	}
+}
+
 // newProjectionID returns a projection ID unique to one clause, so clauses sharing a
 // store cannot observe each other's writes. The generated name is valid per
 // projection.ID.Validate, modeling correct usage even though stores do not validate.
@@ -197,4 +361,34 @@ func loadCheckpoint(t *testing.T, store checkpointstore.Store, id projection.ID)
 	}
 
 	return checkpoint
+}
+
+// beginTransaction opens a transaction and arranges for it to be rolled back when the
+// clause ends, so a clause that fails partway cannot strand a transaction that blocks
+// the clauses after it.
+func beginTransaction(t *testing.T, store checkpointstore.TransactionalStore) checkpointstore.Transaction {
+	t.Helper()
+
+	tx, err := store.Begin(t.Context())
+	if err != nil {
+		t.Fatalf("beginning transaction: %v", err)
+	}
+
+	t.Cleanup(func() {
+		if err := tx.Rollback(context.WithoutCancel(t.Context())); err != nil {
+			t.Errorf("rolling back at cleanup: %v", err)
+		}
+	})
+
+	return tx
+}
+
+// transactionSave saves position 8, the position every transactional clause asserts on,
+// which differs from the committed position 3 that clauses seed.
+func transactionSave(t *testing.T, tx checkpointstore.Transaction, id projection.ID) {
+	t.Helper()
+
+	if err := tx.Save(t.Context(), id, 8); err != nil {
+		t.Fatalf("saving checkpoint for %s at position 8 in transaction: %v", id, err)
+	}
 }

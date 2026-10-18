@@ -19,3 +19,13 @@ func TestCheckpointStore_AcceptanceTest(t *testing.T) {
 		return store
 	})
 }
+
+func TestCheckpointStore_TransactionalAcceptanceTest(t *testing.T) {
+	t.Parallel()
+
+	store := memory.NewCheckpointStore()
+
+	storetest.RunTransactionalStoreSuite(t, func(*testing.T) checkpointstore.TransactionalStore {
+		return store
+	})
+}

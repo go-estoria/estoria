@@ -58,3 +58,39 @@ type Store interface {
 	// receive success or ErrCheckpointNotFound.
 	Delete(ctx context.Context, id projection.ID) error
 }
+
+// A TransactionalStore is a Store that can open a transaction in which a
+// checkpoint save and a handler's own writes commit together. A processor
+// discovers the capability by type assertion; a store without it keeps the
+// two-write behavior. The transaction is on the store's own database by
+// construction, and the store's plain Save, Load, and Delete never consult a
+// context's transaction.
+type TransactionalStore interface {
+	Store
+
+	// Begin opens a transaction.
+	Begin(ctx context.Context) (Transaction, error)
+}
+
+// A Transaction is one open transaction on a TransactionalStore's database.
+// Context returns a context derived from the one passed to Begin that carries
+// the transaction in a form only the store's own package can read back. Save
+// records the checkpoint inside the transaction with the same last-write-wins
+// contract as Store.Save. Commit ends the transaction; an error from it does
+// not say whether the server committed. Rollback is cleanup-safe: it returns
+// nil once the transaction has ended for any reason, so a deferred Rollback is
+// always correct.
+type Transaction interface {
+	// Context returns the context carrying the transaction.
+	Context() context.Context
+
+	// Save records position as the projection's checkpoint within the
+	// transaction, assigning UpdatedAt even when the position is unchanged.
+	Save(ctx context.Context, id projection.ID, position int64) error
+
+	// Commit makes the transaction's changes durable and ends it.
+	Commit(ctx context.Context) error
+
+	// Rollback discards the transaction's changes and ends it.
+	Rollback(ctx context.Context) error
+}
