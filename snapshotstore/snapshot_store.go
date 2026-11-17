@@ -12,8 +12,12 @@ import (
 type AggregateSnapshot struct {
 	AggregateID      typeid.ID
 	AggregateVersion int64
-	Timestamp        time.Time
-	Data             []byte
+
+	// Timestamp is when the snapshot was taken. A writer may leave it zero,
+	// and the store then chooses what a read reports, such as its own clock
+	// at write time, or zero. A store may keep less than nanosecond precision.
+	Timestamp time.Time
+	Data      []byte
 
 	// DataContentType is the MIME content type of Data, declared by the codec
 	// that produced the bytes. Stores round-trip it verbatim, including an
