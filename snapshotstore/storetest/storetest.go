@@ -44,9 +44,11 @@ func RunSnapshotStoreSuite(t *testing.T, newStore NewStoreFunc) {
 	}{
 		{"reports ErrSnapshotNotFound for an aggregate that was never snapshotted", clauseNeverSnapshotted},
 		{"round-trips a snapshot", clauseRoundTripsSnapshot},
+		{"round-trips a binary payload byte for byte", clauseRoundTripsBinaryPayload},
 		{"does not modify the snapshot it is given", clauseDoesNotMutateSnapshot},
 		{"returns the most recently written snapshot by default", clauseReturnsMostRecent},
 		{"never returns a snapshot newer than MaxVersion", clauseHonorsMaxVersion},
+		{"returns a snapshot taken exactly at MaxVersion", clauseIncludesMaxVersion},
 		{"keeps snapshots for different aggregates separate", clauseSeparatesAggregates},
 	} {
 		t.Run(clause.name, func(t *testing.T) {
@@ -138,6 +140,35 @@ func clauseRoundTripsSnapshot(t *testing.T, store snapshotstore.SnapshotStore) {
 	}
 }
 
+// clauseRoundTripsBinaryPayload pins that a store keeps the payload as bytes, not text. A
+// state codec may emit NUL bytes and invalid UTF-8, and a store that keeps payloads in a
+// text or JSON column rejects that write or alters the bytes. SnapshottingStore only logs
+// a failed write, so the aggregate either silently stops being snapshotted or hydrates
+// from corrupt state.
+func clauseRoundTripsBinaryPayload(t *testing.T, store snapshotstore.SnapshotStore) {
+	aggregateID := newAggregateID()
+
+	wantData := []byte{0x00, 0xff, 0xfe, '{', 0x00, 0x7f}
+
+	if err := store.WriteSnapshot(t.Context(), &snapshotstore.AggregateSnapshot{
+		AggregateID:      aggregateID,
+		AggregateVersion: 1,
+		Data:             slices.Clone(wantData),
+		DataContentType:  "application/octet-stream",
+	}); err != nil {
+		t.Fatalf("writing snapshot: %v", err)
+	}
+
+	got, err := store.ReadSnapshot(t.Context(), aggregateID, snapshotstore.ReadSnapshotOptions{})
+	if err != nil {
+		t.Fatalf("reading snapshot: %v", err)
+	}
+
+	if !reflect.DeepEqual(got.Data, wantData) {
+		t.Errorf("want data %x, got %x", wantData, got.Data)
+	}
+}
+
 // clauseDoesNotMutateSnapshot pins that WriteSnapshot treats its argument as read-only.
 // Callers reuse and inspect the struct after writing, and a store that scribbles on it
 // corrupts state the caller still owns — the failure mode is silent, because the caller's
@@ -226,6 +257,30 @@ func clauseHonorsMaxVersion(t *testing.T, store snapshotstore.SnapshotStore) {
 
 	if snap.AggregateVersion > maxVersion {
 		t.Errorf("want a snapshot at or below version %d, got version %d", maxVersion, snap.AggregateVersion)
+	}
+}
+
+// clauseIncludesMaxVersion pins that the MaxVersion bound is inclusive. The bound here is
+// the newest snapshot, which clauseReturnsMostRecent already requires a store to keep, so
+// ErrSnapshotNotFound is not the valid answer it is in clauseHonorsMaxVersion. A store
+// that answers not-found or an older snapshot makes a load to a snapshotted version replay
+// events the snapshot already holds, and fails the load outright on a stream truncated at
+// that version.
+func clauseIncludesMaxVersion(t *testing.T, store snapshotstore.SnapshotStore) {
+	aggregateID := newAggregateID()
+	writeVersions(t, store, aggregateID, 1, 2, 3)
+
+	const maxVersion = 3
+
+	snap, err := store.ReadSnapshot(t.Context(), aggregateID, snapshotstore.ReadSnapshotOptions{
+		MaxVersion: maxVersion,
+	})
+	if err != nil {
+		t.Fatalf("reading snapshot with MaxVersion %d: %v", maxVersion, err)
+	}
+
+	if snap.AggregateVersion != maxVersion {
+		t.Errorf("want the snapshot at version %d, got version %d", maxVersion, snap.AggregateVersion)
 	}
 }
 
