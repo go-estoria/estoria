@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strconv"
 	"testing"
 	"time"
@@ -969,6 +970,211 @@ func TestSnapshottingStore_LoadsAggregateSnapshottedAtStreamTip(t *testing.T) {
 	}
 }
 
+// TestSnapshottingStore_Save_WritesAtMostOneSnapshotPerSave pins that a save
+// consults the policy at every version it produces but writes at most one
+// snapshot, of the state it ends at.
+func TestSnapshottingStore_Save_WritesAtMostOneSnapshotPerSave(t *testing.T) {
+	t.Parallel()
+
+	const snapshotEvery = 3
+
+	for _, tt := range []struct {
+		name string
+		// haveSavedEvents are saved before the save under test, one save each.
+		haveSavedEvents int
+		haveNewEvents   int
+		wantConsulted   []int64
+		// wantSnapshotAt is the version of the one snapshot the save under test
+		// writes, or 0 when it writes none.
+		wantSnapshotAt int64
+	}{
+		{
+			name:           "a save crossing several boundaries writes one snapshot at the version it ends at",
+			haveNewEvents:  10,
+			wantConsulted:  []int64{1, 2, 3, 4, 5, 6, 7, 8, 9, 10},
+			wantSnapshotAt: 10,
+		},
+		{
+			name:           "a save ending on a boundary writes one snapshot there",
+			haveNewEvents:  3,
+			wantConsulted:  []int64{1, 2, 3},
+			wantSnapshotAt: 3,
+		},
+		{
+			name:            "a save crossing one boundary mid-way writes one snapshot at the version it ends at",
+			haveSavedEvents: 2,
+			haveNewEvents:   2,
+			wantConsulted:   []int64{3, 4},
+			wantSnapshotAt:  4,
+		},
+		{
+			name:          "a save crossing no boundary writes no snapshot",
+			haveNewEvents: 2,
+			wantConsulted: []int64{1, 2},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			ctx := t.Context()
+
+			eventStore, err := memory.NewEventStore()
+			if err != nil {
+				t.Fatalf("unexpected error creating event store: %v", err)
+			}
+
+			inner, err := aggregatestore.New(eventStore, "mockentity", newMockEntity,
+				aggregatestore.WithEventTypes(mockEntityEventA{}),
+			)
+			if err != nil {
+				t.Fatalf("unexpected error creating inner store: %v", err)
+			}
+
+			var (
+				consulted []int64
+				written   []*snapshotstore.AggregateSnapshot
+			)
+
+			policy := snapshotstore.EventCountSnapshotPolicy{N: snapshotEvery}
+
+			store, err := aggregatestore.NewSnapshottingStore[mockEntity](
+				inner,
+				&mockSnapshotStore{
+					WriteSnapshotFn: func(_ context.Context, snap *snapshotstore.AggregateSnapshot) error {
+						written = append(written, snap)
+						return nil
+					},
+				},
+				&mockSnapshotPolicy{
+					ShouldSnapshotFn: func(id typeid.ID, version int64, ts time.Time) bool {
+						consulted = append(consulted, version)
+						return policy.ShouldSnapshot(id, version, ts)
+					},
+				},
+				// round-trips the applied event count, so the snapshot shows which
+				// state it was taken of, not only the version it claims
+				aggregatestore.WithStateCodec[mockEntity](&mockSnapshotMarshaler{
+					MarshalFn: func(entity mockEntity) ([]byte, error) {
+						return []byte(strconv.FormatInt(entity.numAppliedEvents, 10)), nil
+					},
+				}),
+			)
+			if err != nil {
+				t.Fatalf("unexpected error creating store: %v", err)
+			}
+
+			aggregate := store.New(uuid.Must(uuid.NewV4()))
+
+			for range tt.haveSavedEvents {
+				aggregate.Append(mockEntityEventA{A: "a"})
+				if err := store.Save(ctx, aggregate, nil); err != nil {
+					t.Fatalf("unexpected error saving the prefix: %v", err)
+				}
+			}
+
+			consulted, written = nil, nil
+
+			for range tt.haveNewEvents {
+				aggregate.Append(mockEntityEventA{A: "a"})
+			}
+
+			if err := store.Save(ctx, aggregate, nil); err != nil {
+				t.Fatalf("unexpected error saving: %v", err)
+			}
+
+			if !slices.Equal(consulted, tt.wantConsulted) {
+				t.Errorf("want the policy consulted at versions %v, got %v", tt.wantConsulted, consulted)
+			}
+
+			if tt.wantSnapshotAt == 0 {
+				if len(written) != 0 {
+					t.Errorf("want no snapshot written, got %d", len(written))
+				}
+				return
+			}
+
+			if len(written) != 1 {
+				t.Fatalf("want exactly one snapshot written, got %d", len(written))
+			}
+
+			if got := written[0].AggregateVersion; got != tt.wantSnapshotAt {
+				t.Errorf("want the snapshot at version %d, got %d", tt.wantSnapshotAt, got)
+			}
+
+			if got, want := string(written[0].Data), strconv.FormatInt(tt.wantSnapshotAt, 10); got != want {
+				t.Errorf("want the snapshot of the state after %s events, got the state after %s", want, got)
+			}
+		})
+	}
+}
+
+// TestSnapshottingStore_Save_TakesNoSnapshotWhenApplyFails pins that a save
+// whose apply loop fails takes no snapshot, even when the policy asked for
+// one at a version applied before the failure.
+func TestSnapshottingStore_Save_TakesNoSnapshotWhenApplyFails(t *testing.T) {
+	t.Parallel()
+
+	var (
+		consulted []int64
+		marshals  int
+		writes    int
+	)
+
+	store, err := aggregatestore.NewSnapshottingStore[mockEntity](
+		&mockAggregateStore[mockEntity]{
+			SaveFn: func(_ context.Context, aggregate *aggregatestore.Aggregate[mockEntity], _ *aggregatestore.SaveOptions) error {
+				for _, version := range []int64{43, 45} {
+					aggregate.TestOnlyWillApply(&aggregatestore.Event[mockEntity]{
+						Version:     version,
+						DomainEvent: mockEntityEventA{},
+					})
+				}
+
+				return nil
+			},
+		},
+		&mockSnapshotStore{
+			WriteSnapshotFn: func(_ context.Context, _ *snapshotstore.AggregateSnapshot) error {
+				writes++
+				return nil
+			},
+		},
+		&mockSnapshotPolicy{
+			ShouldSnapshotFn: func(_ typeid.ID, version int64, _ time.Time) bool {
+				consulted = append(consulted, version)
+				return version == 43
+			},
+		},
+		aggregatestore.WithStateCodec[mockEntity](&mockSnapshotMarshaler{
+			MarshalFn: func(_ mockEntity) ([]byte, error) {
+				marshals++
+				return []byte("state"), nil
+			},
+		}),
+	)
+	if err != nil {
+		t.Fatalf("unexpected error creating store: %v", err)
+	}
+
+	aggregate := newMockAggregate(uuid.Must(uuid.NewV4()), 42)
+
+	if err := store.Save(t.Context(), aggregate, nil); !errors.Is(err, aggregatestore.ErrEventsAppended) {
+		t.Fatalf("want an error resolving to ErrEventsAppended, got %v", err)
+	}
+
+	if got := aggregate.Version(); got != 43 {
+		t.Errorf("want the aggregate left at version 43, got %d", got)
+	}
+
+	if want := []int64{43}; !slices.Equal(consulted, want) {
+		t.Errorf("want the policy consulted at versions %v, got %v", want, consulted)
+	}
+
+	if marshals != 0 || writes != 0 {
+		t.Errorf("want no snapshot marshaled or written, got %d marshals and %d writes", marshals, writes)
+	}
+}
+
 // mockPointerEntity is a pointer-typed entity. The rest of this suite uses the value-typed
 // mockEntity, which is why the in-place snapshot corruption below went unnoticed: a marshaler
 // writing through *E only touches the aggregate's live entity when E is a pointer.
@@ -1761,8 +1967,8 @@ func (snapshotAtVersionOne) ShouldSnapshot(_ typeid.ID, version int64, _ time.Ti
 // TestSnapshottingStore_SnapshotDetachesFromLiveState pins the write-side
 // consumer duty of the StateCodec contract: marshal output may alias live
 // state and the writer may retain what it is handed, so the payload must be
-// detached before it crosses — or the next applied event mutates the
-// retained snapshot in place.
+// detached before it crosses — or the next applied event, in a later save,
+// mutates the retained snapshot in place.
 func TestSnapshottingStore_SnapshotDetachesFromLiveState(t *testing.T) {
 	t.Parallel()
 
@@ -1792,10 +1998,15 @@ func TestSnapshottingStore_SnapshotDetachesFromLiveState(t *testing.T) {
 	}
 
 	aggregate := snapping.New(uuid.Must(uuid.NewV4()))
-	aggregate.Append(blobBumped{}, blobBumped{})
 
-	if err := snapping.Save(t.Context(), aggregate, nil); err != nil {
-		t.Fatalf("saving: %v", err)
+	// The first save snapshots at version 1; the second applies an event to
+	// the same live state after the writer has retained the payload.
+	for range 2 {
+		aggregate.Append(blobBumped{})
+
+		if err := snapping.Save(t.Context(), aggregate, nil); err != nil {
+			t.Fatalf("saving: %v", err)
+		}
 	}
 
 	if written == nil || written.AggregateVersion != 1 {
