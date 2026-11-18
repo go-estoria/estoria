@@ -7,6 +7,19 @@
 // must be idempotent. Handlers should not perform external side effects (use
 // an outbox): under versioned rebuilds every handler replays history at some
 // point, so "am I replaying?" is not a meaningful question.
+//
+// With WithTransactionalCheckpoints the checkpoint store opens a transaction
+// for each checkpoint window and the handler receives it on its context, so a
+// window's handler writes and its checkpoint commit together or not at all. A
+// window that fails before commit is rolled back and redelivered on restart,
+// and a window whose commit succeeded is never redelivered. The guarantee
+// covers only work the handler performs through that transaction, and only
+// while a single processor drives the projection ID. A commit error leaves the
+// outcome unknown: Run stops, and a new Processor resumes from the durable
+// checkpoint. Handlers must still be idempotent, because a rolled-back window
+// is re-invoked on resume, restarting a torn-down rebuild rewinds the
+// checkpoint, the same handler may run without the option, and effects outside
+// the transaction remain at least once.
 package processor
 
 import (
@@ -35,6 +48,10 @@ const DefaultBatchSize = 500
 // cancellation without inheriting an unbounded wait from a Close that blocks.
 const iteratorCloseTimeout = 5 * time.Second
 
+// rollbackTimeout bounds the rollback of an open checkpoint transaction, which
+// runs on a context detached from the caller's cancellation.
+const rollbackTimeout = 5 * time.Second
+
 // A Processor drives one projection version against the global event
 // sequence. It resumes from the projection's checkpoint, applies each event
 // to the handler, and checkpoints its progress; once it reaches the head it
@@ -54,7 +71,12 @@ type Processor struct {
 	batchSize              int64
 	checkpointEvery        int
 	continueOnHandlerError bool
+	transactionalOption    bool
 	log                    estoria.Logger
+
+	// transactional is the checkpoint store's transactional capability, set
+	// only under WithTransactionalCheckpoints.
+	transactional checkpointstore.TransactionalStore
 
 	position         atomic.Int64
 	caughtUpPosition atomic.Int64
@@ -66,6 +88,11 @@ type Processor struct {
 	// It lives on the Processor rather than in drain so the cadence carries
 	// across batch-limited reads; only Run's goroutine touches it.
 	sinceCheckpoint int
+
+	// tx is the open checkpoint window's transaction, if any. Like
+	// sinceCheckpoint it spans batch-limited reads; only Run's goroutine
+	// touches it.
+	tx checkpointstore.Transaction
 }
 
 // New creates a new Processor for the given projection ID, which must be
@@ -121,6 +148,19 @@ func New(
 		return nil, errors.New("logger must not be nil")
 	}
 
+	if processor.transactionalOption {
+		transactional, ok := checkpoints.(checkpointstore.TransactionalStore)
+		if !ok {
+			return nil, errors.New("transactional checkpoints require a checkpoint store that implements checkpointstore.TransactionalStore")
+		}
+
+		if processor.continueOnHandlerError && processor.checkpointEvery > 1 {
+			return nil, errors.New("transactional checkpoints with continue-on-handler-error require a checkpoint interval of 1")
+		}
+
+		processor.transactional = transactional
+	}
+
 	return processor, nil
 }
 
@@ -142,6 +182,12 @@ func (p *Processor) Run(ctx context.Context) error {
 	}
 
 	p.position.Store(position)
+
+	defer func() {
+		if err := p.rollbackWindow(ctx); err != nil {
+			p.log.Error("error rolling back checkpoint transaction", "projection_id", p.id, "error", err)
+		}
+	}()
 
 	for {
 		if err := ctx.Err(); err != nil {
@@ -287,13 +333,25 @@ func (p *Processor) drain(ctx context.Context) (bool, error) {
 			return false, joinCancellation(ctxErr, readErr)
 		}
 
-		if err := p.handler.Handle(ctx, buffered.event); err != nil {
+		handleCtx, err := p.beginWindow(ctx)
+		if err != nil {
+			return false, err
+		}
+
+		if err := p.handler.Handle(handleCtx, buffered.event); err != nil {
 			if !p.continueOnHandlerError {
 				return false, fmt.Errorf("handling event: %w", err)
 			}
 
-			// The failed event is advanced past and checkpointed with the
-			// rest of the batch: it will not be redelivered on restart.
+			if rollbackErr := p.rollbackWindow(ctx); rollbackErr != nil {
+				return false, errors.Join(
+					fmt.Errorf("handling event: %w", err),
+					fmt.Errorf("rolling back checkpoint transaction: %w", rollbackErr),
+				)
+			}
+
+			// The failed event is advanced past and checkpointed: it will not
+			// be redelivered on restart.
 			p.log.Error("error handling event", "projection_id", p.id, "event_id", buffered.event.ID, "global_position", buffered.position, "error", err)
 		}
 
@@ -393,6 +451,10 @@ func (p *Processor) loadPosition(ctx context.Context) (int64, error) {
 // saveCheckpoint saves the current position and, on success, resets the
 // cadence counter: any save means zero events are pending checkpointing.
 func (p *Processor) saveCheckpoint(ctx context.Context) error {
+	if p.transactional != nil {
+		return p.saveTransactionalCheckpoint(ctx)
+	}
+
 	if err := p.checkpoints.Save(ctx, p.id, p.position.Load()); err != nil {
 		return fmt.Errorf("saving checkpoint: %w", err)
 	}
@@ -400,6 +462,108 @@ func (p *Processor) saveCheckpoint(ctx context.Context) error {
 	p.sinceCheckpoint = 0
 
 	return nil
+}
+
+// beginWindow returns the context to handle the next event with: ctx itself
+// without transactional checkpoints, otherwise the context of the window's
+// transaction, which it opens if none is open.
+func (p *Processor) beginWindow(ctx context.Context) (context.Context, error) {
+	if p.transactional == nil {
+		return ctx, nil
+	}
+
+	if p.tx == nil {
+		if err := p.openTransaction(ctx); err != nil {
+			return nil, err
+		}
+	}
+
+	return p.tx.Context(), nil
+}
+
+func (p *Processor) openTransaction(ctx context.Context) error {
+	tx, err := p.transactional.Begin(ctx)
+	if err != nil {
+		err = fmt.Errorf("beginning checkpoint transaction: %w", err)
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return joinCancellation(ctxErr, err)
+		}
+
+		return err
+	}
+
+	if tx == nil {
+		return errors.New("checkpoint store returned a nil transaction")
+	}
+
+	p.tx = tx
+
+	return nil
+}
+
+// saveTransactionalCheckpoint ends the open window by saving the current
+// position in its transaction and committing, or, if no window is open, saves
+// and commits in a transaction of its own.
+func (p *Processor) saveTransactionalCheckpoint(ctx context.Context) error {
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return p.abandonWindow(ctx, ctxErr)
+	}
+
+	if p.tx == nil {
+		if err := p.openTransaction(ctx); err != nil {
+			return err
+		}
+	}
+
+	if err := p.tx.Save(ctx, p.id, p.position.Load()); err != nil {
+		if rollbackErr := p.rollbackWindow(ctx); rollbackErr != nil {
+			p.log.Error("error rolling back checkpoint transaction", "projection_id", p.id, "error", rollbackErr)
+		}
+
+		return fmt.Errorf("saving checkpoint: %w", err)
+	}
+
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return p.abandonWindow(ctx, ctxErr)
+	}
+
+	err := p.tx.Commit(ctx)
+	p.tx = nil
+
+	if err != nil {
+		return fmt.Errorf("committing checkpoint: %w", err)
+	}
+
+	p.sinceCheckpoint = 0
+
+	return nil
+}
+
+// abandonWindow rolls back the open window, if any, because ctx is done with
+// ctxErr, and returns ctxErr.
+func (p *Processor) abandonWindow(ctx context.Context, ctxErr error) error {
+	if rollbackErr := p.rollbackWindow(ctx); rollbackErr != nil {
+		p.log.Error("error rolling back checkpoint transaction", "projection_id", p.id, "error", rollbackErr)
+	}
+
+	return ctxErr
+}
+
+// rollbackWindow rolls back and forgets the open transaction, if any, on a
+// context detached from ctx's cancellation so the rollback can still reach the
+// store.
+func (p *Processor) rollbackWindow(ctx context.Context) error {
+	tx := p.tx
+	if tx == nil {
+		return nil
+	}
+
+	p.tx = nil
+
+	rollbackCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), rollbackTimeout)
+	defer cancel()
+
+	return tx.Rollback(rollbackCtx)
 }
 
 // An Option configures a Processor.
@@ -418,7 +582,9 @@ func WithBatchSize(size int64) Option {
 // after every event. Raising it trades checkpoint write volume against a wider
 // at-least-once redelivery window on crash. The cadence counts across
 // batch-limited reads, and reaching the head of the event sequence always
-// saves regardless of n.
+// saves regardless of n. Under WithTransactionalCheckpoints a window holds its
+// transaction's connection for its whole duration, so a large n against a
+// large batch holds it longer.
 func WithCheckpointEvery(n int) Option {
 	return func(p *Processor) {
 		p.checkpointEvery = n
@@ -427,14 +593,32 @@ func WithCheckpointEvery(n int) Option {
 
 // WithContinueOnHandlerError sets whether to continue past events whose
 // handling fails, rather than stopping. A failed event is logged, advanced
-// past, and checkpointed with the rest of its batch, so it is not redelivered
-// on restart.
-//
-// The default behavior is to stop, leaving the failed event before the
-// checkpoint so a restart redelivers it.
+// past, and checkpointed, so it is not redelivered on restart. The default
+// behavior is to stop, leaving the failed event before the checkpoint so a
+// restart redelivers it. Under WithTransactionalCheckpoints the failed event's
+// transaction is rolled back and the skipped position is checkpointed in a
+// fresh one, which requires WithCheckpointEvery to be 1; a handler error that
+// reports a missing transaction is skipped like any other.
 func WithContinueOnHandlerError(shouldContinue bool) Option {
 	return func(p *Processor) {
 		p.continueOnHandlerError = shouldContinue
+	}
+}
+
+// WithTransactionalCheckpoints binds each checkpoint window to a transaction
+// from the checkpoint store, which must implement
+// checkpointstore.TransactionalStore; New fails otherwise, and fails when
+// combined with WithContinueOnHandlerError and a checkpoint interval above 1.
+// Every Handle call in the window receives the transaction's context, and the
+// checkpoint save commits with the handler's writes. The guarantee requires a
+// single active processor per projection ID and a handler that performs its
+// reads and writes through the transaction on the context without committing,
+// rolling back, retaining, or sharing it. Each active processor holds a
+// connection for its open window in addition to its event reader's, and the
+// checkpoint's UpdatedAt is refreshed only when a window commits.
+func WithTransactionalCheckpoints() Option {
+	return func(p *Processor) {
+		p.transactionalOption = true
 	}
 }
 
