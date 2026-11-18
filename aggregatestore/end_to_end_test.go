@@ -134,8 +134,9 @@ func TestEndToEnd_FullComposition(t *testing.T) {
 	accountUUID := uuid.Must(uuid.NewV4())
 	wantID := typeid.New("account", accountUUID)
 
-	// Create an aggregate, append events across two saves, and verify state.
-	// The second save crosses version 3, where the snapshot policy fires.
+	// Create an aggregate, append events across three saves, and verify state.
+	// The second save ends at version 3, where the snapshot policy fires; the
+	// third carries the stream past the snapshot.
 	aggregate := store.New(accountUUID)
 	if got := aggregate.ID(); got.String() != wantID.String() {
 		t.Fatalf("new aggregate ID: want %s, got %s", wantID, got)
@@ -151,18 +152,24 @@ func TestEndToEnd_FullComposition(t *testing.T) {
 		t.Fatalf("version after first save: want 2, got %d", got)
 	}
 
-	aggregate.Append(fundsWithdrawn{Amount: 30}, fundsDeposited{Amount: 10}, fundsDeposited{Amount: 5})
+	aggregate.Append(fundsWithdrawn{Amount: 30})
+
+	if err := store.Save(ctx, aggregate, nil); err != nil {
+		t.Fatalf("saving aggregate: %v", err)
+	}
+
+	aggregate.Append(fundsDeposited{Amount: 10}, fundsDeposited{Amount: 5})
 
 	if err := store.Save(ctx, aggregate, nil); err != nil {
 		t.Fatalf("saving aggregate: %v", err)
 	}
 
 	if got := aggregate.Version(); got != 5 {
-		t.Fatalf("version after second save: want 5, got %d", got)
+		t.Fatalf("version after third save: want 5, got %d", got)
 	}
 
 	if got := aggregate.State().Balance; got != 135 {
-		t.Fatalf("balance after second save: want 135, got %d", got)
+		t.Fatalf("balance after third save: want 135, got %d", got)
 	}
 
 	// The snapshot policy fired at version 3.

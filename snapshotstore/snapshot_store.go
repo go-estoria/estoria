@@ -43,8 +43,9 @@ type SnapshotStore interface {
 	SnapshotWriter
 }
 
-// An EventCountSnapshotPolicy takes a snapshot every N events.
-// If N is 0, no snapshots are taken.
+// An EventCountSnapshotPolicy asks for a snapshot at every multiple of N
+// events. A save that crosses one or more multiples writes one snapshot, at
+// the version the save ends at. If N is 0, no snapshots are taken.
 type EventCountSnapshotPolicy struct {
 	N int64
 }

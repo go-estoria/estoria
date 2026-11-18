@@ -14,7 +14,9 @@ import (
 	"github.com/gofrs/uuid/v5"
 )
 
-// A SnapshotPolicy determines when to take snapshots.
+// A SnapshotPolicy determines when to take snapshots. SnapshottingStore
+// consults it at every version a save produces, and when it reports true at
+// any of them, writes one snapshot at the version the save ends at.
 type SnapshotPolicy interface {
 	ShouldSnapshot(aggregateID typeid.ID, aggregateVersion int64, timestamp time.Time) bool
 }
@@ -278,9 +280,11 @@ func validateSnapshotState[S any](state *S) error {
 	return nil
 }
 
-// Save saves an aggregate, taking snapshots as needed.
-// An error resolving to ErrEventsAppended means the events were appended but
-// not applied to the in-memory aggregate.
+// Save saves an aggregate, taking at most one snapshot — at the version the
+// save ends at — when the policy asks for one at any version the save
+// produces. An error resolving to ErrEventsAppended means the events were
+// appended but not applied to the in-memory aggregate, and no snapshot is
+// taken.
 func (s *SnapshottingStore[S]) Save(ctx context.Context, aggregate *Aggregate[S], opts *SaveOptions) error {
 	if aggregate == nil {
 		return SaveError{Err: withSaveOutcome(ErrNoEventsAppended, ErrNilAggregate)}
@@ -290,9 +294,10 @@ func (s *SnapshottingStore[S]) Save(ctx context.Context, aggregate *Aggregate[S]
 
 	log.Debug("saving aggregate")
 
-	// Defer applying events so a snapshot can be taken at an exact version.
-	// This is set on a copy: opts belongs to the caller, and mutating it would
-	// leak SkipApply into every later save that reuses the same struct.
+	// Defer applying events so the policy can be consulted at each version
+	// the save produces. This is set on a copy: opts belongs to the caller,
+	// and mutating it would leak SkipApply into every later save that reuses
+	// the same struct.
 	innerOpts := SaveOptions{}
 	if opts != nil {
 		innerOpts = *opts
@@ -305,6 +310,8 @@ func (s *SnapshottingStore[S]) Save(ctx context.Context, aggregate *Aggregate[S]
 	}
 
 	now := time.Now().UTC()
+
+	snapshotDue := false
 
 	for {
 		err := aggregate.applyNext()
@@ -319,33 +326,40 @@ func (s *SnapshottingStore[S]) Save(ctx context.Context, aggregate *Aggregate[S]
 			}
 		}
 
-		if !s.policy.ShouldSnapshot(aggregate.ID(), aggregate.Version(), now) {
-			continue
-		}
-
-		log.Debug("taking snapshot", "version", aggregate.Version())
-
-		data, err := s.stateCodec.MarshalState(aggregate.State())
-		if err != nil {
-			log.Error("failed to marshal snapshot", "error", err)
-			continue
-		}
-
-		// The codec's output may alias memory the state still holds — the
-		// StateCodec contract permits it — and the writer may retain what it
-		// is handed, so the payload is detached before it crosses.
-		if err := s.writer.WriteSnapshot(ctx, &snapshotstore.AggregateSnapshot{
-			AggregateID:      aggregate.ID(),
-			AggregateVersion: aggregate.Version(),
-			Data:             bytes.Clone(data),
-			DataContentType:  s.stateCodec.ContentType(),
-		}); err != nil {
-			log.Error("failed to write snapshot", "error", err)
-			continue
+		if s.policy.ShouldSnapshot(aggregate.ID(), aggregate.Version(), now) {
+			snapshotDue = true
 		}
 	}
 
+	if snapshotDue {
+		s.takeSnapshot(ctx, log, aggregate)
+	}
+
 	return nil
+}
+
+// takeSnapshot writes a snapshot of the aggregate's current state at its
+// current version. A failure is logged rather than returned.
+func (s *SnapshottingStore[S]) takeSnapshot(ctx context.Context, log estoria.Logger, aggregate *Aggregate[S]) {
+	log.Debug("taking snapshot", "version", aggregate.Version())
+
+	data, err := s.stateCodec.MarshalState(aggregate.State())
+	if err != nil {
+		log.Error("failed to marshal snapshot", "error", err)
+		return
+	}
+
+	// The codec's output may alias memory the state still holds — the
+	// StateCodec contract permits it — and the writer may retain what it
+	// is handed, so the payload is detached before it crosses.
+	if err := s.writer.WriteSnapshot(ctx, &snapshotstore.AggregateSnapshot{
+		AggregateID:      aggregate.ID(),
+		AggregateVersion: aggregate.Version(),
+		Data:             bytes.Clone(data),
+		DataContentType:  s.stateCodec.ContentType(),
+	}); err != nil {
+		log.Error("failed to write snapshot", "error", err)
+	}
 }
 
 // A SnapshottingStoreOption is a functional option for configuring a SnapshottingStore.
